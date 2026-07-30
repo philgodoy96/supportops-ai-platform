@@ -1,0 +1,109 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgresql:
+        image: postgres:18.0-alpine
+        env:
+          POSTGRES_DB: supportops
+          POSTGRES_USER: supportops
+          POSTGRES_PASSWORD: supportops-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U supportops -d supportops"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 5s
+
+      qdrant:
+        image: qdrant/qdrant:v1.15.5
+        ports:
+          - 6333:6333
+          - 6334:6334
+        options: >-
+          --health-cmd "bash -c ':> /dev/tcp/127.0.0.1/6333'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 5s
+
+    env:
+      SUPPORTOPS_ENVIRONMENT: test
+      SUPPORTOPS_APPLICATION_NAME: SupportOps AI Platform
+      SUPPORTOPS_APPLICATION_VERSION: 0.1.0
+      SUPPORTOPS_LOG_LEVEL: INFO
+      SUPPORTOPS_API_HOST: 127.0.0.1
+      SUPPORTOPS_API_PORT: 8000
+      SUPPORTOPS_POSTGRESQL_URL: postgresql+asyncpg://supportops:supportops-ci@localhost:5432/supportops
+      SUPPORTOPS_POSTGRESQL_POOL_SIZE: 5
+      SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW: 10
+      SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS: 10
+      SUPPORTOPS_QDRANT_URL: http://localhost:6333
+      SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.30"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          prune-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Validate dependency lock
+        run: uv lock --check
+
+      - name: Run Ruff lint
+        run: uv run ruff check .
+
+      - name: Verify Ruff formatting
+        run: uv run ruff format --check .
+
+      - name: Run mypy
+        run: uv run mypy
+
+      - name: Run unit tests
+        run: uv run pytest -m "not integration"
+
+      - name: Validate Alembic heads
+        run: uv run alembic heads
+
+      - name: Validate Alembic database connectivity
+        run: uv run alembic current
+
+      - name: Run integration tests
+        run: uv run pytest -m integration
+
+      - name: Build application image
+        run: docker build --tag supportops-ai-platform:ci .
