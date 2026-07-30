@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from supportops.core.request_context import get_request_context
 from supportops.core.settings import ApplicationEnvironment, LogLevel
 
 
@@ -15,6 +16,7 @@ class JsonFormatter(logging.Formatter):
         {
             "args",
             "asctime",
+            "correlation_id",
             "created",
             "exc_info",
             "exc_text",
@@ -32,6 +34,7 @@ class JsonFormatter(logging.Formatter):
             "process",
             "processName",
             "relativeCreated",
+            "request_id",
             "stack_info",
             "thread",
             "threadName",
@@ -60,6 +63,11 @@ class JsonFormatter(logging.Formatter):
         for attribute, value in record.__dict__.items():
             if attribute not in self._reserved_attributes and not attribute.startswith("_"):
                 payload[attribute] = value
+
+        context = get_request_context()
+        if context is not None:
+            payload["request_id"] = str(context.request_id)
+            payload["correlation_id"] = str(context.correlation_id)
 
         if record.exc_info is not None:
             payload["exception"] = self.formatException(record.exc_info)
