@@ -11,12 +11,40 @@ from supportops.core.settings import (
     Settings,
 )
 
+SUPPORTOPS_ENVIRONMENT_VARIABLES = (
+    "SUPPORTOPS_ENVIRONMENT",
+    "SUPPORTOPS_APPLICATION_NAME",
+    "SUPPORTOPS_APPLICATION_VERSION",
+    "SUPPORTOPS_LOG_LEVEL",
+    "SUPPORTOPS_API_HOST",
+    "SUPPORTOPS_API_PORT",
+    "SUPPORTOPS_POSTGRESQL_URL",
+    "SUPPORTOPS_POSTGRESQL_POOL_SIZE",
+    "SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW",
+    "SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS",
+    "SUPPORTOPS_QDRANT_URL",
+    "SUPPORTOPS_QDRANT_API_KEY",
+    "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings_from_process_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent process environment variables from affecting settings unit tests."""
+
+    for variable_name in SUPPORTOPS_ENVIRONMENT_VARIABLES:
+        monkeypatch.delenv(variable_name, raising=False)
+
 
 def create_required_settings(**overrides: object) -> Settings:
     """Create settings with the required infrastructure values."""
 
     values: dict[str, object] = {
-        "postgresql_url": "postgresql+asyncpg://supportops:local@localhost:5432/supportops",
+        "postgresql_url": (
+            "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+        ),
         "qdrant_url": "http://localhost:6333",
     }
     values.update(overrides)
@@ -97,22 +125,17 @@ def test_settings_reject_invalid_numeric_configuration(
 
 
 def test_settings_require_postgresql_url() -> None:
-    settings_type = cast(Any, Settings)
-
     with pytest.raises(ValidationError):
-        settings_type(
-            _env_file=None,
-            qdrant_url="http://localhost:6333",
-        )
+        Settings(_env_file=None, qdrant_url="http://localhost:6333")
 
 
 def test_settings_require_qdrant_url() -> None:
-    settings_type = cast(Any, Settings)
-
     with pytest.raises(ValidationError):
-        settings_type(
+        Settings(
             _env_file=None,
-            postgresql_url="postgresql+asyncpg://supportops:local@localhost:5432/supportops",
+            postgresql_url=(
+                "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+            ),
         )
 
 
