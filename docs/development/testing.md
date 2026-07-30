@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies repository foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies repository foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -25,6 +25,15 @@ They validate:
 - settings defaults and validation;
 - invalid configuration behavior;
 - structured JSON logging;
+- request and correlation context primitives;
+- contextvars cleanup and async-task isolation;
+- structured logging enrichment;
+- response trace headers;
+- correlation propagation and invalid-value fallback;
+- incoming request-ID rejection;
+- downstream trace-header spoofing prevention;
+- request completion logging;
+- unexpected exception behavior;
 - application construction;
 - application lifecycle ownership;
 - PostgreSQL engine and session factories;
@@ -233,6 +242,31 @@ Readiness tests verify:
 Dependency checks execute concurrently.
 
 The total readiness duration should not become the sum of sequential dependency timeouts.
+
+## HTTP request traceability tests
+
+HTTP request traceability tests verify externally observable guarantees:
+
+- every request receives a server-generated UUID v4 `X-Request-ID`;
+- inbound `X-Request-ID` values are ignored;
+- a valid inbound `X-Correlation-ID` UUID is propagated;
+- absent or invalid correlation values fall back to the request ID;
+- both identifiers are returned as response headers;
+- active identifiers enrich structured JSON logs;
+- context is cleaned up after normal and exceptional completion;
+- async tasks remain isolated from each other;
+- downstream handlers cannot override trace response headers;
+- completion logs include safe operational metadata only;
+- unexpected exceptions retain safe `500` behavior with trace headers;
+- request bodies and raw invalid header values are not logged.
+
+These tests do not require Docker, PostgreSQL, Qdrant, or network services.
+
+Run the focused request-traceability suite:
+
+```powershell
+uv run pytest tests/unit/core/test_request_context.py tests/unit/core/test_logging.py tests/unit/api/test_application.py tests/unit/api/test_request_context_middleware.py
+```
 
 ## Failure-path testing
 
@@ -515,8 +549,10 @@ New tests should:
 - use live infrastructure only when integration value is real;
 - assert safe failure behavior;
 - verify cleanup where resources are owned;
+- verify context cleanup after normal and exceptional completion;
+- use fixed UUIDs where deterministic identifier assertions are needed;
 - avoid implementation-only assertions;
-- avoid arbitrary sleeps;
+- avoid arbitrary sleeps, including for async isolation;
 - avoid ordering dependencies;
 - avoid hidden reliance on `.env`;
 - avoid shared mutable global state;

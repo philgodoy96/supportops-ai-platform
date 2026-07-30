@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase documents the architecture and runtime direction only. Business modules, asynchronous processing, retrieval, and AI orchestration are introduced in later phases.
+The current repository phase establishes the operational foundation, including HTTP request traceability. Business modules, asynchronous processing, retrieval, and AI orchestration are introduced in later phases.
 
 ## Architectural principles
 
@@ -64,6 +64,8 @@ Its responsibilities include:
 - defining OpenAPI metadata;
 - managing application startup and shutdown;
 - exposing operational health endpoints;
+- binding per-request trace context;
+- returning trace response headers;
 - translating application outcomes into HTTP responses.
 
 The API boundary may depend on `supportops.core` and `supportops.infrastructure`.
@@ -78,6 +80,7 @@ Its initial responsibilities include:
 
 - validated environment-based settings;
 - logging configuration;
+- provider-independent request and correlation context;
 - shared operational configuration types.
 
 The core package is not a generic location for unrelated helpers. New code belongs in `supportops.core` only when its responsibility is genuinely cross-cutting and provider-independent.
@@ -304,9 +307,18 @@ The logging baseline supports:
 - application environment;
 - event-oriented messages;
 - exception information;
-- future request and correlation context.
+- active request and correlation identifiers.
 
-Request identifiers and correlation identifiers are intentionally deferred.
+HTTP request traceability uses the following semantics:
+
+- every HTTP request receives a server-generated UUID v4 request ID;
+- a valid incoming `X-Correlation-ID` UUID is propagated;
+- an absent or invalid correlation ID defaults to the request ID;
+- both identifiers are returned through `X-Request-ID` and `X-Correlation-ID`;
+- active identifiers are added automatically to structured JSON logs;
+- context is scoped with `contextvars` and reset after request completion;
+- completion logs contain safe operational metadata only;
+- raw incoming invalid identifiers and request bodies are not logged.
 
 No external logging platform is introduced during the repository foundation phase.
 
@@ -322,6 +334,13 @@ They validate behavior such as:
 
 - settings validation;
 - application construction;
+- request-context creation;
+- async isolation and cleanup;
+- response trace headers;
+- correlation propagation;
+- spoofing prevention;
+- exception behavior;
+- completion-log coverage;
 - liveness behavior;
 - readiness aggregation;
 - dependency failure handling.
@@ -350,7 +369,13 @@ The repository foundation establishes the following security baseline:
 - no secret logging;
 - health responses without credential disclosure;
 - bounded dependency checks;
-- explicit lifecycle handling.
+- explicit lifecycle handling;
+- server-owned request IDs;
+- strict UUID parsing for incoming correlation IDs;
+- downstream response-header override protection;
+- omission of request bodies from completion logs.
+
+Trace identifiers support observability and supportability. They are not authentication or authorization controls.
 
 Authentication, authorization, tenant isolation, and public deployment hardening are intentionally deferred to later implementation phases.
 
