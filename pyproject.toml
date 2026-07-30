@@ -94,6 +94,7 @@ minversion = "9.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
+    "--import-mode=importlib",
     "--strict-config",
     "--strict-markers",
     "-ra",
