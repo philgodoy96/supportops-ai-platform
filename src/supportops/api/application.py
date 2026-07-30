@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 
 from supportops.api.lifespan import application_lifespan
+from supportops.api.middleware.request_context import RequestContextMiddleware
 from supportops.api.router import api_router
 from supportops.core.settings import Settings, get_settings
 
@@ -24,6 +25,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         ),
     )
 
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(api_router)
 
     return app
