@@ -6,6 +6,10 @@ from uuid import UUID
 from supportops.modules.workspaces.domain.models import Workspace
 
 
+class WorkspaceSlugConflictError(Exception):
+    """Raised when a workspace slug violates its uniqueness invariant."""
+
+
 class WorkspaceRepository(Protocol):
     """Persistence operations required by workspace use cases."""
 
