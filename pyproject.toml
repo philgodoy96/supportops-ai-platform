@@ -28,7 +28,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "alembic==1.18.5",
+    "alembic[tz]==1.18.5",
     "asyncpg==0.31.0",
     "fastapi==0.139.2",
     "pydantic==2.13.3",

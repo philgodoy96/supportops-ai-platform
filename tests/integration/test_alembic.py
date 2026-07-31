@@ -5,12 +5,13 @@ import sys
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from supportops.core.settings import Settings
-from supportops.infrastructure.postgresql import Base
 
 pytestmark = pytest.mark.integration
+
+EXPECTED_HEAD = "6d9f0a2b4c31"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -24,11 +25,25 @@ def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_alembic_has_no_migration_heads() -> None:
+async def relation_exists(
+    engine: AsyncEngine,
+    relation_name: str,
+) -> bool:
+    """Return whether the named relation is registered in PostgreSQL."""
+
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text("SELECT to_regclass(:relation_name)"),
+            {"relation_name": relation_name},
+        )
+        return result.scalar_one() is not None
+
+
+def test_alembic_reports_expected_head() -> None:
     result = run_alembic_command("heads")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == ""
+    assert result.stdout.strip() == f"{EXPECTED_HEAD} (head)"
 
 
 def test_alembic_current_connects_to_postgresql() -> None:
@@ -37,25 +52,44 @@ def test_alembic_current_connects_to_postgresql() -> None:
     assert result.returncode == 0, result.stderr
 
 
-async def test_shared_metadata_contains_no_business_tables() -> None:
-    assert Base.metadata.tables == {}
-
-
-async def test_alembic_version_table_is_not_created_without_revisions() -> None:
+async def test_alembic_upgrade_creates_business_tables() -> None:
     settings = Settings()
     engine = create_async_engine(str(settings.postgresql_url))
 
+    upgrade = run_alembic_command("upgrade", "head")
+    assert upgrade.returncode == 0, upgrade.stderr
+
     try:
-        async with engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    """
-                    SELECT to_regclass('public.alembic_version')
-                    """
-                )
-            )
-            alembic_version_table = result.scalar_one()
+        assert await relation_exists(engine, "public.alembic_version")
+        assert await relation_exists(engine, "public.workspaces")
+        assert await relation_exists(engine, "public.tickets")
     finally:
         await engine.dispose()
 
-    assert alembic_version_table is None
+
+async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade() -> None:
+    settings = Settings()
+    engine = create_async_engine(str(settings.postgresql_url))
+
+    upgrade = run_alembic_command("upgrade", "head")
+    assert upgrade.returncode == 0, upgrade.stderr
+
+    downgrade = run_alembic_command("downgrade", "base")
+    assert downgrade.returncode == 0, downgrade.stderr
+
+    try:
+        assert not await relation_exists(engine, "public.tickets")
+        assert not await relation_exists(engine, "public.workspaces")
+    finally:
+        await engine.dispose()
+
+    reupgrade = run_alembic_command("upgrade", "head")
+    assert reupgrade.returncode == 0, reupgrade.stderr
+
+    engine = create_async_engine(str(settings.postgresql_url))
+    try:
+        assert await relation_exists(engine, "public.alembic_version")
+        assert await relation_exists(engine, "public.workspaces")
+        assert await relation_exists(engine, "public.tickets")
+    finally:
+        await engine.dispose()
