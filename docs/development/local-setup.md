@@ -2,20 +2,20 @@
 
 ## Purpose
 
-This guide describes how to prepare and run the SupportOps AI Platform repository foundation in a local development environment.
+This guide describes how to prepare and run the SupportOps AI Platform locally.
 
-The current foundation includes:
+The current platform includes:
 
 - Python dependency management with `uv`;
 - PostgreSQL and Qdrant through Docker Compose;
 - a FastAPI application process;
 - liveness and readiness endpoints;
-- structured JSON logging;
-- Alembic migration tooling;
+- structured JSON logging with HTTP request traceability;
+- Alembic migrations for workspace and ticket tables;
 - unit and integration tests;
 - local quality checks.
 
-Business workflows and AI capabilities are intentionally outside the current implementation scope.
+Workspace and ticket HTTP endpoints, asynchronous processing, and AI capabilities are intentionally outside the current implementation scope.
 
 ## Prerequisites
 
@@ -244,29 +244,26 @@ docker compose ps
 
 ## Run Alembic commands
 
-Validate that Alembic can load application metadata:
+Migration lifecycle commands:
 
 ```powershell
-uv run alembic heads
-uv run alembic branches
-uv run alembic history
-```
-
-The current foundation has no revisions.
-
-Validate database connectivity:
-
-```powershell
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+uv run alembic check
 uv run alembic current
+uv run alembic heads
 ```
+
+The current head creates the `workspaces` and `tickets` tables.
+
+`alembic downgrade` must only run against the local development or test database. Do not run downgrades against shared or production databases.
 
 Validate offline migration execution:
 
 ```powershell
 uv run alembic upgrade head --sql
 ```
-
-Do not create placeholder revisions or empty migrations.
 
 ## Inspect the database schema
 
@@ -278,7 +275,7 @@ docker compose exec postgresql `
   -c "\dt"
 ```
 
-The repository foundation should contain no business tables.
+After `alembic upgrade head`, the schema includes `workspaces` and `tickets`.
 
 ## Run quality checks
 
@@ -356,8 +353,10 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest -m "not integration"
+uv run alembic upgrade head
 uv run alembic heads
 uv run alembic current
+uv run alembic check
 uv run pytest -m integration
 docker compose config --quiet
 docker build --tag supportops-ai-platform:local .
