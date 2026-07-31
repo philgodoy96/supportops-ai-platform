@@ -1,0 +1,99 @@
+"""Stable HTTP responses for expected application errors."""
+
+from collections.abc import Callable, Coroutine
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from supportops.core.request_context import get_request_context
+from supportops.modules.workspaces.application.errors import (
+    WorkspaceNotFoundError,
+    WorkspaceSlugConflictApplicationError,
+)
+
+
+class ErrorDetail(BaseModel):
+    """Machine-readable expected error details."""
+
+    code: str
+    message: str
+    request_id: str
+
+
+class ErrorResponse(BaseModel):
+    """Stable expected error response envelope."""
+
+    error: ErrorDetail
+
+
+ErrorHandler = Callable[
+    [Request, Exception],
+    Coroutine[Any, Any, JSONResponse],
+]
+
+
+def register_error_handlers(app: FastAPI) -> None:
+    """Register handlers for expected application errors."""
+
+    app.add_exception_handler(
+        WorkspaceNotFoundError,
+        _workspace_not_found_handler,
+    )
+    app.add_exception_handler(
+        WorkspaceSlugConflictApplicationError,
+        _workspace_slug_conflict_handler,
+    )
+
+
+async def _workspace_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="workspace_not_found",
+        message="Workspace was not found.",
+    )
+
+
+async def _workspace_slug_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="workspace_slug_conflict",
+        message="Workspace slug is already in use.",
+    )
+
+
+def _expected_error_response(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> JSONResponse:
+    context = get_request_context()
+
+    request_id = str(context.request_id) if context is not None else "unavailable"
+
+    response = ErrorResponse(
+        error=ErrorDetail(
+            code=code,
+            message=message,
+            request_id=request_id,
+        )
+    )
+
+    return JSONResponse(
+        status_code=status_code,
+        content=response.model_dump(),
+    )

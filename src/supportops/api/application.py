@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from supportops.api.errors import register_error_handlers
 from supportops.api.lifespan import application_lifespan
 from supportops.api.middleware.request_context import RequestContextMiddleware
 from supportops.api.router import api_router
@@ -25,6 +26,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         ),
     )
 
+    register_error_handlers(app)
     app.add_middleware(RequestContextMiddleware)
     app.include_router(api_router)
 
