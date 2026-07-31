@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, including HTTP request traceability. Business modules, asynchronous processing, retrieval, and AI orchestration are introduced in later phases.
+The current repository phase establishes the operational foundation, including HTTP request traceability, and the first workspace-scoped persistence slice. Workspace and ticket HTTP endpoints, asynchronous processing, retrieval, and AI orchestration remain later phases.
 
 ## Architectural principles
 
@@ -44,13 +44,16 @@ The worker entry point and processing behavior are not implemented in the reposi
 
 ## Planned foundation package boundaries
 
-The initial package structure is intended to be organized around framework composition, shared application configuration, and infrastructure integration.
+The package structure is organized around framework composition, shared application configuration, infrastructure integration, and vertical business modules.
 
 ```text
 src/supportops/
 ├── api/
 ├── core/
-└── infrastructure/
+├── infrastructure/
+└── modules/
+    ├── workspaces/
+    └── tickets/
 ```
 
 ### API boundary
@@ -68,19 +71,22 @@ Its responsibilities include:
 - returning trace response headers;
 - translating application outcomes into HTTP responses.
 
-The API boundary may depend on `supportops.core` and `supportops.infrastructure`.
+The API boundary may depend on `supportops.core`, `supportops.infrastructure`, and future application services.
 
 Infrastructure and core packages must not depend on the API package.
+
+Workspace and ticket HTTP business endpoints are not yet implemented.
 
 ### Core boundary
 
 `supportops.core` contains cross-cutting capabilities that are independent from business modules and external providers.
 
-Its initial responsibilities include:
+Its responsibilities include:
 
 - validated environment-based settings;
 - logging configuration;
 - provider-independent request and correlation context;
+- application transaction boundary contracts;
 - shared operational configuration types.
 
 The core package is not a generic location for unrelated helpers. New code belongs in `supportops.core` only when its responsibility is genuinely cross-cutting and provider-independent.
@@ -89,7 +95,7 @@ The core package is not a generic location for unrelated helpers. New code belon
 
 `supportops.infrastructure` owns integrations with external systems and technical persistence frameworks.
 
-The initial infrastructure packages are:
+The infrastructure packages include:
 
 ```text
 supportops.infrastructure.postgresql
@@ -101,8 +107,11 @@ The PostgreSQL package owns:
 - async SQLAlchemy engine configuration;
 - async session creation;
 - declarative metadata;
+- persistence model registration;
 - connection lifecycle;
-- database connectivity checks.
+- database connectivity checks;
+- constraint-name inspection helpers;
+- the SQLAlchemy transaction adapter.
 
 The Qdrant package owns:
 
@@ -113,28 +122,58 @@ The Qdrant package owns:
 
 Infrastructure packages must not contain business rules.
 
-## Future business modules
+## Business modules
 
-Business modules will be introduced under:
+Business modules live under:
 
 ```text
 supportops.modules
 ```
 
-The package is intentionally not created during the repository foundation phase because no concrete business capability exists yet.
+The implemented vertical modules are:
 
-Future modules are expected to own cohesive business concerns such as:
+```text
+supportops.modules.workspaces
+supportops.modules.tickets
+```
 
-- workspace-scoped support operations;
-- support ticket processing;
-- structured classification;
-- retrieval workflows;
-- controlled orchestration;
-- approval workflows;
-- usage accounting;
-- evaluation.
+Each module follows the intended internal layout:
 
-Each module should contain only abstractions and behavior required by its responsibility. Empty modules and speculative interfaces are avoided.
+```text
+domain/
+application/   # future
+infrastructure/
+api/           # future
+```
+
+### Domain
+
+Domain packages own persistence-independent frozen entities, invariants, and repository protocols.
+
+Workspace and Ticket entities are frozen dataclasses. They do not depend on SQLAlchemy session state.
+
+### Application
+
+Application packages will own use cases and transaction orchestration.
+
+Application directories are not yet created inside the current modules. Transaction boundary ownership is already defined through application-facing contracts and the SQLAlchemy adapter.
+
+### Infrastructure
+
+Module infrastructure packages own:
+
+- SQLAlchemy persistence records;
+- explicit domain-to-record and record-to-domain mapping;
+- named PostgreSQL constraints and indexes;
+- async repository implementations.
+
+Repositories flush pending changes and translate expected named constraints into stable domain-facing errors. They do not commit independently.
+
+### API
+
+Module API packages will own HTTP routes, request and response schemas, and transport-level error translation.
+
+Those packages are not yet created. Workspace and ticket HTTP endpoints remain future work.
 
 ## Dependency direction
 
@@ -150,16 +189,21 @@ Domain behavior and ports
 Infrastructure adapters
 ```
 
-During the repository foundation phase, business and application service layers do not yet exist. The first executable foundation commit is intended to implement this dependency direction:
+The current executable dependency shape is:
 
 ```text
 supportops.api
     ↓
 supportops.core
 supportops.infrastructure
+
+supportops.modules.*.infrastructure
+    ↓
+supportops.modules.*.domain
+supportops.infrastructure.postgresql
 ```
 
-Future infrastructure adapters may implement interfaces owned by application or domain layers, but application behavior must not become coupled to provider-specific implementations.
+Future module application and API layers will sit above domain ports. Infrastructure adapters implement interfaces owned by domain or application layers, but application behavior must not become coupled to provider-specific implementations.
 
 Circular dependencies are not permitted.
 
@@ -180,7 +224,23 @@ This decision supports:
 - idempotency;
 - future PostgreSQL-backed asynchronous processing.
 
-No business tables are introduced during the repository foundation phase.
+The first business migration creates:
+
+- `workspaces`;
+- `tickets`.
+
+Implemented ownership and integrity rules include:
+
+- persistence-independent frozen Workspace and Ticket domain entities;
+- SQLAlchemy records with explicit mapping;
+- repository protocols, including workspace-scoped ticket `get` and `list`;
+- application-owned transaction boundaries;
+- repository flush without commit;
+- PostgreSQL named constraints, including unique workspace slugs and workspace-scoped external references;
+- a required foreign key from `tickets.workspace_id` to `workspaces.id`;
+- a workspace-leading listing index for deterministic ticket ordering.
+
+Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
 
 ### Qdrant
 
@@ -190,14 +250,14 @@ It will store vectorized representations required for semantic retrieval, but it
 
 The retrieval index must remain reproducible from source content and ingestion metadata stored in authoritative systems.
 
-During the repository foundation phase, Qdrant is limited to:
+Qdrant is limited to:
 
 - local service configuration;
 - environment-based client configuration;
 - lifecycle management;
 - bounded connectivity checks.
 
-No collections, embeddings, ingestion pipelines, or retrieval behavior are implemented.
+No collections, embeddings, ingestion pipelines, or retrieval behavior are implemented. Qdrant is not involved in workspace or ticket persistence.
 
 ## Asynchronous processing direction
 
@@ -343,7 +403,12 @@ They validate behavior such as:
 - completion-log coverage;
 - liveness behavior;
 - readiness aggregation;
-- dependency failure handling.
+- dependency failure handling;
+- domain invariants;
+- ORM mapping and metadata;
+- named constraints;
+- persistence model registration;
+- PostgreSQL constraint-name inspection.
 
 ### Integration tests
 
@@ -355,7 +420,9 @@ They validate:
 - real Qdrant connectivity;
 - readiness against live dependencies;
 - dependency failure behavior;
-- Alembic configuration.
+- Alembic upgrade, downgrade, and re-upgrade;
+- workspace and ticket repository behavior;
+- concurrency-sensitive uniqueness enforcement.
 
 The test suite must verify externally observable behavior rather than reproduce implementation details.
 
@@ -377,7 +444,9 @@ The repository foundation establishes the following security baseline:
 
 Trace identifiers support observability and supportability. They are not authentication or authorization controls.
 
-Authentication, authorization, tenant isolation, and public deployment hardening are intentionally deferred to later implementation phases.
+Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
+
+Authentication, authorization, authenticated tenant isolation, and public deployment hardening are intentionally deferred to later implementation phases.
 
 ## Scaling considerations
 
@@ -396,7 +465,7 @@ Service extraction is not a default objective. It should be driven by clear owne
 
 ## Repository foundation scope
 
-The repository foundation phase is expected to establish:
+The repository foundation and first persistence slice establish:
 
 - project and dependency management;
 - local PostgreSQL and Qdrant infrastructure;
@@ -407,6 +476,7 @@ The repository foundation phase is expected to establish:
 - liveness and readiness endpoints;
 - infrastructure connectivity checks;
 - SQLAlchemy and Alembic foundations;
+- workspace and ticket domain persistence;
 - unit and integration testing;
 - continuous integration;
 - architecture and development documentation.
@@ -415,11 +485,13 @@ The repository foundation phase is expected to establish:
 
 The current phase does not implement:
 
-- business entities;
-- business database tables;
-- workspace isolation;
+- workspace or ticket HTTP endpoints;
+- application services inside the current modules;
+- HTTP cursor encoding;
 - authentication or authorization;
+- authenticated tenant isolation;
 - asynchronous worker behavior;
+- AgentRun;
 - job queues;
 - LLM calls;
 - prompt execution;
@@ -437,4 +509,4 @@ The current phase does not implement:
 - public cloud deployment;
 - infrastructure as code.
 
-These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep the foundation independently reviewable.
+These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

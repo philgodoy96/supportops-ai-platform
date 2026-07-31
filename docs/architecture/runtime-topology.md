@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This document describes the intended runtime topology of SupportOps AI Platform for the repository foundation phase and the planned evolution toward separate API and worker processes.
+This document describes the intended runtime topology of SupportOps AI Platform for the current foundation and workspace-scoped persistence phase, and the planned evolution toward separate API and worker processes.
 
 The current topology is intentionally small. It provides the minimum operational foundation required for reliable local development, testing, and future platform growth without introducing premature distributed infrastructure.
 
 ## Current runtime components
 
-The repository foundation is designed around three runtime components:
+The current runtime is designed around three components:
 
 - the FastAPI application process;
 - PostgreSQL;
@@ -60,20 +60,25 @@ Invalid required configuration remains a startup error.
 
 PostgreSQL is the transactional source of truth for the platform.
 
-During the repository foundation phase, PostgreSQL is used only to establish:
+PostgreSQL currently owns:
 
 - local service provisioning;
 - connection configuration;
 - async engine initialization;
-- connection lifecycle;
+- process-owned engine and session factory lifecycle;
 - connectivity validation;
-- Alembic compatibility.
+- Alembic migrations;
+- `workspaces` and `tickets` tables;
+- the workspace ownership foreign key on tickets;
+- uniqueness constraints for workspace slugs and workspace-scoped external references;
+- the workspace-leading ticket listing index.
 
-No business tables are created.
+Repository operations are designed to use request-scoped async sessions in the future API process. The engine and session factory remain process-owned.
 
-Future phases are expected to use PostgreSQL for:
+Workspace and ticket HTTP endpoints are not yet implemented, so request-scoped session injection is not exposed through business routes today. Integration tests exercise repositories with explicit async sessions and the transaction adapter.
 
-- support operations state;
+Future phases are expected to extend PostgreSQL ownership for:
+
 - workflow state;
 - approvals;
 - audit records;
@@ -84,7 +89,7 @@ Future phases are expected to use PostgreSQL for:
 
 Qdrant is a rebuildable retrieval index.
 
-During the repository foundation phase, Qdrant is used only to establish:
+During the current phase, Qdrant is used only to establish:
 
 - local service provisioning;
 - client configuration;
@@ -92,6 +97,8 @@ During the repository foundation phase, Qdrant is used only to establish:
 - connectivity validation.
 
 No collections, vectors, embeddings, ingestion workflows, or retrieval behavior are created.
+
+Qdrant is not involved in workspace or ticket persistence. Ticket ownership, uniqueness, listing, and repository behavior are PostgreSQL concerns only.
 
 Future retrieval data must remain reproducible from authoritative source content.
 
@@ -288,7 +295,10 @@ Integration tests validate:
 - real Qdrant connectivity;
 - readiness success;
 - readiness failure;
-- Alembic configuration.
+- Alembic upgrade, downgrade, and re-upgrade;
+- workspace repository persistence;
+- ticket repository persistence and workspace scoping;
+- concurrency-sensitive uniqueness enforcement.
 
 ## Continuous integration topology
 
@@ -429,7 +439,7 @@ Before public production deployment, the platform will require additional decisi
 - backup and recovery;
 - centralized telemetry.
 
-These concerns are intentionally outside the repository foundation phase.
+These concerns are intentionally outside the current implementation phase.
 
 ## Intentionally excluded runtime components
 

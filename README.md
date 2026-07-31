@@ -6,27 +6,38 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation is implemented.
+The repository foundation and the first workspace-scoped persistence slice are implemented.
 
 The current platform includes:
 
 - reproducible Python dependency management with `uv`;
 - a Python 3.12 `src` package layout;
 - validated environment-based configuration;
-- structured JSON logging;
+- structured JSON logging with HTTP request traceability;
 - a FastAPI application factory and explicit lifecycle management;
 - local PostgreSQL and Qdrant services through Docker Compose;
 - async SQLAlchemy and Qdrant client lifecycle foundations;
 - liveness and readiness endpoints;
 - bounded and sanitized infrastructure health checks;
-- Alembic migration infrastructure;
+- persistence-independent Workspace and Ticket domain entities;
+- SQLAlchemy persistence records with explicit domain mapping;
+- PostgreSQL `workspaces` and `tickets` tables;
+- workspace slug uniqueness;
+- workspace-scoped ticket external-reference uniqueness;
+- workspace-scoped ticket repository contracts;
+- async PostgreSQL repository implementations;
+- a reversible Alembic migration for workspace and ticket tables;
+- an application-owned transaction adapter;
+- repository integration and concurrency-sensitive tests;
 - unit and integration tests;
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
 - professional architecture and development documentation.
 
-Business workflows, asynchronous processing, retrieval, and AI orchestration are planned for later implementation phases and are not represented as complete.
+Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
+
+Workspace and ticket HTTP endpoints, application services, API error contracts, HTTP cursor encoding, asynchronous processing, AgentRun, LLM classification, retrieval, LangGraph, tools, approvals, observability, and evaluation remain planned and are not represented as complete.
 
 ## Engineering goals
 
@@ -128,9 +139,23 @@ The PostgreSQL integration includes:
 - `SELECT 1` connectivity checks;
 - shared declarative metadata;
 - deterministic constraint naming;
-- Alembic async migration configuration.
+- Alembic async migration configuration;
+- registered workspace and ticket persistence models;
+- a reversible migration that creates `workspaces` and `tickets`.
 
-No business tables exist in the repository foundation.
+### Workspace and ticket persistence
+
+The first business modules provide:
+
+- frozen Workspace and Ticket domain entities with validated invariants;
+- SQLAlchemy records that own table definitions, constraints, indexes, and mapping;
+- repository protocols with workspace-scoped ticket access;
+- async SQLAlchemy repository implementations that flush without committing;
+- named uniqueness constraints for workspace slugs and workspace-scoped external references;
+- a minimal SQLAlchemy transaction adapter for application-owned boundaries;
+- repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
+
+Workspace and ticket HTTP endpoints are not implemented.
 
 ### Qdrant foundation
 
@@ -150,12 +175,16 @@ The repository includes:
 
 - unit tests isolated from Docker and network services;
 - integration tests against real PostgreSQL and Qdrant services;
+- domain invariant tests;
+- ORM mapping, named-constraint, and model-registration tests;
+- repository integration and concurrency-sensitive tests;
+- Alembic upgrade and downgrade coverage;
 - settings validation tests;
 - lifecycle tests;
 - dependency failure-path tests;
 - liveness and readiness tests;
 - response sanitization tests;
-- Alembic configuration tests;
+- HTTP request traceability tests;
 - Ruff linting and formatting checks;
 - strict mypy validation;
 - Docker image build validation;
@@ -163,23 +192,27 @@ The repository includes:
 
 ## Planned platform modules
 
-Future implementation phases are expected to introduce bounded modules for:
+The repository already includes bounded `workspaces` and `tickets` modules for domain entities, repository contracts, and PostgreSQL persistence.
 
-- workspace-scoped support operations;
-- support ticket intake and processing;
+Future implementation phases are expected to introduce or extend modules for:
+
+- workspace and ticket HTTP endpoints;
+- application services and API error contracts;
+- HTTP cursor encoding at the API boundary;
 - structured LLM classification;
 - internal runbook ingestion;
 - semantic retrieval;
 - controlled orchestration;
 - explicitly registered tools;
 - human approval workflows;
+- asynchronous processing and AgentRun;
 - usage and cost tracking;
 - AI observability;
 - retrieval and generation evaluation;
 - prompt versioning;
 - regression testing.
 
-These modules will be introduced only when they have concrete responsibilities and tested behavior.
+Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
 
 ## Repository structure
 
@@ -195,13 +228,15 @@ These modules will be introduced only when they have concrete responsibilities a
 ├── docs/
 │   ├── architecture/
 │   │   ├── overview.md
-│   │   └── runtime-topology.md
+│   │   ├── runtime-topology.md
+│   │   └── workspace-data-boundary.md
 │   ├── decisions/
 │   │   ├── 0001-use-a-modular-monolith.md
 │   │   ├── 0002-use-postgresql-as-the-source-of-truth.md
 │   │   ├── 0003-use-qdrant-as-a-rebuildable-retrieval-index.md
 │   │   ├── 0004-use-a-postgresql-backed-worker-model.md
-│   │   └── 0005-keep-ai-observability-behind-an-adapter.md
+│   │   ├── 0005-keep-ai-observability-behind-an-adapter.md
+│   │   └── 0006-establish-workspace-scoped-data-ownership.md
 │   └── development/
 │       ├── environment-variables.md
 │       ├── local-setup.md
@@ -217,10 +252,15 @@ These modules will be introduced only when they have concrete responsibilities a
 │       │   └── state.py
 │       ├── core/
 │       │   ├── logging.py
-│       │   └── settings.py
-│       └── infrastructure/
-│           ├── postgresql/
-│           └── qdrant/
+│       │   ├── request_context.py
+│       │   ├── settings.py
+│       │   └── transactions.py
+│       ├── infrastructure/
+│       │   ├── postgresql/
+│       │   └── qdrant/
+│       └── modules/
+│           ├── tickets/
+│           └── workspaces/
 ├── tests/
 │   ├── integration/
 │   └── unit/
@@ -235,7 +275,7 @@ These modules will be introduced only when they have concrete responsibilities a
 └── uv.lock
 ```
 
-Business modules are intentionally not created as empty packages. They will be introduced when the first concrete domain capability is implemented.
+Business modules are introduced when they have concrete responsibilities. Application and API layers inside the current modules remain future work until HTTP use cases are implemented.
 
 ## Local setup
 
@@ -359,16 +399,18 @@ The complete testing strategy is documented in [`docs/development/testing.md`](d
 
 ## Alembic commands
 
-Validate migration heads:
+Apply the current migration head:
+
+```powershell
+uv run alembic upgrade head
+```
+
+Validate migration heads and connectivity:
 
 ```powershell
 uv run alembic heads
-```
-
-Validate database connectivity:
-
-```powershell
 uv run alembic current
+uv run alembic check
 ```
 
 Validate offline migration execution:
@@ -377,7 +419,7 @@ Validate offline migration execution:
 uv run alembic upgrade head --sql
 ```
 
-The repository foundation intentionally contains no migration revisions and no business tables.
+The current head creates the `workspaces` and `tickets` tables. Downgrade commands must run only against the local development or test database.
 
 ## Docker image
 
@@ -423,6 +465,7 @@ The repository records the following accepted decisions:
 - [Use Qdrant as a rebuildable retrieval index](docs/decisions/0003-use-qdrant-as-a-rebuildable-retrieval-index.md)
 - [Use a PostgreSQL-backed worker model](docs/decisions/0004-use-a-postgresql-backed-worker-model.md)
 - [Keep AI observability behind an application-owned adapter](docs/decisions/0005-keep-ai-observability-behind-an-adapter.md)
+- [Establish workspace-scoped data ownership](docs/decisions/0006-establish-workspace-scoped-data-ownership.md)
 
 ## Roadmap
 
@@ -436,6 +479,7 @@ Implemented:
 - local infrastructure;
 - FastAPI bootstrap;
 - structured logging;
+- HTTP request traceability;
 - health endpoints;
 - Alembic;
 - automated tests;
@@ -444,10 +488,18 @@ Implemented:
 
 ### Support operations
 
+Implemented:
+
+- workspace and ticket domain entities;
+- PostgreSQL persistence and repository contracts;
+- workspace-scoped data ownership;
+- reversible workspace and ticket migration.
+
 Planned:
 
-- workspace boundaries;
-- support tickets;
+- workspace and ticket HTTP endpoints;
+- application services and API error contracts;
+- HTTP cursor encoding;
 - structured classification;
 - operational auditability.
 
@@ -492,13 +544,15 @@ Planned:
 
 ## Intentionally deferred capabilities
 
-The repository foundation intentionally excludes business and AI implementation.
+The following capabilities remain deferred to preserve architectural focus and avoid speculative abstractions:
 
-The following capabilities are deferred to preserve architectural focus and avoid speculative abstractions:
-
+- workspace and ticket HTTP endpoints;
+- application services and API error contracts;
+- HTTP cursor encoding;
 - authentication and authorization;
-- tenant security enforcement;
+- authenticated tenant isolation;
 - worker polling and job claiming;
+- AgentRun and asynchronous processing;
 - Redis, Celery, Kafka, and SQS;
 - LLM provider integrations;
 - prompt execution;
@@ -515,12 +569,15 @@ The following capabilities are deferred to preserve architectural focus and avoi
 - infrastructure as code;
 - Kubernetes.
 
+Workspace scoping establishes data ownership. It does not establish caller identity or secure multi-tenancy.
+
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
 ## Documentation
 
 - [Architecture overview](docs/architecture/overview.md)
 - [Runtime topology](docs/architecture/runtime-topology.md)
+- [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)
 - [Environment variables](docs/development/environment-variables.md)

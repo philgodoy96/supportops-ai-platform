@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies repository foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -42,7 +42,12 @@ They validate:
 - liveness behavior;
 - readiness aggregation;
 - readiness failure responses;
-- response sanitization.
+- response sanitization;
+- workspace and ticket domain invariants;
+- ORM mapping and metadata;
+- named PostgreSQL constraints declared on persistence records;
+- persistence model registration;
+- PostgreSQL constraint-name inspection helpers.
 
 Unit tests use mocks only at external boundaries.
 
@@ -52,7 +57,6 @@ They must not:
 - require `.env`;
 - depend on local containers;
 - mutate Docker services;
-- create business tables;
 - create Qdrant collections.
 
 Run unit tests:
@@ -67,6 +71,13 @@ Unit tests can also be run directly:
 uv run pytest tests/unit
 ```
 
+Targeted domain and persistence unit coverage:
+
+```powershell
+uv run pytest tests/unit/modules/workspaces/domain tests/unit/modules/tickets/domain
+uv run pytest tests/unit/modules/workspaces/infrastructure tests/unit/modules/tickets/infrastructure
+uv run pytest tests/unit/infrastructure/postgresql
+```
 ## Integration tests
 
 Integration tests require live PostgreSQL and Qdrant services.
@@ -80,8 +91,20 @@ They validate:
 - readiness with healthy dependencies;
 - Alembic import and configuration;
 - Alembic connectivity to PostgreSQL;
-- absence of migration heads;
-- absence of business tables.
+- migration upgrade, downgrade, and re-upgrade;
+- creation of `workspaces` and `tickets` tables;
+- workspace persistence;
+- duplicate workspace slug translation;
+- transaction rollback;
+- ticket foreign-key behavior;
+- the same external reference across workspaces;
+- duplicate external-reference rejection inside one workspace;
+- cross-workspace ticket lookup behavior;
+- deterministic ticket listing;
+- keyset repository navigation;
+- concurrent duplicate external-reference insertion.
+
+Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
 
 Integration tests are marked with:
 
@@ -98,6 +121,12 @@ docker compose ps
 
 Both services must become healthy.
 
+Apply migrations before repository integration tests when the local database is empty:
+
+```powershell
+uv run alembic upgrade head
+```
+
 Run integration tests:
 
 ```powershell
@@ -110,6 +139,13 @@ Run only the integration directory:
 uv run pytest tests/integration
 ```
 
+Targeted Alembic and repository integration coverage:
+
+```powershell
+uv run pytest tests/integration/test_alembic.py
+uv run pytest tests/integration/modules/workspaces/infrastructure
+uv run pytest tests/integration/modules/tickets/infrastructure
+```
 ## Full test suite
 
 Run all tests:
@@ -375,27 +411,26 @@ docker compose ps
 
 ## Alembic validation
 
-The current repository foundation contains no migration revisions and no business tables.
+The current migration head creates the `workspaces` and `tickets` tables.
 
-Validate migration metadata:
+Migration lifecycle commands:
 
 ```powershell
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+uv run alembic check
+uv run alembic current
 uv run alembic heads
-uv run alembic branches
-uv run alembic history
 ```
 
 Expected behavior:
 
 - commands complete successfully;
-- no heads are listed;
-- no revision history is listed.
-
-Validate live database connectivity:
-
-```powershell
-uv run alembic current
-```
+- the expected workspace and ticket revision is reported as head;
+- upgrade creates `workspaces` and `tickets`;
+- downgrade removes those business tables;
+- re-upgrade restores them.
 
 Validate offline execution:
 
@@ -413,13 +448,9 @@ docker compose exec postgresql `
   -c "\dt"
 ```
 
-Expected behavior:
+After upgrade, the schema includes `workspaces` and `tickets`.
 
-```text
-Did not find any relations.
-```
-
-Do not create empty migrations to satisfy test or tooling expectations.
+Downgrade commands must only run against the local development or test database.
 
 ## Quality checks
 
@@ -510,6 +541,7 @@ uv run mypy
 uv run pytest -m "not integration"
 uv run alembic heads
 uv run alembic current
+uv run alembic check
 uv run pytest -m integration
 docker build --tag supportops-ai-platform:ci .
 ```
@@ -531,8 +563,10 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest -m "not integration"
+uv run alembic upgrade head
 uv run alembic heads
 uv run alembic current
+uv run alembic check
 uv run pytest -m integration
 uv run pytest
 docker compose config --quiet
@@ -566,10 +600,13 @@ New failure scenarios should be automated when they can remain deterministic and
 
 Later implementation phases are expected to add tests for:
 
-- domain invariants;
-- workspace isolation;
+- workspace and ticket HTTP endpoints;
+- application services and API error contracts;
+- HTTP cursor encoding;
 - authorization boundaries;
+- authenticated tenant isolation;
 - asynchronous job claiming;
+- AgentRun behavior;
 - duplicate execution;
 - idempotency;
 - retry scheduling;
@@ -582,4 +619,4 @@ Later implementation phases are expected to add tests for:
 - prompt regression;
 - evaluation thresholds.
 
-These capabilities are not part of the current repository foundation and must not be represented as already tested.
+API tests remain planned because workspace and ticket HTTP business routes are not implemented.
