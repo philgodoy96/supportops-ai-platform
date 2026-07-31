@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation and the first workspace-scoped persistence slice are implemented.
+The repository foundation and Slice 1 workspace and ticket API are implemented.
 
 The current platform includes:
 
@@ -28,16 +28,24 @@ The current platform includes:
 - async PostgreSQL repository implementations;
 - a reversible Alembic migration for workspace and ticket tables;
 - an application-owned transaction adapter;
-- repository integration and concurrency-sensitive tests;
-- unit and integration tests;
+- workspace creation and retrieval API;
+- workspace-scoped ticket intake;
+- workspace-scoped ticket retrieval and listing;
+- versioned `/api/v1` business routes;
+- stable expected-error responses;
+- opaque cursor pagination;
+- request and correlation identifier persistence;
+- cross-workspace isolation behavior;
+- application services with command and query use cases;
+- repository, application, and API tests;
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
 - professional architecture and development documentation.
 
-Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
+Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
-Workspace and ticket HTTP endpoints, application services, API error contracts, HTTP cursor encoding, asynchronous processing, AgentRun, LLM classification, retrieval, LangGraph, tools, approvals, observability, and evaluation remain planned and are not represented as complete.
+Asynchronous processing, AgentRun lifecycle, queue claiming, leases, retries, worker recovery, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
 
 ## Engineering goals
 
@@ -155,7 +163,20 @@ The first business modules provide:
 - a minimal SQLAlchemy transaction adapter for application-owned boundaries;
 - repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
 
-Workspace and ticket HTTP endpoints are not implemented.
+### Workspace and ticket API
+
+Slice 1 exposes versioned business routes under `/api/v1`:
+
+- workspace creation and retrieval;
+- workspace-scoped ticket creation, retrieval, and listing;
+- opaque cursor pagination for ticket listing;
+- stable expected-error responses for missing resources, conflicts, and invalid cursors;
+- persistence of request and correlation identifiers on accepted tickets;
+- cross-workspace retrieval that returns the same `404` contract as a missing ticket.
+
+Health routes remain unversioned. Workspace scoping is not authentication or authorization.
+
+Reproducible request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
 
 ### Qdrant foundation
 
@@ -176,8 +197,11 @@ The repository includes:
 - unit tests isolated from Docker and network services;
 - integration tests against real PostgreSQL and Qdrant services;
 - domain invariant tests;
+- application service unit coverage;
+- workspace and ticket API schema and pagination unit coverage;
 - ORM mapping, named-constraint, and model-registration tests;
 - repository integration and concurrency-sensitive tests;
+- workspace and ticket API integration coverage;
 - Alembic upgrade and downgrade coverage;
 - settings validation tests;
 - lifecycle tests;
@@ -192,24 +216,22 @@ The repository includes:
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces` and `tickets` modules for domain entities, repository contracts, and PostgreSQL persistence.
+The repository already includes bounded `workspaces` and `tickets` modules with domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs.
 
 Future implementation phases are expected to introduce or extend modules for:
 
-- workspace and ticket HTTP endpoints;
-- application services and API error contracts;
-- HTTP cursor encoding at the API boundary;
+- asynchronous processing and AgentRun lifecycle;
+- queue claiming, leases, retries, and worker recovery;
 - structured LLM classification;
 - internal runbook ingestion;
-- semantic retrieval;
-- controlled orchestration;
+- semantic retrieval and Qdrant indexing;
+- LangGraph orchestration;
 - explicitly registered tools;
 - human approval workflows;
-- asynchronous processing and AgentRun;
 - usage and cost tracking;
 - AI observability;
-- retrieval and generation evaluation;
 - prompt versioning;
+- retrieval and generation evaluation;
 - regression testing.
 
 Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
@@ -238,6 +260,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── 0005-keep-ai-observability-behind-an-adapter.md
 │   │   └── 0006-establish-workspace-scoped-data-ownership.md
 │   └── development/
+│       ├── api-examples.md
 │       ├── environment-variables.md
 │       ├── local-setup.md
 │       └── testing.md
@@ -275,7 +298,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. Application and API layers inside the current modules remain future work until HTTP use cases are implemented.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces` and `tickets` modules include domain, application, infrastructure, and API layers.
 
 ## Local setup
 
@@ -317,6 +340,14 @@ Validate readiness:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health/ready
 ```
+
+Apply migrations before exercising business routes:
+
+```powershell
+uv run alembic upgrade head
+```
+
+Workspace and ticket request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
 
 The complete setup procedure is documented in [`docs/development/local-setup.md`](docs/development/local-setup.md).
 
@@ -493,24 +524,27 @@ Implemented:
 - workspace and ticket domain entities;
 - PostgreSQL persistence and repository contracts;
 - workspace-scoped data ownership;
-- reversible workspace and ticket migration.
+- reversible workspace and ticket migration;
+- application services and API error contracts;
+- versioned workspace and ticket HTTP endpoints;
+- opaque HTTP cursor pagination;
+- request and correlation identifier persistence.
 
 Planned:
 
-- workspace and ticket HTTP endpoints;
-- application services and API error contracts;
-- HTTP cursor encoding;
 - structured classification;
-- operational auditability.
+- operational auditability beyond request and correlation identifiers.
 
 ### Asynchronous processing
 
 Planned:
 
+- AgentRun lifecycle;
 - PostgreSQL-backed work records;
-- atomic claiming;
+- queue claiming and leases;
 - retry behavior;
 - stale ownership recovery;
+- worker recovery;
 - idempotent processing.
 
 ### Retrieval
@@ -520,7 +554,7 @@ Planned:
 - runbook ingestion;
 - chunking;
 - embeddings;
-- Qdrant collections;
+- Qdrant collections and indexing;
 - retrieval quality controls.
 
 ### Controlled orchestration
@@ -538,6 +572,7 @@ Planned:
 
 - AI tracing;
 - token and cost tracking;
+- prompt versioning;
 - retrieval evaluation;
 - generation evaluation;
 - prompt regression testing.
@@ -546,22 +581,24 @@ Planned:
 
 The following capabilities remain deferred to preserve architectural focus and avoid speculative abstractions:
 
-- workspace and ticket HTTP endpoints;
-- application services and API error contracts;
-- HTTP cursor encoding;
 - authentication and authorization;
 - authenticated tenant isolation;
-- worker polling and job claiming;
-- AgentRun and asynchronous processing;
+- asynchronous processing;
+- AgentRun lifecycle;
+- queue claiming, leases, retries, and worker recovery;
 - Redis, Celery, Kafka, and SQS;
 - LLM provider integrations;
-- prompt execution;
+- prompt execution and versioning;
 - embeddings and retrieval;
-- Qdrant collections;
+- Qdrant collections and indexing;
 - LangGraph orchestration;
+- registered tools;
 - human approval workflows;
+- cost tracking;
+- AI observability integrations;
 - Langfuse integration;
 - RAGAS evaluation;
+- evaluation and regression testing frameworks;
 - OpenTelemetry;
 - Prometheus and Grafana;
 - frontend applications;
@@ -569,7 +606,7 @@ The following capabilities remain deferred to preserve architectural focus and a
 - infrastructure as code;
 - Kubernetes.
 
-Workspace scoping establishes data ownership. It does not establish caller identity or secure multi-tenancy.
+Workspace scoping establishes data ownership. It is not authentication or authorization, and it does not establish caller identity or secure multi-tenancy.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
@@ -580,6 +617,7 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)
+- [API examples](docs/development/api-examples.md)
 - [Environment variables](docs/development/environment-variables.md)
 - [Testing strategy](docs/development/testing.md)
 

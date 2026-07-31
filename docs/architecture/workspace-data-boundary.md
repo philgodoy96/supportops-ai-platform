@@ -75,21 +75,52 @@ A ticket belongs to one workspace only.
 A lookup using the correct ticket identifier and a different workspace
 identifier produces the same application result as a missing ticket.
 
-The future HTTP API will translate both conditions to `404 Not Found`. This
-avoids revealing that a resource exists behind another ownership boundary.
+The HTTP API translates both conditions to `404 Not Found` with the
+`ticket_not_found` error code. This avoids revealing that a resource exists
+behind another ownership boundary.
+
+## HTTP API boundary
+
+Slice 1 exposes nested workspace-scoped routes:
+
+```text
+POST /api/v1/workspaces
+GET  /api/v1/workspaces/{workspace_id}
+POST /api/v1/workspaces/{workspace_id}/tickets
+GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
+GET  /api/v1/workspaces/{workspace_id}/tickets
+```
+
+Ticket operations are always nested under a workspace identifier.
+
+Listing tickets for a missing workspace returns `404 Not Found` with
+`workspace_not_found`. Listing tickets for an existing workspace with no
+tickets returns HTTP `200` with an empty `items` collection.
+
+Opaque cursor pagination is encoded at the API boundary. Clients receive an
+opaque `next_cursor` value and must not decode or modify it. Invalid cursors
+return `400 Bad Request` with `invalid_pagination_cursor`.
+
+Default page size is `20`. Maximum page size is `100`. Values outside that
+range return FastAPI validation responses with status `422`.
+
+Accepted tickets persist `ingestion_request_id` and `correlation_id` from the
+active HTTP request context.
 
 ## Workspace scoping and tenant security
 
 Workspace scoping is necessary, but it is not complete tenant isolation.
 
 The current API does not establish trusted caller identity because
-authentication and authorization are not part of this release.
+authentication and authorization are not part of this release. Workspace
+scoping is not authentication or authorization.
 
 The implemented boundary provides:
 
 - explicit data ownership;
 - repository-level resistance to unscoped ticket access;
 - database-enforced ownership;
+- nested HTTP routes that require a workspace identifier;
 - cross-workspace behavior that avoids resource disclosure;
 - a clear integration point for future authorization checks.
 
@@ -140,7 +171,7 @@ SQLAlchemy records own:
 - record-to-domain mapping.
 
 This separation prevents application code from depending on ORM session state
-and keeps the domain reusable across the future API and worker processes.
+and keeps the domain reusable across the API and future worker processes.
 
 The design intentionally avoids generic entity hierarchies, mapper frameworks,
 and speculative domain abstractions.
@@ -166,8 +197,8 @@ The identifier is used as a deterministic tie-breaker when multiple tickets
 share the same creation timestamp.
 
 Repository-level keyset navigation accepts both the last observed timestamp and
-ticket identifier. HTTP cursor encoding is intentionally deferred to the API
-boundary.
+ticket identifier. The HTTP API encodes that position as an opaque cursor at
+the transport boundary.
 
 ## Traceability fields
 
@@ -183,7 +214,7 @@ They do not establish identity, authorization, or ownership by themselves.
 
 ## Intentional scope boundaries
 
-This persistence release does not introduce:
+This release does not introduce:
 
 - authentication or authorization;
 - workspace memberships;
@@ -196,6 +227,7 @@ This persistence release does not introduce:
 - retrieval or vector indexing;
 - external support integrations.
 
-Asynchronous execution state will be designed with the worker lifecycle so that
-claiming, leasing, retries, crash recovery, idempotency, and terminal failure
-semantics are defined together.
+Ticket status remains `open` after intake. Asynchronous execution state will
+be designed with the AgentRun and worker lifecycle so that claiming, leasing,
+retries, crash recovery, idempotency, and terminal failure semantics are
+defined together.

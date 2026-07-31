@@ -12,10 +12,11 @@ The current platform includes:
 - liveness and readiness endpoints;
 - structured JSON logging with HTTP request traceability;
 - Alembic migrations for workspace and ticket tables;
+- versioned workspace and ticket HTTP APIs;
 - unit and integration tests;
 - local quality checks.
 
-Workspace and ticket HTTP endpoints, asynchronous processing, and AI capabilities are intentionally outside the current implementation scope.
+Asynchronous processing and AI capabilities are intentionally outside the current implementation scope. Workspace scoping is not authentication or authorization.
 
 ## Prerequisites
 
@@ -132,6 +133,12 @@ healthz check passed
 
 ## Start the API
 
+Apply the current migration head before exercising business routes:
+
+```powershell
+uv run alembic upgrade head
+```
+
 Run the FastAPI application:
 
 ```powershell
@@ -143,6 +150,8 @@ uv run uvicorn supportops.api.main:app `
 The process emits structured JSON logs.
 
 The application may start even when PostgreSQL or Qdrant is unavailable. Dependency availability is represented by readiness.
+
+Business routes under `/api/v1` require a migrated PostgreSQL database. They do not enqueue asynchronous work and do not call Qdrant.
 
 ## Validate liveness
 
@@ -184,6 +193,55 @@ The serialized JSON response contains separate states for:
 - Qdrant.
 
 When either dependency is unavailable, readiness returns HTTP `503 Service Unavailable`.
+
+## Validate workspace and ticket APIs
+
+With infrastructure healthy, migrations applied, and the API running, create a workspace:
+
+```powershell
+$workspace = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces" `
+  -ContentType "application/json" `
+  -Body (@{
+    name = "Platform Support"
+    slug = "platform-support"
+  } | ConvertTo-Json)
+
+$workspace
+```
+
+Create a ticket in that workspace:
+
+```powershell
+$ticketResponse = Invoke-WebRequest `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/tickets" `
+  -ContentType "application/json" `
+  -Body (@{
+    subject = "Unable to access the billing dashboard"
+    description = "The dashboard returns an access error after sign-in."
+  } | ConvertTo-Json)
+
+$ticket = $ticketResponse.Content | ConvertFrom-Json
+$ticket
+$ticketResponse.Headers["X-Request-ID"]
+$ticketResponse.Headers["X-Correlation-ID"]
+```
+
+Expected behavior:
+
+- workspace creation returns HTTP `201`;
+- ticket creation returns HTTP `201`;
+- ticket status is `open`;
+- `ingestion_request_id` matches `X-Request-ID`;
+- `correlation_id` matches `X-Correlation-ID`.
+
+Complete request examples, conflict cases, cross-workspace isolation, and cursor pagination are documented in:
+
+```text
+docs/development/api-examples.md
+```
 
 ## Validate dependency failure behavior
 

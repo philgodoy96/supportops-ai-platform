@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, including HTTP request traceability, and the first workspace-scoped persistence slice. Workspace and ticket HTTP endpoints, asynchronous processing, retrieval, and AI orchestration remain later phases.
+The current repository phase establishes the operational foundation, including HTTP request traceability, workspace-scoped persistence, and the Slice 1 workspace and ticket HTTP API. Asynchronous processing, retrieval, and AI orchestration remain later phases.
 
 ## Architectural principles
 
@@ -42,7 +42,7 @@ The processes will have distinct runtime responsibilities, but they will remain 
 
 The worker entry point and processing behavior are not implemented in the repository foundation phase.
 
-## Planned foundation package boundaries
+## Package boundaries
 
 The package structure is organized around framework composition, shared application configuration, infrastructure integration, and vertical business modules.
 
@@ -69,13 +69,15 @@ Its responsibilities include:
 - exposing operational health endpoints;
 - binding per-request trace context;
 - returning trace response headers;
-- translating application outcomes into HTTP responses.
+- translating application outcomes into HTTP responses;
+- mounting versioned business routes under `/api/v1`;
+- registering stable expected-error handlers.
 
-The API boundary may depend on `supportops.core`, `supportops.infrastructure`, and future application services.
+The API boundary may depend on `supportops.core`, `supportops.infrastructure`, and module application services.
 
 Infrastructure and core packages must not depend on the API package.
 
-Workspace and ticket HTTP business endpoints are not yet implemented.
+Operational health routes remain unversioned. Workspace and ticket business routes are versioned under `/api/v1`.
 
 ### Core boundary
 
@@ -137,13 +139,13 @@ supportops.modules.workspaces
 supportops.modules.tickets
 ```
 
-Each module follows the intended internal layout:
+Each module follows the implemented internal layout:
 
 ```text
 domain/
-application/   # future
+application/
 infrastructure/
-api/           # future
+api/
 ```
 
 ### Domain
@@ -152,11 +154,15 @@ Domain packages own persistence-independent frozen entities, invariants, and rep
 
 Workspace and Ticket entities are frozen dataclasses. They do not depend on SQLAlchemy session state.
 
+Ticket status remains `open` after intake. AI execution state is intentionally outside the ticket lifecycle and will belong to AgentRun in Slice 2.
+
 ### Application
 
-Application packages will own use cases and transaction orchestration.
+Application packages own use cases and transaction orchestration.
 
-Application directories are not yet created inside the current modules. Transaction boundary ownership is already defined through application-facing contracts and the SQLAlchemy adapter.
+Command use cases such as workspace creation and ticket intake own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, and ticket listing execute reads without opening a write transaction.
+
+Application services depend on domain repository protocols. They do not depend on FastAPI or SQLAlchemy session APIs directly.
 
 ### Infrastructure
 
@@ -171,41 +177,103 @@ Repositories flush pending changes and translate expected named constraints into
 
 ### API
 
-Module API packages will own HTTP routes, request and response schemas, and transport-level error translation.
+Module API packages own HTTP routes, request and response schemas, dependency construction, and transport-level pagination encoding.
 
-Those packages are not yet created. Workspace and ticket HTTP endpoints remain future work.
+Implemented routes include:
+
+```text
+POST /api/v1/workspaces
+GET  /api/v1/workspaces/{workspace_id}
+POST /api/v1/workspaces/{workspace_id}/tickets
+GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
+GET  /api/v1/workspaces/{workspace_id}/tickets
+```
+
+Expected application errors use a stable envelope with `code`, `message`, and `request_id`. Malformed identifiers and invalid request schemas use FastAPI validation responses.
 
 ## Dependency direction
 
-The intended dependency direction is:
+The implemented dependency direction is:
 
 ```text
-API entry points
+API
     ↓
-Application services and business modules
+Application use cases
     ↓
-Domain behavior and ports
-    ↓
+Domain protocols
+    ↑
 Infrastructure adapters
 ```
 
-The current executable dependency shape is:
+Concrete adapters implement interfaces owned by the domain layer. Application services depend on those protocols rather than on provider-specific repository classes.
+
+The executable composition shape is:
 
 ```text
 supportops.api
     ↓
-supportops.core
-supportops.infrastructure
-
-supportops.modules.*.infrastructure
+supportops.modules.*.api
+    ↓
+supportops.modules.*.application
     ↓
 supportops.modules.*.domain
+    ↑
+supportops.modules.*.infrastructure
 supportops.infrastructure.postgresql
+supportops.core
 ```
 
-Future module application and API layers will sit above domain ports. Infrastructure adapters implement interfaces owned by domain or application layers, but application behavior must not become coupled to provider-specific implementations.
-
 Circular dependencies are not permitted.
+
+## Command and query behavior
+
+Write commands own the transaction:
+
+- create workspace;
+- create ticket.
+
+Those use cases open an application-owned transaction, persist through repositories that flush without committing, and commit or roll back as one unit.
+
+Read queries do not open write transactions:
+
+- get workspace;
+- get ticket;
+- list tickets.
+
+Ticket listing verifies that the workspace exists before returning an empty page. A missing workspace returns `workspace_not_found`. An empty workspace returns an empty `items` collection with a null `next_cursor`.
+
+## Versioned business API and error contract
+
+Business routes are versioned under `/api/v1`.
+
+Operational health routes remain outside that prefix:
+
+```text
+GET /health/live
+GET /health/ready
+```
+
+Expected application errors use a stable response envelope:
+
+```json
+{
+  "error": {
+    "code": "ticket_not_found",
+    "message": "Ticket was not found.",
+    "request_id": "00000000-0000-0000-0000-000000000000"
+  }
+}
+```
+
+Implemented expected error codes include:
+
+- `workspace_not_found`;
+- `ticket_not_found`;
+- `workspace_slug_conflict`;
+- `ticket_external_reference_conflict`;
+- `invalid_pagination_cursor`.
+
+Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as a missing ticket.
 
 ## Data ownership
 
@@ -240,7 +308,7 @@ Implemented ownership and integrity rules include:
 - a required foreign key from `tickets.workspace_id` to `workspaces.id`;
 - a workspace-leading listing index for deterministic ticket ordering.
 
-Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
+Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation. Workspace ownership identifies which tickets belong to which workspace. It does not establish trusted caller identity.
 
 ### Qdrant
 
@@ -405,10 +473,12 @@ They validate behavior such as:
 - readiness aggregation;
 - dependency failure handling;
 - domain invariants;
+- application service command and query behavior;
 - ORM mapping and metadata;
 - named constraints;
 - persistence model registration;
-- PostgreSQL constraint-name inspection.
+- PostgreSQL constraint-name inspection;
+- API schemas and opaque cursor encoding.
 
 ### Integration tests
 
@@ -422,7 +492,10 @@ They validate:
 - dependency failure behavior;
 - Alembic upgrade, downgrade, and re-upgrade;
 - workspace and ticket repository behavior;
-- concurrency-sensitive uniqueness enforcement.
+- concurrency-sensitive uniqueness enforcement;
+- workspace and ticket HTTP API behavior;
+- stable expected-error responses;
+- opaque cursor pagination.
 
 The test suite must verify externally observable behavior rather than reproduce implementation details.
 
@@ -444,7 +517,7 @@ The repository foundation establishes the following security baseline:
 
 Trace identifiers support observability and supportability. They are not authentication or authorization controls.
 
-Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation.
+Workspace scoping is a data ownership boundary. It is not authentication, authorization, or authenticated tenant isolation.
 
 Authentication, authorization, authenticated tenant isolation, and public deployment hardening are intentionally deferred to later implementation phases.
 
@@ -465,7 +538,7 @@ Service extraction is not a default objective. It should be driven by clear owne
 
 ## Repository foundation scope
 
-The repository foundation and first persistence slice establish:
+The repository foundation and Slice 1 establish:
 
 - project and dependency management;
 - local PostgreSQL and Qdrant infrastructure;
@@ -477,6 +550,10 @@ The repository foundation and first persistence slice establish:
 - infrastructure connectivity checks;
 - SQLAlchemy and Alembic foundations;
 - workspace and ticket domain persistence;
+- application services and versioned business APIs;
+- stable expected-error contracts;
+- opaque cursor pagination;
+- request and correlation identifier persistence;
 - unit and integration testing;
 - continuous integration;
 - architecture and development documentation.
@@ -485,28 +562,27 @@ The repository foundation and first persistence slice establish:
 
 The current phase does not implement:
 
-- workspace or ticket HTTP endpoints;
-- application services inside the current modules;
-- HTTP cursor encoding;
 - authentication or authorization;
 - authenticated tenant isolation;
 - asynchronous worker behavior;
 - AgentRun;
-- job queues;
+- job queues, claiming, leases, retries, or worker recovery;
 - LLM calls;
-- prompt execution;
+- prompt execution or versioning;
 - token or cost tracking;
 - ingestion;
 - embeddings;
-- Qdrant collections;
+- Qdrant collections or indexing;
 - retrieval;
-- orchestration;
-- tool execution;
+- LangGraph orchestration;
+- registered tools;
 - approval workflows;
 - AI observability integrations;
 - evaluation frameworks;
 - frontend applications;
 - public cloud deployment;
 - infrastructure as code.
+
+Ticket status remains `open` after intake. AI execution state will belong to AgentRun in Slice 2 rather than expanding the ticket lifecycle prematurely.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -44,10 +44,14 @@ They validate:
 - readiness failure responses;
 - response sanitization;
 - workspace and ticket domain invariants;
+- application service command and query behavior;
 - ORM mapping and metadata;
 - named PostgreSQL constraints declared on persistence records;
 - persistence model registration;
-- PostgreSQL constraint-name inspection helpers.
+- PostgreSQL constraint-name inspection helpers;
+- workspace API schemas;
+- ticket API schemas;
+- opaque ticket cursor encoding and invalid-cursor rejection.
 
 Unit tests use mocks only at external boundaries.
 
@@ -71,12 +75,30 @@ Unit tests can also be run directly:
 uv run pytest tests/unit
 ```
 
-Targeted domain and persistence unit coverage:
+Targeted domain, application, persistence, and API unit coverage:
 
 ```powershell
 uv run pytest tests/unit/modules/workspaces/domain tests/unit/modules/tickets/domain
+uv run pytest tests/unit/modules/workspaces/application tests/unit/modules/tickets/application
 uv run pytest tests/unit/modules/workspaces/infrastructure tests/unit/modules/tickets/infrastructure
+uv run pytest tests/unit/modules/workspaces/api
+uv run pytest tests/unit/modules/tickets/api
 uv run pytest tests/unit/infrastructure/postgresql
+```
+
+Application service unit coverage:
+
+```powershell
+uv run pytest tests/unit/modules/workspaces/application/test_services.py
+uv run pytest tests/unit/modules/tickets/application/test_services.py
+```
+
+Workspace schema and ticket schema plus cursor unit coverage:
+
+```powershell
+uv run pytest tests/unit/modules/workspaces/api/test_schemas.py
+uv run pytest tests/unit/modules/tickets/api/test_schemas.py
+uv run pytest tests/unit/modules/tickets/api/test_pagination.py
 ```
 ## Integration tests
 
@@ -102,9 +124,24 @@ They validate:
 - cross-workspace ticket lookup behavior;
 - deterministic ticket listing;
 - keyset repository navigation;
-- concurrent duplicate external-reference insertion.
+- concurrent duplicate external-reference insertion;
+- workspace API creation and retrieval;
+- duplicate slug conflict responses;
+- ticket API intake, retrieval, and listing;
+- request and correlation identifier persistence;
+- duplicate external-reference conflict responses;
+- cross-workspace `404` behavior;
+- empty ticket listing for an existing workspace;
+- workspace-not-found behavior for ticket listing;
+- opaque cursor pagination;
+- invalid cursor responses;
+- page-size validation;
+- request schema validation errors;
+- absence of request bodies from completion logs, including ticket subject and description content.
 
 Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
+
+Full API integration tests require PostgreSQL and applied migrations. Qdrant remains required for readiness and shared integration fixtures, but business routes do not call Qdrant.
 
 Integration tests are marked with:
 
@@ -139,12 +176,22 @@ Run only the integration directory:
 uv run pytest tests/integration
 ```
 
-Targeted Alembic and repository integration coverage:
+Targeted Alembic, repository, and API integration coverage:
 
 ```powershell
 uv run pytest tests/integration/test_alembic.py
 uv run pytest tests/integration/modules/workspaces/infrastructure
 uv run pytest tests/integration/modules/tickets/infrastructure
+uv run pytest tests/integration/api/test_workspaces.py
+uv run pytest tests/integration/api/test_tickets.py
+```
+
+The concurrency-sensitive duplicate external-reference repository test remains part of the ticket infrastructure integration suite and should continue to run against real PostgreSQL.
+
+Workspace and ticket API integration coverage:
+
+```powershell
+uv run pytest tests/integration/api/test_workspaces.py tests/integration/api/test_tickets.py
 ```
 ## Full test suite
 
@@ -294,7 +341,8 @@ HTTP request traceability tests verify externally observable guarantees:
 - downstream handlers cannot override trace response headers;
 - completion logs include safe operational metadata only;
 - unexpected exceptions retain safe `500` behavior with trace headers;
-- request bodies and raw invalid header values are not logged.
+- request bodies and raw invalid header values are not logged;
+- completion logs omit ticket subject and description content because request bodies are not logged.
 
 These tests do not require Docker, PostgreSQL, Qdrant, or network services.
 
@@ -303,6 +351,39 @@ Run the focused request-traceability suite:
 ```powershell
 uv run pytest tests/unit/core/test_request_context.py tests/unit/core/test_logging.py tests/unit/api/test_application.py tests/unit/api/test_request_context_middleware.py
 ```
+
+## Workspace and ticket API tests
+
+Workspace API integration coverage verifies:
+
+- workspace creation and retrieval;
+- duplicate slug conflict responses;
+- missing workspace responses;
+- malformed identifier validation errors;
+- invalid create payload validation errors;
+- health routes remaining outside `/api/v1`.
+
+Ticket API integration coverage verifies:
+
+- request and correlation identifier persistence on intake;
+- missing workspace behavior for ticket creation and listing;
+- duplicate external-reference conflicts within one workspace;
+- reuse of the same external reference across workspaces;
+- cross-workspace retrieval returning `ticket_not_found`;
+- empty listing for an existing workspace;
+- opaque cursor pagination;
+- invalid cursor responses;
+- page-size validation;
+- request schema validation errors.
+
+Run the focused API suites:
+
+```powershell
+uv run pytest tests/integration/api/test_workspaces.py
+uv run pytest tests/integration/api/test_tickets.py
+```
+
+Full API integration tests require PostgreSQL and applied migrations.
 
 ## Failure-path testing
 
@@ -600,23 +681,23 @@ New failure scenarios should be automated when they can remain deterministic and
 
 Later implementation phases are expected to add tests for:
 
-- workspace and ticket HTTP endpoints;
-- application services and API error contracts;
-- HTTP cursor encoding;
 - authorization boundaries;
 - authenticated tenant isolation;
 - asynchronous job claiming;
 - AgentRun behavior;
+- queue leases, retries, and worker recovery;
 - duplicate execution;
 - idempotency;
 - retry scheduling;
 - stale lease recovery;
 - structured LLM outputs;
-- retrieval quality;
+- retrieval quality and Qdrant indexing;
+- LangGraph orchestration;
 - tool authorization;
 - approval enforcement;
 - token and cost accounting;
+- prompt versioning;
 - prompt regression;
 - evaluation thresholds.
 
-API tests remain planned because workspace and ticket HTTP business routes are not implemented.
+Authentication, asynchronous processing, and AI execution remain intentional scope boundaries for the current suite.
