@@ -1,6 +1,8 @@
 """PostgreSQL repository for durable AgentRuns."""
 
-from sqlalchemy import select
+from uuid import UUID
+
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportops.modules.agent_runs.domain.claiming import (
@@ -10,9 +12,17 @@ from supportops.modules.agent_runs.domain.claiming import (
 from supportops.modules.agent_runs.domain.models import (
     AgentRun,
     AgentRunAttempt,
+    AgentRunAttemptOutcome,
+    AgentRunStatus,
 )
 from supportops.modules.agent_runs.domain.repositories import (
     AgentRunRepository,
+)
+from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunFailureDisposition,
+    AgentRunTransitionResult,
+    CompleteAgentRunCommand,
+    FailAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
@@ -91,3 +101,131 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
             agent_run=record.to_domain(),
             attempt=attempt,
         )
+
+    async def mark_succeeded(
+        self,
+        command: CompleteAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a successful fenced AgentRun transition."""
+
+        run_statement = (
+            select(AgentRunRecord)
+            .where(
+                and_(
+                    AgentRunRecord.id == command.agent_run_id,
+                    AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                    AgentRunRecord.lease_token == command.lease_token,
+                    AgentRunRecord.lease_expires_at > command.finished_at,
+                )
+            )
+            .with_for_update()
+        )
+        run_result = await self._session.execute(run_statement)
+        record = run_result.scalar_one_or_none()
+        if record is None:
+            return AgentRunTransitionResult.LEASE_LOST
+
+        attempt = await self._load_active_attempt_for_lease(
+            agent_run_id=command.agent_run_id,
+            lease_token=command.lease_token,
+        )
+        if attempt is None:
+            raise RuntimeError(
+                "Active AgentRun attempt was not found for the current lease.",
+            )
+
+        attempt.finished_at = command.finished_at
+        attempt.outcome = AgentRunAttemptOutcome.SUCCEEDED.value
+        attempt.error_code = None
+        attempt.error_summary = None
+
+        record.status = AgentRunStatus.SUCCEEDED.value
+        record.completed_at = command.finished_at
+        record.lease_owner = None
+        record.lease_token = None
+        record.lease_expires_at = None
+        record.last_error_code = None
+        record.last_error_summary = None
+        record.updated_at = command.finished_at
+
+        await self._session.flush()
+        return AgentRunTransitionResult.APPLIED
+
+    async def record_failure(
+        self,
+        command: FailAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a fenced AgentRun failure transition."""
+
+        run_statement = (
+            select(AgentRunRecord)
+            .where(
+                and_(
+                    AgentRunRecord.id == command.agent_run_id,
+                    AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                    AgentRunRecord.lease_token == command.lease_token,
+                    AgentRunRecord.lease_expires_at > command.finished_at,
+                )
+            )
+            .with_for_update()
+        )
+        run_result = await self._session.execute(run_statement)
+        record = run_result.scalar_one_or_none()
+        if record is None:
+            return AgentRunTransitionResult.LEASE_LOST
+
+        attempt = await self._load_active_attempt_for_lease(
+            agent_run_id=command.agent_run_id,
+            lease_token=command.lease_token,
+        )
+        if attempt is None:
+            raise RuntimeError(
+                "Active AgentRun attempt was not found for the current lease.",
+            )
+
+        attempt.finished_at = command.finished_at
+        attempt.outcome = command.outcome.value
+        attempt.error_code = command.error_code
+        attempt.error_summary = command.error_summary
+
+        record.lease_owner = None
+        record.lease_token = None
+        record.lease_expires_at = None
+        record.last_error_code = command.error_code
+        record.last_error_summary = command.error_summary
+        record.updated_at = command.finished_at
+
+        if command.disposition is AgentRunFailureDisposition.RETRY_SCHEDULED:
+            assert command.retry_available_at is not None
+            record.status = AgentRunStatus.RETRY_SCHEDULED.value
+            record.available_at = command.retry_available_at
+            record.completed_at = None
+        else:
+            record.status = AgentRunStatus.FAILED.value
+            record.completed_at = command.finished_at
+
+        await self._session.flush()
+        return AgentRunTransitionResult.APPLIED
+
+    async def _load_active_attempt_for_lease(
+        self,
+        *,
+        agent_run_id: UUID,
+        lease_token: UUID,
+    ) -> AgentRunAttemptRecord | None:
+        """Load the unfinished attempt that matches the current lease."""
+
+        statement = (
+            select(AgentRunAttemptRecord)
+            .where(
+                and_(
+                    AgentRunAttemptRecord.agent_run_id == agent_run_id,
+                    AgentRunAttemptRecord.lease_token == lease_token,
+                    AgentRunAttemptRecord.finished_at.is_(None),
+                    AgentRunAttemptRecord.outcome.is_(None),
+                )
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()

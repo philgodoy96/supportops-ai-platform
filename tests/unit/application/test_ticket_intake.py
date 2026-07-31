@@ -22,6 +22,11 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRun,
     AgentRunStatus,
 )
+from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunTransitionResult,
+    CompleteAgentRunCommand,
+    FailAgentRunCommand,
+)
 from supportops.modules.tickets.application.errors import (
     TicketExternalReferenceConflictApplicationError,
 )
@@ -159,6 +164,18 @@ class FakeAgentRunRepository:
         command: ClaimAgentRunCommand,
     ) -> AgentRunClaim | None:
         raise AssertionError("claim_next_available must not be called")
+
+    async def mark_succeeded(
+        self,
+        command: CompleteAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        raise AssertionError("mark_succeeded must not be called")
+
+    async def record_failure(
+        self,
+        command: FailAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        raise AssertionError("record_failure must not be called")
 
 
 def create_service(

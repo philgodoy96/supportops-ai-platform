@@ -7,6 +7,11 @@ from supportops.modules.agent_runs.domain.claiming import (
     ClaimAgentRunCommand,
 )
 from supportops.modules.agent_runs.domain.models import AgentRun
+from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunTransitionResult,
+    CompleteAgentRunCommand,
+    FailAgentRunCommand,
+)
 
 
 class AgentRunRepository(Protocol):
@@ -22,5 +27,21 @@ class AgentRunRepository(Protocol):
         command: ClaimAgentRunCommand,
     ) -> AgentRunClaim | None:
         """Atomically claim the next eligible AgentRun, if available."""
+
+        ...
+
+    async def mark_succeeded(
+        self,
+        command: CompleteAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a successful fenced AgentRun transition."""
+
+        ...
+
+    async def record_failure(
+        self,
+        command: FailAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a fenced AgentRun failure transition."""
 
         ...
