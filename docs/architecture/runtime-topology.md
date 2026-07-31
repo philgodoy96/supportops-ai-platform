@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document describes the intended runtime topology of SupportOps AI Platform for the current foundation and Slice 1 workspace and ticket API phase, and the planned evolution toward separate API and worker processes.
+This document describes the intended runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, and durable AgentRun scheduling phase, and the planned evolution toward separate API and worker processes.
 
 The current topology is intentionally small. It provides the minimum operational foundation required for reliable local development, testing, and future platform growth without introducing premature distributed infrastructure.
 
@@ -50,7 +50,8 @@ The FastAPI process owns:
 - trace response headers;
 - liveness and readiness endpoints;
 - versioned `/api/v1` business routes;
-- stable expected-error handlers.
+- stable expected-error handlers;
+- atomic Ticket and initial AgentRun scheduling during ticket intake.
 
 The process is expected to run through Uvicorn.
 
@@ -58,7 +59,7 @@ The application may remain alive when PostgreSQL or Qdrant is unavailable. Depen
 
 Invalid required configuration remains a startup error.
 
-Business routes persist and query PostgreSQL. They do not enqueue asynchronous work and do not call Qdrant.
+Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun in the same application-owned transaction. The API does not claim runs, acquire leases, execute retries, or recover stale ownership. Business routes do not call Qdrant.
 
 ## PostgreSQL runtime role
 
@@ -73,23 +74,26 @@ PostgreSQL currently owns:
 - connectivity validation;
 - Alembic migrations;
 - `workspaces` and `tickets` tables;
+- `agent_runs` and `agent_run_attempts` tables;
 - the workspace ownership foreign key on tickets;
+- composite workspace and ticket ownership for AgentRun records;
 - uniqueness constraints for workspace slugs and workspace-scoped external references;
-- the workspace-leading ticket listing index.
+- unique initial trigger enforcement for AgentRun scheduling;
+- the workspace-leading ticket listing index;
+- query-driven indexes reserved for future claim and recovery paths.
 
 Repository operations use request-scoped async sessions for business HTTP routes. The engine and session factory remain process-owned.
 
-Each request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases commit through the application-owned transaction adapter.
+Each request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter.
 
-Business routes do not enqueue work or call Qdrant. Qdrant remains limited to readiness connectivity checks in the current phase.
+Business routes do not call Qdrant. Qdrant remains limited to readiness connectivity checks in the current phase.
 
 Future phases are expected to extend PostgreSQL ownership for:
 
-- workflow state;
+- worker claim and lease transitions;
 - approvals;
 - audit records;
-- usage events;
-- asynchronous job state.
+- usage events.
 
 ## Qdrant runtime role
 
@@ -104,7 +108,7 @@ During the current phase, Qdrant is used only to establish:
 
 No collections, vectors, embeddings, ingestion workflows, or retrieval behavior are created.
 
-Qdrant is not involved in workspace or ticket persistence. Ticket ownership, uniqueness, listing, and repository behavior are PostgreSQL concerns only.
+Qdrant is not involved in workspace, ticket, or AgentRun persistence. Ticket ownership, uniqueness, listing, repository behavior, and AgentRun scheduling are PostgreSQL concerns only.
 
 Future retrieval data must remain reproducible from authoritative source content.
 
@@ -151,7 +155,7 @@ The request context is in-process and task-local.
 
 The engine and session factory are process-owned. Sessions are request-scoped.
 
-Business routes under `/api/v1` do not enqueue asynchronous work and do not call Qdrant.
+Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and do not call Qdrant. Worker claim, lease, retry, and recovery behavior are not operational in the current phase.
 
 ### Route versioning
 
@@ -269,7 +273,7 @@ Expected execution model:
 4. start the FastAPI process with `uv run`;
 5. call liveness and readiness endpoints;
 6. apply the current Alembic migration head;
-7. exercise workspace and ticket routes when validating Slice 1 behavior;
+7. exercise workspace and ticket routes, including atomic AgentRun scheduling on ticket creation;
 8. run local quality and test commands.
 
 The application is not required to run inside Docker Compose for the primary development loop.
@@ -306,6 +310,8 @@ Unit tests validate:
 - readiness aggregation;
 - dependency failure responses;
 - application service command and query behavior;
+- AgentRun domain invariants;
+- transactional ticket-intake orchestration;
 - workspace and ticket API schemas;
 - opaque cursor encoding.
 
@@ -331,10 +337,11 @@ Integration tests validate:
 - real Qdrant connectivity;
 - readiness success;
 - readiness failure;
-- Alembic upgrade, downgrade, and re-upgrade;
+- Alembic upgrade, downgrade, re-upgrade, and metadata parity;
 - workspace repository persistence;
 - ticket repository persistence and workspace scoping;
 - concurrency-sensitive uniqueness enforcement;
+- atomic ticket and AgentRun commit and rollback behavior;
 - workspace and ticket HTTP API behavior;
 - stable expected-error responses;
 - opaque cursor pagination.
@@ -372,20 +379,20 @@ The initial workflow intentionally avoids a runtime matrix because Python 3.12 i
 
 ## Future API and worker topology
 
-A later phase will introduce a separate asynchronous worker process.
+A later phase will introduce a separate asynchronous worker process. The worker is planned and is not currently operational.
 
 ```mermaid
 flowchart LR
     Client[API Client]
     API[FastAPI Process]
-    Worker[Worker Process]
+    Worker[Worker Process Planned]
     PostgreSQL[(PostgreSQL)]
     Qdrant[(Qdrant)]
 
     Client -->|HTTP| API
-    API --> PostgreSQL
-    Worker --> PostgreSQL
-    Worker --> Qdrant
+    API -->|Atomic Ticket and AgentRun scheduling| PostgreSQL
+    Worker -.->|Planned claim and execution| PostgreSQL
+    Worker -.->|Planned retrieval| Qdrant
 ```
 
 The API and worker will:
@@ -397,7 +404,7 @@ The API and worker will:
 - use shared infrastructure adapters;
 - maintain independent process lifecycle and connection pools.
 
-The worker will not be implemented until job ownership, claiming, concurrency, retry, and idempotency behavior are defined.
+The API currently persists queued AgentRun records. Claim, lease acquisition, lease-token fencing, retries, stale lease recovery, and graceful worker shutdown remain planned and are not currently operational.
 
 ## Process separation implications
 
@@ -415,7 +422,7 @@ When the API and worker become separate processes:
 
 Shared Python code does not imply shared runtime memory.
 
-Future cross-process propagation will require explicitly carrying correlation IDs through durable work records or message boundaries. That behavior is not implemented in the current phase.
+Ticket intake already persists request and correlation identifiers on both the ticket and its initial AgentRun. Future cross-process worker execution will preserve the run correlation identifier while generating a separate execution request identifier for each claimed attempt.
 
 ## Failure scenarios
 
@@ -497,7 +504,8 @@ The current topology excludes:
 - Kubernetes;
 - cloud load balancers;
 - managed cloud databases;
+- an operational worker process;
 - ingestion workers;
 - AI provider calls.
 
-These components will not be introduced until a concrete capability and operational requirement justify them.
+These components will not be introduced until a concrete capability and operational requirement justify them. The API schedules durable AgentRun records, but worker claim, lease, retry, and recovery behavior are not currently operational.

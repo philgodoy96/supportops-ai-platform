@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, including HTTP request traceability, workspace-scoped persistence, and the Slice 1 workspace and ticket HTTP API. Asynchronous processing, retrieval, and AI orchestration remain later phases.
+The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, and durable AgentRun scheduling. Worker execution, retrieval, and AI orchestration remain later phases.
 
 ## Architectural principles
 
@@ -40,7 +40,7 @@ Both processes will share:
 
 The processes will have distinct runtime responsibilities, but they will remain part of one deployable codebase during the initial platform evolution.
 
-The worker entry point and processing behavior are not implemented in the repository foundation phase.
+The API currently schedules durable AgentRun records during ticket intake. The worker entry point and processing behavior remain planned.
 
 ## Package boundaries
 
@@ -49,9 +49,11 @@ The package structure is organized around framework composition, shared applicat
 ```text
 src/supportops/
 ├── api/
+├── application/
 ├── core/
 ├── infrastructure/
 └── modules/
+    ├── agent_runs/
     ├── workspaces/
     └── tickets/
 ```
@@ -73,11 +75,19 @@ Its responsibilities include:
 - mounting versioned business routes under `/api/v1`;
 - registering stable expected-error handlers.
 
-The API boundary may depend on `supportops.core`, `supportops.infrastructure`, and module application services.
+The API boundary may depend on `supportops.core`, `supportops.infrastructure`, `supportops.application`, and module application services.
 
 Infrastructure and core packages must not depend on the API package.
 
 Operational health routes remain unversioned. Workspace and ticket business routes are versioned under `/api/v1`.
+
+### Application boundary
+
+`supportops.application` owns cross-module application use cases that coordinate more than one business module.
+
+Ticket intake is implemented as `CreateTicketWithInitialRun`. That use case coordinates Workspace, Ticket, and AgentRun repositories through one SQLAlchemy session and one application-owned transaction.
+
+Module-local command and query use cases remain inside each module's application package. Cross-module orchestration belongs in `supportops.application` only when the use case spans multiple module boundaries.
 
 ### Core boundary
 
@@ -137,9 +147,10 @@ The implemented vertical modules are:
 ```text
 supportops.modules.workspaces
 supportops.modules.tickets
+supportops.modules.agent_runs
 ```
 
-Each module follows the implemented internal layout:
+Workspace and ticket modules follow the implemented internal layout:
 
 ```text
 domain/
@@ -148,21 +159,27 @@ infrastructure/
 api/
 ```
 
+The `agent_runs` module currently provides domain and infrastructure layers for durable scheduling foundations. Worker-facing application services and AgentRun inspection APIs remain planned.
+
 ### Domain
 
 Domain packages own persistence-independent frozen entities, invariants, and repository protocols.
 
-Workspace and Ticket entities are frozen dataclasses. They do not depend on SQLAlchemy session state.
+Workspace, Ticket, AgentRun, and AgentRunAttempt entities are frozen dataclasses. They do not depend on SQLAlchemy session state.
 
-Ticket status remains `open` after intake. AI execution state is intentionally outside the ticket lifecycle and will belong to AgentRun in Slice 2.
+Ticket status remains `open` after intake. A queued deterministic-baseline AgentRun records that durable processing has been scheduled. It does not represent AI classification.
 
 ### Application
 
 Application packages own use cases and transaction orchestration.
 
-Command use cases such as workspace creation and ticket intake own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, and ticket listing execute reads without opening a write transaction.
+Command use cases such as workspace creation own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, and ticket listing execute reads without opening a write transaction.
+
+`CreateTicketWithInitialRun` is the cross-module ticket intake command. It validates the workspace, persists the ticket, and persists the initial AgentRun in one shared SQLAlchemy session and one application-owned transaction. Repositories flush without committing independently.
 
 Application services depend on domain repository protocols. They do not depend on FastAPI or SQLAlchemy session APIs directly.
+
+Transactional AgentRun scheduling is documented in [`agent-run-scheduling.md`](agent-run-scheduling.md).
 
 ### Infrastructure
 
@@ -189,6 +206,8 @@ GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
 GET  /api/v1/workspaces/{workspace_id}/tickets
 ```
 
+Ticket creation returns a nested ticket object and a minimal processing-run reference. AgentRun inspection endpoints are not implemented yet.
+
 Expected application errors use a stable envelope with `code`, `message`, and `request_id`. Malformed identifiers and invalid request schemas use FastAPI validation responses.
 
 ## Dependency direction
@@ -214,6 +233,7 @@ supportops.api
     ↓
 supportops.modules.*.api
     ↓
+supportops.application
 supportops.modules.*.application
     ↓
 supportops.modules.*.domain
@@ -230,9 +250,11 @@ Circular dependencies are not permitted.
 Write commands own the transaction:
 
 - create workspace;
-- create ticket.
+- create ticket with initial AgentRun.
 
 Those use cases open an application-owned transaction, persist through repositories that flush without committing, and commit or roll back as one unit.
+
+`CreateTicketWithInitialRun` coordinates Workspace, Ticket, and AgentRun repositories through the same session and the same transaction. A successful commit persists both the ticket and its initial run. An AgentRun insertion failure rolls back the ticket. A ticket conflict creates no additional run.
 
 Read queries do not open write transactions:
 
@@ -281,7 +303,7 @@ Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as
 
 PostgreSQL is the transactional source of truth.
 
-Authoritative business state, workflow state, approvals, audit records, usage events, and future asynchronous job state will be persisted in PostgreSQL.
+Authoritative business state, workflow state, approvals, audit records, usage events, and asynchronous job state are persisted or planned for persistence in PostgreSQL.
 
 This decision supports:
 
@@ -292,21 +314,26 @@ This decision supports:
 - idempotency;
 - future PostgreSQL-backed asynchronous processing.
 
-The first business migration creates:
+Business migrations create:
 
 - `workspaces`;
-- `tickets`.
+- `tickets`;
+- `agent_runs`;
+- `agent_run_attempts`.
 
 Implemented ownership and integrity rules include:
 
-- persistence-independent frozen Workspace and Ticket domain entities;
+- persistence-independent frozen Workspace, Ticket, AgentRun, and AgentRunAttempt domain entities;
 - SQLAlchemy records with explicit mapping;
 - repository protocols, including workspace-scoped ticket `get` and `list`;
 - application-owned transaction boundaries;
 - repository flush without commit;
 - PostgreSQL named constraints, including unique workspace slugs and workspace-scoped external references;
 - a required foreign key from `tickets.workspace_id` to `workspaces.id`;
-- a workspace-leading listing index for deterministic ticket ordering.
+- composite workspace and ticket ownership for AgentRun records;
+- unique initial trigger enforcement for duplicate initial scheduling prevention;
+- a workspace-leading listing index for deterministic ticket ordering;
+- query-driven indexes for future claim and recovery paths.
 
 Workspace scoping is a data ownership boundary. It is not authenticated tenant isolation. Workspace ownership identifies which tickets belong to which workspace. It does not establish trusted caller identity.
 
@@ -325,11 +352,11 @@ Qdrant is limited to:
 - lifecycle management;
 - bounded connectivity checks.
 
-No collections, embeddings, ingestion pipelines, or retrieval behavior are implemented. Qdrant is not involved in workspace or ticket persistence.
+No collections, embeddings, ingestion pipelines, or retrieval behavior are implemented. Qdrant is not involved in workspace, ticket, or AgentRun persistence.
 
 ## Asynchronous processing direction
 
-A later phase will introduce a PostgreSQL-backed asynchronous worker model.
+Durable AgentRun scheduling is implemented during ticket intake. A later phase will introduce a PostgreSQL-backed asynchronous worker model that claims and executes queued runs.
 
 The initial architecture intentionally avoids Redis, Celery, Kafka, and SQS because the first platform version prioritizes:
 
@@ -341,18 +368,23 @@ The initial architecture intentionally avoids Redis, Celery, Kafka, and SQS beca
 
 The API and worker will eventually run as separate processes while sharing the same package and persistence model.
 
-The repository foundation does not implement:
+The current phase does not implement:
 
 - worker polling;
 - job claiming;
 - leases;
 - retry processing;
 - queue abstractions;
-- worker entry points.
+- worker entry points;
+- AgentRun inspection endpoints.
+
+Scheduling details are documented in [`agent-run-scheduling.md`](agent-run-scheduling.md).
 
 ## AI system boundaries
 
 AI capabilities are not part of the current implementation phase.
+
+A queued deterministic-baseline AgentRun does not indicate that AI classification has occurred. It records only that durable processing has been scheduled.
 
 Future AI behavior is expected to remain behind application-owned boundaries for:
 
@@ -419,7 +451,8 @@ The initial settings model includes:
 - PostgreSQL pool configuration where justified;
 - Qdrant URL;
 - optional Qdrant API key;
-- dependency health-check timeout.
+- dependency health-check timeout;
+- worker maximum attempts copied into newly scheduled AgentRun records.
 
 Secrets and complete connection credentials must not be logged.
 
@@ -472,8 +505,9 @@ They validate behavior such as:
 - liveness behavior;
 - readiness aggregation;
 - dependency failure handling;
-- domain invariants;
+- domain invariants, including AgentRun and AgentRunAttempt;
 - application service command and query behavior;
+- transactional ticket-intake orchestration;
 - ORM mapping and metadata;
 - named constraints;
 - persistence model registration;
@@ -490,9 +524,10 @@ They validate:
 - real Qdrant connectivity;
 - readiness against live dependencies;
 - dependency failure behavior;
-- Alembic upgrade, downgrade, and re-upgrade;
+- Alembic upgrade, downgrade, re-upgrade, and metadata parity;
 - workspace and ticket repository behavior;
 - concurrency-sensitive uniqueness enforcement;
+- atomic ticket and AgentRun commit and rollback behavior;
 - workspace and ticket HTTP API behavior;
 - stable expected-error responses;
 - opaque cursor pagination.
@@ -538,7 +573,7 @@ Service extraction is not a default objective. It should be driven by clear owne
 
 ## Repository foundation scope
 
-The repository foundation and Slice 1 establish:
+The repository foundation, Slice 1, and durable AgentRun scheduling establish:
 
 - project and dependency management;
 - local PostgreSQL and Qdrant infrastructure;
@@ -550,6 +585,8 @@ The repository foundation and Slice 1 establish:
 - infrastructure connectivity checks;
 - SQLAlchemy and Alembic foundations;
 - workspace and ticket domain persistence;
+- AgentRun and AgentRunAttempt persistence foundations;
+- atomic Ticket and initial AgentRun scheduling;
 - application services and versioned business APIs;
 - stable expected-error contracts;
 - opaque cursor pagination;
@@ -565,9 +602,10 @@ The current phase does not implement:
 - authentication or authorization;
 - authenticated tenant isolation;
 - asynchronous worker behavior;
-- AgentRun;
-- job queues, claiming, leases, retries, or worker recovery;
+- job claiming, leases, retries, or stale lease recovery;
+- AgentRun inspection endpoints;
 - LLM calls;
+- AI classification;
 - prompt execution or versioning;
 - token or cost tracking;
 - ingestion;
@@ -583,6 +621,6 @@ The current phase does not implement:
 - public cloud deployment;
 - infrastructure as code.
 
-Ticket status remains `open` after intake. AI execution state will belong to AgentRun in Slice 2 rather than expanding the ticket lifecycle prematurely.
+Ticket status remains `open` after intake. Durable AgentRun scheduling is implemented. Worker execution, claiming, leases, retries, and recovery remain intentional scope boundaries for the next independently reviewable capability.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -44,13 +44,15 @@ They validate:
 - readiness failure responses;
 - response sanitization;
 - workspace and ticket domain invariants;
+- AgentRun and AgentRunAttempt domain invariant tests;
 - application service command and query behavior;
-- ORM mapping and metadata;
+- transactional ticket-intake orchestration;
+- SQLAlchemy mapping and metadata tests for AgentRun persistence;
 - named PostgreSQL constraints declared on persistence records;
 - persistence model registration;
 - PostgreSQL constraint-name inspection helpers;
 - workspace API schemas;
-- ticket API schemas;
+- ticket API schemas, including the nested processing-run response;
 - opaque ticket cursor encoding and invalid-cursor rejection.
 
 Unit tests use mocks only at external boundaries.
@@ -79,8 +81,11 @@ Targeted domain, application, persistence, and API unit coverage:
 
 ```powershell
 uv run pytest tests/unit/modules/workspaces/domain tests/unit/modules/tickets/domain
+uv run pytest tests/unit/modules/agent_runs/domain
 uv run pytest tests/unit/modules/workspaces/application tests/unit/modules/tickets/application
+uv run pytest tests/unit/application/test_ticket_intake.py
 uv run pytest tests/unit/modules/workspaces/infrastructure tests/unit/modules/tickets/infrastructure
+uv run pytest tests/unit/modules/agent_runs/infrastructure
 uv run pytest tests/unit/modules/workspaces/api
 uv run pytest tests/unit/modules/tickets/api
 uv run pytest tests/unit/infrastructure/postgresql
@@ -91,6 +96,7 @@ Application service unit coverage:
 ```powershell
 uv run pytest tests/unit/modules/workspaces/application/test_services.py
 uv run pytest tests/unit/modules/tickets/application/test_services.py
+uv run pytest tests/unit/application/test_ticket_intake.py
 ```
 
 Workspace schema and ticket schema plus cursor unit coverage:
@@ -100,6 +106,7 @@ uv run pytest tests/unit/modules/workspaces/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_pagination.py
 ```
+
 ## Integration tests
 
 Integration tests require live PostgreSQL and Qdrant services.
@@ -113,8 +120,8 @@ They validate:
 - readiness with healthy dependencies;
 - Alembic import and configuration;
 - Alembic connectivity to PostgreSQL;
-- migration upgrade, downgrade, and re-upgrade;
-- creation of `workspaces` and `tickets` tables;
+- migration upgrade, downgrade, and parity checks;
+- creation of `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables;
 - workspace persistence;
 - duplicate workspace slug translation;
 - transaction rollback;
@@ -125,9 +132,13 @@ They validate:
 - deterministic ticket listing;
 - keyset repository navigation;
 - concurrent duplicate external-reference insertion;
+- atomic ticket and run commit;
+- run insertion failure rolling back the ticket;
+- duplicate ticket conflict creating no additional run;
 - workspace API creation and retrieval;
 - duplicate slug conflict responses;
 - ticket API intake, retrieval, and listing;
+- API response and persistence verification for the processing-run reference;
 - request and correlation identifier persistence;
 - duplicate external-reference conflict responses;
 - cross-workspace `404` behavior;
@@ -182,17 +193,25 @@ Targeted Alembic, repository, and API integration coverage:
 uv run pytest tests/integration/test_alembic.py
 uv run pytest tests/integration/modules/workspaces/infrastructure
 uv run pytest tests/integration/modules/tickets/infrastructure
+uv run pytest tests/integration/application/test_ticket_intake.py
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
 ```
 
 The concurrency-sensitive duplicate external-reference repository test remains part of the ticket infrastructure integration suite and should continue to run against real PostgreSQL.
 
+Atomic ticket and AgentRun scheduling coverage:
+
+```powershell
+uv run pytest tests/integration/application/test_ticket_intake.py
+```
+
 Workspace and ticket API integration coverage:
 
 ```powershell
 uv run pytest tests/integration/api/test_workspaces.py tests/integration/api/test_tickets.py
 ```
+
 ## Full test suite
 
 Run all tests:
@@ -366,6 +385,9 @@ Workspace API integration coverage verifies:
 Ticket API integration coverage verifies:
 
 - request and correlation identifier persistence on intake;
+- nested ticket and processing-run response shape;
+- queued `ticket-processing` / `deterministic-baseline-v1` processing reference;
+- persistence of the referenced AgentRun after successful creation;
 - missing workspace behavior for ticket creation and listing;
 - duplicate external-reference conflicts within one workspace;
 - reuse of the same external reference across workspaces;
@@ -376,11 +398,18 @@ Ticket API integration coverage verifies:
 - page-size validation;
 - request schema validation errors.
 
-Run the focused API suites:
+Transactional ticket-intake integration coverage verifies:
+
+- atomic ticket and run commit;
+- run insertion failure rolling back the ticket;
+- duplicate ticket conflict creating no additional run.
+
+Run the focused API and intake suites:
 
 ```powershell
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
+uv run pytest tests/integration/application/test_ticket_intake.py
 ```
 
 Full API integration tests require PostgreSQL and applied migrations.
@@ -492,7 +521,7 @@ docker compose ps
 
 ## Alembic validation
 
-The current migration head creates the `workspaces` and `tickets` tables.
+The current migration head creates the `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables.
 
 Migration lifecycle commands:
 
@@ -508,10 +537,11 @@ uv run alembic heads
 Expected behavior:
 
 - commands complete successfully;
-- the expected workspace and ticket revision is reported as head;
-- upgrade creates `workspaces` and `tickets`;
+- the expected revision is reported as head;
+- upgrade creates `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`;
 - downgrade removes those business tables;
-- re-upgrade restores them.
+- re-upgrade restores them;
+- migration metadata remains aligned with SQLAlchemy model metadata.
 
 Validate offline execution:
 
@@ -529,7 +559,7 @@ docker compose exec postgresql `
   -c "\dt"
 ```
 
-After upgrade, the schema includes `workspaces` and `tickets`.
+After upgrade, the schema includes `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`.
 
 Downgrade commands must only run against the local development or test database.
 
@@ -684,12 +714,15 @@ Later implementation phases are expected to add tests for:
 - authorization boundaries;
 - authenticated tenant isolation;
 - asynchronous job claiming;
-- AgentRun behavior;
 - queue leases, retries, and worker recovery;
+- attempt creation during execution;
+- lease-token fencing transitions;
 - duplicate execution;
 - idempotency;
 - retry scheduling;
 - stale lease recovery;
+- graceful worker shutdown;
+- AgentRun inspection endpoints;
 - structured LLM outputs;
 - retrieval quality and Qdrant indexing;
 - LangGraph orchestration;
@@ -700,4 +733,4 @@ Later implementation phases are expected to add tests for:
 - prompt regression;
 - evaluation thresholds.
 
-Authentication, asynchronous processing, and AI execution remain intentional scope boundaries for the current suite.
+Authentication, worker execution, and AI classification remain intentional scope boundaries for the current suite. Durable AgentRun scheduling coverage is part of the current suite.
