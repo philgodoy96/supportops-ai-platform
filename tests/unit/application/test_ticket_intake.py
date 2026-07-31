@@ -11,6 +11,10 @@ from supportops.application.ticket_intake import (
     CreateTicketWithInitialRun,
     TicketIntakeResult,
 )
+from supportops.modules.agent_runs.domain.claiming import (
+    AgentRunClaim,
+    ClaimAgentRunCommand,
+)
 from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
@@ -149,6 +153,12 @@ class FakeAgentRunRepository:
             raise self.add_failure
 
         self.added_run = agent_run
+
+    async def claim_next_available(
+        self,
+        command: ClaimAgentRunCommand,
+    ) -> AgentRunClaim | None:
+        raise AssertionError("claim_next_available must not be called")
 
 
 def create_service(
