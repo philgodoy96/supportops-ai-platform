@@ -73,6 +73,11 @@ class TicketRecord(Base):
     __table_args__ = (
         UniqueConstraint(
             "workspace_id",
+            "id",
+            name="uq_tickets_workspace_id",
+        ),
+        UniqueConstraint(
+            "workspace_id",
             "external_reference",
             name="uq_tickets_workspace_external_reference",
         ),

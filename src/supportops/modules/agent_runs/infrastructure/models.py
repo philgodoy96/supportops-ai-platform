@@ -212,6 +212,10 @@ class AgentRunRecord(Base):
             name="agent_run_lease_state",
         ),
         CheckConstraint(
+            ("lease_expires_at IS NULL OR lease_expires_at > first_started_at"),
+            name="agent_run_lease_expiration_order",
+        ),
+        CheckConstraint(
             (
                 "("
                 "status IN ('succeeded', 'failed') "
@@ -503,6 +507,10 @@ class AgentRunAttemptRecord(Base):
         CheckConstraint(
             ("outcome IS NULL OR outcome = 'succeeded' OR error_code IS NOT NULL"),
             name="agent_run_attempt_failure_error_state",
+        ),
+        CheckConstraint(
+            "outcome IS NOT NULL OR error_code IS NULL",
+            name="agent_run_attempt_active_error_state",
         ),
     )
 
