@@ -1,5 +1,6 @@
 """PostgreSQL repository for durable AgentRuns."""
 
+from collections.abc import Sequence
 from datetime import timedelta
 from uuid import UUID
 
@@ -55,6 +56,40 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
             AgentRunRecord.from_domain(agent_run),
         )
         await self._session.flush()
+
+    async def get(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_run_id: UUID,
+    ) -> AgentRun | None:
+        """Return one workspace-scoped AgentRun when it exists."""
+
+        statement = select(AgentRunRecord).where(
+            AgentRunRecord.id == agent_run_id,
+            AgentRunRecord.workspace_id == workspace_id,
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+        return record.to_domain()
+
+    async def list_attempts(
+        self,
+        *,
+        agent_run_id: UUID,
+    ) -> Sequence[AgentRunAttempt]:
+        """Return attempts ordered by attempt number ascending."""
+
+        statement = (
+            select(AgentRunAttemptRecord)
+            .where(AgentRunAttemptRecord.agent_run_id == agent_run_id)
+            .order_by(AgentRunAttemptRecord.attempt_number.asc())
+        )
+        result = await self._session.execute(statement)
+        records = result.scalars().all()
+        return tuple(record.to_domain() for record in records)
 
     async def claim_next_available(
         self,
