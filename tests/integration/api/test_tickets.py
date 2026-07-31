@@ -1,12 +1,21 @@
 """Integration tests for workspace-scoped ticket HTTP endpoints."""
 
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from supportops.modules.agent_runs.infrastructure.models import (
+    AgentRunRecord,
+)
 
 pytestmark = pytest.mark.integration
+
+type TicketPayload = dict[str, object]
+type ProcessingRunPayload = dict[str, object]
 
 
 async def create_workspace(
@@ -37,7 +46,11 @@ async def create_ticket(
     subject: str = "Unable to access billing",
     external_reference: str | None = None,
     correlation_id: str | None = None,
-) -> tuple[dict[str, object], dict[str, str]]:
+) -> tuple[
+    TicketPayload,
+    ProcessingRunPayload,
+    dict[str, str],
+]:
     """Create a ticket through the HTTP API."""
 
     headers = {}
@@ -57,10 +70,14 @@ async def create_ticket(
 
     assert response.status_code == 201
 
-    payload = response.json()
-    ticket = cast(dict[str, object], payload["ticket"])
+    payload = cast(dict[str, object], response.json())
+    ticket = cast(TicketPayload, payload["ticket"])
+    processing_run = cast(
+        ProcessingRunPayload,
+        payload["processing_run"],
+    )
 
-    return ticket, dict(response.headers)
+    return ticket, processing_run, dict(response.headers)
 
 
 async def test_create_ticket_persists_trace_identifiers(
@@ -74,22 +91,12 @@ async def test_create_ticket_persists_trace_identifiers(
     )
     correlation_id = str(uuid4())
 
-    response = await integration_client.post(
-        f"/api/v1/workspaces/{workspace['id']}/tickets",
-        json={
-            "subject": "Unable to access billing",
-            "description": ("The dashboard returns an access error."),
-            "external_reference": "SUP-1042",
-        },
-        headers={"X-Correlation-ID": correlation_id},
+    ticket, processing_run, headers = await create_ticket(
+        integration_client,
+        workspace_id=workspace["id"],
+        external_reference="SUP-1042",
+        correlation_id=correlation_id,
     )
-
-    assert response.status_code == 201
-
-    payload = response.json()
-    ticket = payload["ticket"]
-    processing_run = payload["processing_run"]
-    headers = dict(response.headers)
 
     assert ticket["workspace_id"] == workspace["id"]
     assert ticket["status"] == "open"
@@ -98,13 +105,82 @@ async def test_create_ticket_persists_trace_identifiers(
     assert ticket["correlation_id"] == correlation_id
     assert processing_run["status"] == "queued"
     assert processing_run["workflow_name"] == "ticket-processing"
+    assert processing_run["workflow_version"] == ("deterministic-baseline-v1")
+    UUID(cast(str, processing_run["id"]))
+    assert "attempt_count" not in processing_run
+    assert "max_attempts" not in processing_run
+    assert "available_at" not in processing_run
+    assert "lease_owner" not in processing_run
+    assert "lease_token" not in processing_run
+    assert "lease_expires_at" not in processing_run
+    assert "last_error_code" not in processing_run
+    assert "last_error_summary" not in processing_run
+    assert headers["x-correlation-id"] == correlation_id
+
+
+async def test_create_ticket_returns_minimal_processing_run_reference(
+    integration_client: AsyncClient,
+    clean_business_tables: None,
+) -> None:
+    workspace = await create_workspace(
+        integration_client,
+        name="Platform Support",
+        slug="platform-support",
+    )
+
+    ticket, processing_run, _ = await create_ticket(
+        integration_client,
+        workspace_id=workspace["id"],
+    )
+
     assert set(processing_run) == {
         "id",
         "status",
         "workflow_name",
         "workflow_version",
     }
-    assert headers["x-correlation-id"] == correlation_id
+    assert "ingestion_request_id" in ticket
+    assert "correlation_id" in ticket
+    assert UUID(cast(str, ticket["id"])) != UUID(
+        cast(str, processing_run["id"]),
+    )
+
+
+async def test_create_ticket_persists_one_initial_agent_run(
+    integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
+    clean_business_tables: None,
+) -> None:
+    workspace = await create_workspace(
+        integration_client,
+        name="Platform Support",
+        slug="platform-support",
+    )
+
+    ticket, processing_run, _ = await create_ticket(
+        integration_client,
+        workspace_id=workspace["id"],
+    )
+
+    query_result = await postgresql_session.execute(
+        select(AgentRunRecord).where(
+            AgentRunRecord.ticket_id == UUID(cast(str, ticket["id"])),
+        ),
+    )
+    records = list(query_result.scalars())
+
+    assert len(records) == 1
+    record = records[0]
+    assert str(record.id) == processing_run["id"]
+    assert str(record.workspace_id) == workspace["id"]
+    assert record.status == "queued"
+    assert record.workflow_name == "ticket-processing"
+    assert record.workflow_version == ("deterministic-baseline-v1")
+    assert record.trigger_key == "initial-ticket-processing"
+    assert record.attempt_count == 0
+    assert record.lease_token is None
+    assert str(record.ingestion_request_id) == ticket["ingestion_request_id"]
+    assert str(record.correlation_id) == ticket["correlation_id"]
 
 
 async def test_create_ticket_for_missing_workspace_returns_404(
@@ -138,7 +214,7 @@ async def test_duplicate_external_reference_is_scoped_to_workspace(
         slug="customer-success",
     )
 
-    await create_ticket(
+    _, _, _ = await create_ticket(
         integration_client,
         workspace_id=workspace_a["id"],
         external_reference="SUP-1042",
@@ -181,7 +257,7 @@ async def test_cross_workspace_ticket_retrieval_returns_404(
         name="Customer Success",
         slug="customer-success",
     )
-    ticket, _ = await create_ticket(
+    ticket, _, _ = await create_ticket(
         integration_client,
         workspace_id=workspace_a["id"],
     )
@@ -214,13 +290,13 @@ async def test_ticket_listing_is_isolated_and_paginated(
     )
 
     for index in range(3):
-        await create_ticket(
+        _, _, _ = await create_ticket(
             integration_client,
             workspace_id=workspace_a["id"],
             subject=f"Workspace A ticket {index}",
         )
 
-    await create_ticket(
+    _, _, _ = await create_ticket(
         integration_client,
         workspace_id=workspace_b["id"],
         subject="Workspace B ticket",
