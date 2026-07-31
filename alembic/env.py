@@ -9,12 +9,16 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from supportops.core.settings import Settings
 from supportops.infrastructure.postgresql import Base
+from supportops.infrastructure.postgresql.model_registry import (
+    register_persistence_models,
+)
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+register_persistence_models()
 target_metadata = Base.metadata
 
 
