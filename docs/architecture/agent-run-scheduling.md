@@ -10,8 +10,9 @@ transaction. This guarantees that a committed ticket always has a durable
 processing reference and prevents work from being scheduled independently of
 the business record it belongs to.
 
-This document describes the scheduling boundary implemented before worker
-execution is introduced.
+This document focuses on transactional scheduling and the handoff boundary to
+worker processing. Runtime process topology and worker operations are detailed
+in [`runtime-topology.md`](runtime-topology.md).
 
 ## Scheduling flow
 
@@ -55,10 +56,14 @@ This boundary ensures that:
 - a successful ticket creation persists one initial `AgentRun`;
 - an `AgentRun` insertion failure rolls back the ticket;
 - a ticket conflict creates no additional `AgentRun`;
-- the API does not schedule durable work in a second transaction.
+- the API does not schedule durable work in a second transaction;
+- the HTTP request returns after the scheduling transaction commits;
+- the HTTP request does not execute the workflow.
 
 No in-memory queue, external broker, or transactional outbox is involved in
 this scheduling path. PostgreSQL stores the authoritative work record directly.
+
+Ticket acceptance and asynchronous processing success are separate outcomes.
 
 ## Initial workflow contract
 
@@ -72,11 +77,149 @@ status = queued
 attempt_count = 0
 ```
 
-The workflow version identifies the deterministic processing contract planned
-for the first worker implementation.
+The workflow version identifies the deterministic baseline executor used by the
+worker. That executor validates the workflow contract and performs no external
+I/O, LLM call, retrieval, or ticket classification. It exists to validate the
+durable execution architecture independently from future AI behavior.
 
 A queued run does not indicate that AI classification has occurred. It records
 only that durable processing has been scheduled.
+
+## Queued state and availability
+
+After a successful scheduling commit, the initial `AgentRun` is available for
+worker claim when:
+
+- status is `queued`;
+- `available_at` is due;
+- `attempt_count` is below `max_attempts`.
+
+The initial run sets `available_at` to the scheduling timestamp, so it becomes
+eligible immediately after commit.
+
+Later retries use status `retry_scheduled` with a future `available_at`. Those
+runs become claim-eligible only after their availability time is due.
+
+## After initial scheduling
+
+Once the API transaction commits:
+
+1. the ticket exists with status `open`;
+2. the initial `AgentRun` exists with status `queued`;
+3. no `AgentRunAttempt` has been created yet;
+4. the HTTP response returns a minimal `processing_run` projection;
+5. the separate worker process becomes responsible for recovery, claim,
+   execution, and fenced outcome persistence.
+
+The API does not claim runs, acquire leases, execute the workflow, or report
+final processing success in the ticket creation response.
+
+## Worker claim eligibility
+
+The worker claims at most one eligible run per cycle.
+
+Eligible states are:
+
+```text
+queued
+retry_scheduled
+```
+
+Claim eligibility also requires:
+
+- `available_at` due at claim time;
+- `attempt_count` below `max_attempts`.
+
+Deterministic claim ordering is:
+
+```text
+available_at ASC, created_at ASC, id ASC
+```
+
+PostgreSQL `FOR UPDATE SKIP LOCKED` allows multiple worker processes to claim
+distinct runs safely.
+
+## Attempt creation
+
+A successful claim:
+
+- changes the run to `running`;
+- increments `attempt_count`;
+- creates one `AgentRunAttempt`;
+- assigns a lease owner, lease token, and lease expiry;
+- commits before executor work begins.
+
+The claim transaction does not execute the workflow. Execution happens after
+that commit.
+
+## Execution outside transaction
+
+After claim commit, the worker:
+
+1. loads the ticket in a short transaction;
+2. runs the configured executor outside database transactions;
+3. bounds execution with a timeout;
+4. persists success or failure in a separate fenced transaction.
+
+The current executor is `deterministic-ticket-processing`. Typed retryable and
+terminal failures are handled explicitly. Unexpected exceptions become
+sanitized retryable failures. Raw exception text is not persisted.
+
+## Success, failure, and retry transitions
+
+Persisted `AgentRun` states are:
+
+```text
+queued
+running
+retry_scheduled
+succeeded
+failed
+```
+
+Persisted attempt outcomes include:
+
+```text
+succeeded
+retryable_failure
+terminal_failure
+timed_out
+lease_expired
+```
+
+Successful completion changes the run to `succeeded`, closes the active
+attempt, and clears previous safe error details.
+
+Retryable failures and timeouts are retried only while attempt budget remains.
+Retry scheduling uses bounded exponential backoff and moves the run to
+`retry_scheduled` with a future `available_at`.
+
+Terminal failures and exhausted retryable failures change the run to `failed`.
+
+## Lease-token fencing
+
+Outcome persistence uses lease-token fencing.
+
+Only the active lease token may complete or fail the current running attempt.
+A repeated or stale completion returns `lease_lost` and does not modify the
+current state.
+
+Delivery semantics are at-least-once execution. Exactly-once execution is not
+claimed. Future executors and tools must make side effects idempotent or
+otherwise safely fenced.
+
+## Recovery relationship
+
+Every worker cycle attempts expired lease recovery before claiming available
+work.
+
+Recovery selects expired `running` runs, closes the abandoned attempt with
+outcome `lease_expired`, and does not increment `attempt_count` or create a
+new attempt. A recoverable run returns to `retry_scheduled`. An exhausted run
+becomes `failed`.
+
+Recovery and claim remain separate operations. Scheduling itself does not
+perform recovery.
 
 ## Retry budget persistence
 
@@ -144,11 +287,11 @@ ingestion_request_id
 = the HTTP request that accepted the ticket
 
 correlation_id
-= the cross-process identifier that will connect API and worker activity
+= the cross-process identifier that connects API and worker activity
 ```
 
-The future worker will generate a separate execution request identifier for
-each claimed attempt while preserving the run correlation identifier.
+The worker generates a separate execution request identifier for each claimed
+attempt while preserving the run correlation identifier.
 
 ## Ticket creation response
 
@@ -178,7 +321,8 @@ The ticket creation endpoint returns:
 ```
 
 The endpoint returns `201 Created` because the ticket itself has been created
-successfully. Processing remains asynchronous.
+successfully. Processing remains asynchronous. The response does not report
+final processing success.
 
 The minimal processing reference intentionally excludes:
 
@@ -207,17 +351,17 @@ Current persistence fields include:
 - lifecycle status;
 - availability timestamp;
 - retry budget;
-- lease fields reserved for worker ownership;
+- lease ownership fields used by the worker;
 - terminal timestamps;
 - safe error fields;
 - request and correlation identifiers.
 
 ### AgentRunAttempt
 
-`AgentRunAttempt` stores the history of each future claimed execution.
+`AgentRunAttempt` stores the history of each claimed execution.
 
-The table exists in the persistence model, but scheduling does not create an
-attempt. Attempts are created only when a worker successfully claims a run.
+Scheduling does not create an attempt. Attempts are created only when a worker
+successfully claims a run.
 
 ## Current boundary
 
@@ -229,10 +373,9 @@ The current implementation provides:
 - duplicate initial scheduling protection;
 - stable initial workflow identity;
 - minimal processing references in the ticket creation response;
+- handoff to PostgreSQL worker claim, execution, fencing, retry, and recovery;
 - integration coverage for commit and rollback behavior.
 
-It does not yet execute queued runs.
-
-The PostgreSQL worker, atomic claim operation, leases, fencing, retries, stale
-ownership recovery, and attempt lifecycle are introduced as the next
-independently reviewable capability.
+AgentRun inspection endpoints remain planned. Redis, Celery, Kafka, SQS, and an
+outbox remain intentionally deferred because PostgreSQL already provides
+transactional durability and adequate local and portfolio scope for this phase.

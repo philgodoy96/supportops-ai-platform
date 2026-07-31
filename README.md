@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, and durable AgentRun scheduling foundations are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, and the PostgreSQL-backed worker are implemented.
 
 The current platform includes:
 
@@ -15,6 +15,7 @@ The current platform includes:
 - validated environment-based configuration;
 - structured JSON logging with HTTP request traceability;
 - a FastAPI application factory and explicit lifecycle management;
+- a separate `supportops-worker` process for AgentRun execution;
 - local PostgreSQL and Qdrant services through Docker Compose;
 - async SQLAlchemy and Qdrant client lifecycle foundations;
 - liveness and readiness endpoints;
@@ -31,7 +32,12 @@ The current platform includes:
 - workspace creation and retrieval API;
 - workspace-scoped ticket intake;
 - atomic Ticket and initial AgentRun persistence;
-- durable AgentRun and AgentRunAttempt persistence foundations;
+- durable AgentRun and AgentRunAttempt persistence;
+- PostgreSQL claiming with `FOR UPDATE SKIP LOCKED`;
+- attempt history, leases, and lease-token fencing;
+- bounded retries and expired lease recovery;
+- deterministic baseline execution outside database transactions;
+- cooperative worker shutdown with structured operational logs;
 - database-enforced workspace and ticket ownership for AgentRun records;
 - duplicate initial scheduling prevention;
 - a minimal processing-run reference returned by ticket creation;
@@ -42,7 +48,7 @@ The current platform includes:
 - request and correlation identifier persistence;
 - cross-workspace isolation behavior;
 - application services with command and query use cases;
-- repository, application, and API tests;
+- repository, application, worker, and API tests;
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
@@ -50,9 +56,9 @@ The current platform includes:
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
-A queued `deterministic-baseline-v1` processing run records that durable work has been scheduled. It does not represent AI classification.
+Ticket acceptance and asynchronous processing success are separate outcomes. A queued `deterministic-baseline-v1` processing run records that durable work has been scheduled. It does not represent AI classification. The deterministic baseline validates the durable execution architecture and performs no LLM call, retrieval, or ticket classification.
 
-PostgreSQL-backed worker execution, queue claiming, leases, retries, stale lease recovery, AgentRun inspection endpoints, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
+AgentRun inspection endpoints, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
 
 ## Engineering goals
 
@@ -71,19 +77,21 @@ The project is designed to demonstrate:
 
 ## Architecture
 
-The platform follows an API-first modular monolith architecture.
+The platform follows an API-first modular monolith architecture with separate deployable processes.
 
-The API process and future asynchronous worker will share:
+The FastAPI process and the PostgreSQL worker process share:
 
 - the same Python package;
 - the same application services;
 - the same domain model;
 - the same PostgreSQL database;
-- the same infrastructure adapters.
+- the same infrastructure adapters where each process requires them.
 
-PostgreSQL is the transactional source of truth.
+The API owns HTTP acceptance and transactional AgentRun scheduling. The worker owns recovery, claim, execution, and fenced outcome persistence. PostgreSQL is the durable work queue and transactional source of truth. The worker does not initialize or depend on Qdrant.
 
 Qdrant is treated as a rebuildable retrieval index. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
+
+Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Future executors and tools must make side effects idempotent or otherwise safely fenced.
 
 The current runtime foundation uses:
 
@@ -170,9 +178,11 @@ The first business modules provide:
 - a minimal SQLAlchemy transaction adapter for application-owned boundaries;
 - repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
 
-### Durable AgentRun scheduling
+### Durable AgentRun scheduling and PostgreSQL worker
 
-Ticket intake schedules durable processing in the same application-owned transaction that creates the ticket:
+Ticket intake schedules durable processing in the same application-owned transaction that creates the ticket. The HTTP request returns after that transaction commits and does not execute the workflow.
+
+Implemented behavior includes:
 
 - frozen AgentRun and AgentRunAttempt domain entities with validated invariants;
 - PostgreSQL `agent_runs` and `agent_run_attempts` tables with query-driven indexes;
@@ -180,11 +190,19 @@ Ticket intake schedules durable processing in the same application-owned transac
 - unique initial trigger enforcement for duplicate initial scheduling prevention;
 - atomic Ticket and initial AgentRun creation;
 - a persisted initial retry budget copied from configuration;
-- a minimal processing-run reference in the ticket creation response.
+- a minimal processing-run reference in the ticket creation response;
+- a separate `supportops-worker` process using PostgreSQL as its durable work queue;
+- claim eligibility for `queued` and `retry_scheduled` runs with due `available_at`;
+- PostgreSQL `FOR UPDATE SKIP LOCKED` claiming across multiple worker processes;
+- attempt history, leases, and lease-token fencing;
+- bounded exponential backoff retries;
+- expired lease recovery before each claim cycle;
+- deterministic baseline execution (`deterministic-ticket-processing`) outside transactions;
+- cooperative SIGINT and SIGTERM shutdown with engine disposal.
 
-A queued deterministic-baseline run does not represent AI classification. Worker execution, claiming, leases, retries, recovery, and AgentRun inspection remain planned.
+A queued deterministic-baseline run does not represent AI classification. AgentRun inspection endpoints remain planned.
 
-Scheduling behavior is documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md).
+Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md).
 
 ### Workspace and ticket API
 
@@ -222,9 +240,10 @@ The repository includes:
 - domain invariant tests, including AgentRun and AgentRunAttempt;
 - application service unit coverage;
 - transactional ticket-intake unit coverage;
+- worker claim, retry, fencing, recovery, and process unit coverage;
 - workspace and ticket API schema and pagination unit coverage;
 - ORM mapping, named-constraint, and model-registration tests;
-- repository integration and concurrency-sensitive tests;
+- repository integration and concurrency-sensitive tests, including SKIP LOCKED claiming;
 - workspace and ticket API integration coverage;
 - atomic ticket and AgentRun commit and rollback coverage;
 - Alembic upgrade, downgrade, and metadata-parity coverage;
@@ -241,12 +260,10 @@ The repository includes:
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module currently provides durable scheduling foundations and is coordinated during ticket intake.
+The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules, plus a `supportops.worker` process entry point. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, execution, retry, and recovery foundations coordinated during ticket intake and by the worker process.
 
 Future implementation phases are expected to introduce or extend modules for:
 
-- PostgreSQL-backed worker execution and AgentRun lifecycle transitions;
-- queue claiming, leases, retries, and worker recovery;
 - AgentRun inspection endpoints;
 - structured LLM classification;
 - internal runbook ingestion;
@@ -310,10 +327,13 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       ├── infrastructure/
 │       │   ├── postgresql/
 │       │   └── qdrant/
-│       └── modules/
-│           ├── agent_runs/
-│           ├── tickets/
-│           └── workspaces/
+│       ├── modules/
+│       │   ├── agent_runs/
+│       │   ├── tickets/
+│       │   └── workspaces/
+│       └── worker/
+│           ├── __init__.py
+│           └── main.py
 ├── tests/
 │   ├── integration/
 │   └── unit/
@@ -328,7 +348,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain and infrastructure layers. Workspace and ticket modules also expose application and API layers. Cross-module ticket intake lives under `supportops.application`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain and infrastructure layers. Workspace and ticket modules also expose application and API layers. The `agent_runs` module includes worker-facing application services. Cross-module ticket intake lives under `supportops.application`. The worker process entry point lives under `supportops.worker`.
 
 ## Local setup
 
@@ -351,13 +371,28 @@ docker compose up -d
 docker compose ps
 ```
 
-Start the API:
+Apply migrations before exercising business routes:
+
+```powershell
+uv run alembic upgrade head
+```
+
+Start the API in one terminal:
 
 ```powershell
 uv run uvicorn supportops.api.main:app `
   --host 127.0.0.1 `
   --port 8000
 ```
+
+Start the worker in another terminal:
+
+```powershell
+$env:SUPPORTOPS_WORKER_ID="worker-local-1"
+uv run supportops-worker
+```
+
+Docker Compose provisions infrastructure only. A worker service is intentionally not added to Compose in this phase.
 
 Validate liveness:
 
@@ -369,12 +404,6 @@ Validate readiness:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/health/ready
-```
-
-Apply migrations before exercising business routes:
-
-```powershell
-uv run alembic upgrade head
 ```
 
 Workspace and ticket request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
@@ -401,6 +430,8 @@ Required application values include:
 SUPPORTOPS_POSTGRESQL_URL
 SUPPORTOPS_QDRANT_URL
 ```
+
+Worker timing and identity are controlled by `SUPPORTOPS_WORKER_*` variables. Defaults are validated at process startup, including lease-versus-timeout and retry-base-versus-max invariants.
 
 The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
 
@@ -575,17 +606,19 @@ Implemented:
 - database-enforced workspace and ticket ownership;
 - duplicate initial scheduling prevention;
 - persisted initial retry budget;
-- minimal processing-run reference on ticket creation.
+- minimal processing-run reference on ticket creation;
+- PostgreSQL-backed worker execution;
+- queue claiming with `FOR UPDATE SKIP LOCKED`;
+- leases and lease-token fencing;
+- bounded exponential backoff retries;
+- expired lease recovery;
+- deterministic baseline executor;
+- separate worker process with cooperative shutdown.
 
 Planned:
 
-- PostgreSQL-backed worker execution;
-- queue claiming and leases;
-- retry behavior;
-- stale ownership recovery;
-- worker recovery;
 - AgentRun inspection endpoints;
-- idempotent processing.
+- idempotent side effects for future executors and tools.
 
 ### Retrieval
 
@@ -623,8 +656,6 @@ The following capabilities remain deferred to preserve architectural focus and a
 
 - authentication and authorization;
 - authenticated tenant isolation;
-- PostgreSQL-backed worker execution;
-- queue claiming, leases, retries, and stale lease recovery;
 - AgentRun inspection endpoints;
 - Redis, Celery, Kafka, and SQS;
 - LLM provider integrations;
@@ -649,7 +680,7 @@ The following capabilities remain deferred to preserve architectural focus and a
 
 Workspace scoping establishes data ownership. It is not authentication or authorization, and it does not establish caller identity or secure multi-tenancy.
 
-Durable AgentRun scheduling is implemented. Worker execution remains an intentional scope boundary until claiming, leases, retries, and recovery are introduced as a separately reviewable capability.
+Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
