@@ -13,15 +13,16 @@ The current platform includes:
 - liveness and readiness endpoints;
 - structured JSON logging with HTTP request traceability;
 - Alembic migrations for workspace, ticket, and AgentRun tables;
-- versioned workspace and ticket HTTP APIs;
+- versioned workspace, ticket, and AgentRun HTTP APIs;
 - durable AgentRun scheduling and PostgreSQL worker execution;
+- workspace-scoped AgentRun inspection;
 - unit and integration tests;
 - local quality checks.
 
-AI classification, retrieval, and AgentRun inspection endpoints remain outside
-the current implementation scope. Workspace scoping is not authentication or
-authorization. Docker Compose provisions infrastructure only and intentionally
-does not run the worker.
+AI classification and retrieval remain outside the current implementation
+scope. Workspace scoping is not authentication or authorization. Docker
+Compose provisions infrastructure only and intentionally does not run the
+worker.
 
 ## Prerequisites
 
@@ -219,9 +220,16 @@ The serialized JSON response contains separate states for:
 
 When either dependency is unavailable, readiness returns HTTP `503 Service Unavailable`.
 
-## Validate workspace and ticket APIs
+## Validate workspace, ticket, and AgentRun APIs
 
-With infrastructure healthy, migrations applied, and the API running, create a workspace:
+Use three terminals:
+
+1. API process;
+2. worker process;
+3. client PowerShell session for requests.
+
+With infrastructure healthy, migrations applied, and the API running, create a
+workspace:
 
 ```powershell
 $workspace = Invoke-RestMethod `
@@ -253,6 +261,8 @@ $ticket
 $ticket.processing_run
 $ticketResponse.Headers["X-Request-ID"]
 $ticketResponse.Headers["X-Correlation-ID"]
+
+$agentRunId = $ticket.processing_run.id
 ```
 
 Expected behavior:
@@ -267,17 +277,80 @@ Expected behavior:
 - `correlation_id` matches `X-Correlation-ID`;
 - the response confirms ticket acceptance, not final processing success.
 
-With the worker running, observe structured worker logs such as
-`worker_cycle_completed` for claimed and processed runs. The deterministic
-baseline validates the workflow contract and does not perform AI classification.
+### Inspect the AgentRun while queued
 
-Complete request examples, conflict cases, cross-workspace isolation, and cursor pagination are documented in:
+If the worker has not yet claimed the run, inspect the queued state:
 
-```text
-docs/development/api-examples.md
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/agent-runs/$agentRunId"
 ```
 
-## Stop the worker
+Expected queued behavior:
+
+- status is `queued`;
+- `attempt_count` is `0`;
+- `first_started_at` and `completed_at` are null;
+- `last_error` is null.
+
+Inspect attempt history for the same run:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/agent-runs/$agentRunId/attempts"
+```
+
+Expected queued attempt history:
+
+```json
+{
+  "items": []
+}
+```
+
+### Observe worker processing and succeeded state
+
+With the worker running, observe structured worker logs such as
+`worker_cycle_completed` for claimed and processed runs. The deterministic
+baseline validates the workflow contract and does not perform AI
+classification.
+
+After processing completes, inspect the AgentRun again:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/agent-runs/$agentRunId"
+```
+
+Expected succeeded behavior for the deterministic baseline:
+
+- status is `succeeded`;
+- `attempt_count` is `1`;
+- `first_started_at` and `completed_at` are populated;
+- `last_error` is null.
+
+Inspect ordered attempt history:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/agent-runs/$agentRunId/attempts"
+```
+
+Expected succeeded attempt history:
+
+- `items` contains one attempt;
+- `attempt_number` is `1`;
+- `outcome` is `succeeded`;
+- lease tokens and execution request IDs are not present.
+
+Inspection reports current persisted state. It does not guarantee future
+completion while a run is still in progress.
+
+### Stop the worker
 
 In the worker terminal, stop the process with `Ctrl+C`.
 
@@ -289,6 +362,14 @@ Expected graceful shutdown behavior:
 
 If the grace period is exceeded, the process emits
 `worker_shutdown_grace_exceeded` before cancelling the active loop task.
+
+Complete request examples, conflict cases, cross-workspace isolation,
+AgentRun inspection responses, and cursor pagination are documented in:
+
+```text
+docs/development/api-examples.md
+```
+
 ## Validate dependency failure behavior
 
 Stop PostgreSQL:
