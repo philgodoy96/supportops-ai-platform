@@ -1,5 +1,6 @@
 """PostgreSQL repository for durable AgentRuns."""
 
+from datetime import timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, select
@@ -14,6 +15,11 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRunAttempt,
     AgentRunAttemptOutcome,
     AgentRunStatus,
+)
+from supportops.modules.agent_runs.domain.recovery import (
+    ExpiredAgentRunDisposition,
+    RecoverExpiredAgentRunCommand,
+    RecoverExpiredAgentRunResult,
 )
 from supportops.modules.agent_runs.domain.repositories import (
     AgentRunRepository,
@@ -206,6 +212,78 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
 
         await self._session.flush()
         return AgentRunTransitionResult.APPLIED
+
+    async def recover_next_expired(
+        self,
+        command: RecoverExpiredAgentRunCommand,
+    ) -> RecoverExpiredAgentRunResult | None:
+        """Atomically recover the next expired running AgentRun, if available."""
+
+        statement = (
+            select(AgentRunRecord)
+            .where(
+                AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                AgentRunRecord.lease_expires_at.is_not(None),
+                AgentRunRecord.lease_expires_at <= command.recovered_at,
+            )
+            .order_by(
+                AgentRunRecord.lease_expires_at.asc(),
+                AgentRunRecord.created_at.asc(),
+                AgentRunRecord.id.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+
+        expired_lease_token = record.lease_token
+        if expired_lease_token is None:
+            raise RuntimeError(
+                "Expired running AgentRun does not have a lease token.",
+            )
+
+        attempt = await self._load_active_attempt_for_lease(
+            agent_run_id=record.id,
+            lease_token=expired_lease_token,
+        )
+        if attempt is None:
+            raise RuntimeError(
+                "Active AgentRun attempt was not found for the expired lease.",
+            )
+
+        attempt.finished_at = command.recovered_at
+        attempt.outcome = AgentRunAttemptOutcome.LEASE_EXPIRED.value
+        attempt.error_code = command.error_code
+        attempt.error_summary = command.error_summary
+
+        record.lease_owner = None
+        record.lease_token = None
+        record.lease_expires_at = None
+        record.last_error_code = command.error_code
+        record.last_error_summary = command.error_summary
+        record.updated_at = command.recovered_at
+
+        if record.attempt_count < record.max_attempts:
+            record.status = AgentRunStatus.RETRY_SCHEDULED.value
+            record.available_at = command.recovered_at + timedelta(
+                seconds=command.retry_delay_seconds,
+            )
+            record.completed_at = None
+            disposition = ExpiredAgentRunDisposition.RETRY_SCHEDULED
+        else:
+            record.status = AgentRunStatus.FAILED.value
+            record.completed_at = command.recovered_at
+            disposition = ExpiredAgentRunDisposition.FAILED
+
+        await self._session.flush()
+        return RecoverExpiredAgentRunResult(
+            agent_run=record.to_domain(),
+            expired_lease_token=expired_lease_token,
+            disposition=disposition,
+        )
 
     async def _load_active_attempt_for_lease(
         self,

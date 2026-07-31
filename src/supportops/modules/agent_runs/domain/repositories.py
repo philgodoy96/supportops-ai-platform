@@ -7,6 +7,10 @@ from supportops.modules.agent_runs.domain.claiming import (
     ClaimAgentRunCommand,
 )
 from supportops.modules.agent_runs.domain.models import AgentRun
+from supportops.modules.agent_runs.domain.recovery import (
+    RecoverExpiredAgentRunCommand,
+    RecoverExpiredAgentRunResult,
+)
 from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
@@ -43,5 +47,13 @@ class AgentRunRepository(Protocol):
         command: FailAgentRunCommand,
     ) -> AgentRunTransitionResult:
         """Persist a fenced AgentRun failure transition."""
+
+        ...
+
+    async def recover_next_expired(
+        self,
+        command: RecoverExpiredAgentRunCommand,
+    ) -> RecoverExpiredAgentRunResult | None:
+        """Atomically recover the next expired running AgentRun, if available."""
 
         ...

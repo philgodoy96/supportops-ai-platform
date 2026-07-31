@@ -22,6 +22,10 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRun,
     AgentRunStatus,
 )
+from supportops.modules.agent_runs.domain.recovery import (
+    RecoverExpiredAgentRunCommand,
+    RecoverExpiredAgentRunResult,
+)
 from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
@@ -176,6 +180,12 @@ class FakeAgentRunRepository:
         command: FailAgentRunCommand,
     ) -> AgentRunTransitionResult:
         raise AssertionError("record_failure must not be called")
+
+    async def recover_next_expired(
+        self,
+        command: RecoverExpiredAgentRunCommand,
+    ) -> RecoverExpiredAgentRunResult | None:
+        raise AssertionError("recover_next_expired must not be called")
 
 
 def create_service(
