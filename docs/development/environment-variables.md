@@ -320,6 +320,40 @@ Continuous integration uses a higher value to reduce shared-runner flakiness:
 
 This does not change the local default.
 
+## Worker scheduling configuration
+
+### `SUPPORTOPS_WORKER_MAX_ATTEMPTS`
+
+Integer retry budget copied into each newly created `AgentRun` during ticket intake.
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+3
+```
+
+Accepted range:
+
+```text
+1 through 100
+```
+
+Purpose:
+
+- defines the maximum number of attempts available to a newly scheduled AgentRun;
+- is persisted on the AgentRun at ticket intake time;
+- remains immutable for that run after scheduling.
+
+Existing runs retain their persisted retry budget after configuration changes. Changing this setting affects only AgentRun records created after the new value is loaded.
+
+This setting does not activate worker execution. Claim, lease, retry, and recovery behavior remain planned.
+
 ## Docker Compose variables
 
 These variables configure local infrastructure containers.
@@ -433,6 +467,8 @@ SUPPORTOPS_QDRANT_API_KEY=
 SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS=2
 ```
 
+`SUPPORTOPS_WORKER_MAX_ATTEMPTS` defaults to `3` when unset and does not need to appear in the local example file.
+
 ## Validation behavior
 
 Missing required values fail during settings construction.
@@ -449,6 +485,7 @@ Examples of invalid configuration include:
 - malformed PostgreSQL DSN;
 - blank Qdrant URL;
 - API port outside the valid range;
+- worker maximum attempts outside the accepted range;
 - non-positive pool timeout;
 - non-positive dependency health timeout;
 - unsupported environment value;

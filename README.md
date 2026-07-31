@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation and Slice 1 workspace and ticket API are implemented.
+The repository foundation, Slice 1 workspace and ticket API, and durable AgentRun scheduling foundations are implemented.
 
 The current platform includes:
 
@@ -26,10 +26,15 @@ The current platform includes:
 - workspace-scoped ticket external-reference uniqueness;
 - workspace-scoped ticket repository contracts;
 - async PostgreSQL repository implementations;
-- a reversible Alembic migration for workspace and ticket tables;
+- reversible Alembic migrations for workspace, ticket, and AgentRun tables;
 - an application-owned transaction adapter;
 - workspace creation and retrieval API;
 - workspace-scoped ticket intake;
+- atomic Ticket and initial AgentRun persistence;
+- durable AgentRun and AgentRunAttempt persistence foundations;
+- database-enforced workspace and ticket ownership for AgentRun records;
+- duplicate initial scheduling prevention;
+- a minimal processing-run reference returned by ticket creation;
 - workspace-scoped ticket retrieval and listing;
 - versioned `/api/v1` business routes;
 - stable expected-error responses;
@@ -45,7 +50,9 @@ The current platform includes:
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
-Asynchronous processing, AgentRun lifecycle, queue claiming, leases, retries, worker recovery, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
+A queued `deterministic-baseline-v1` processing run records that durable work has been scheduled. It does not represent AI classification.
+
+PostgreSQL-backed worker execution, queue claiming, leases, retries, stale lease recovery, AgentRun inspection endpoints, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
 
 ## Engineering goals
 
@@ -148,8 +155,8 @@ The PostgreSQL integration includes:
 - shared declarative metadata;
 - deterministic constraint naming;
 - Alembic async migration configuration;
-- registered workspace and ticket persistence models;
-- a reversible migration that creates `workspaces` and `tickets`.
+- registered workspace, ticket, and AgentRun persistence models;
+- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`.
 
 ### Workspace and ticket persistence
 
@@ -162,6 +169,22 @@ The first business modules provide:
 - named uniqueness constraints for workspace slugs and workspace-scoped external references;
 - a minimal SQLAlchemy transaction adapter for application-owned boundaries;
 - repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
+
+### Durable AgentRun scheduling
+
+Ticket intake schedules durable processing in the same application-owned transaction that creates the ticket:
+
+- frozen AgentRun and AgentRunAttempt domain entities with validated invariants;
+- PostgreSQL `agent_runs` and `agent_run_attempts` tables with query-driven indexes;
+- composite workspace and ticket ownership enforcement;
+- unique initial trigger enforcement for duplicate initial scheduling prevention;
+- atomic Ticket and initial AgentRun creation;
+- a persisted initial retry budget copied from configuration;
+- a minimal processing-run reference in the ticket creation response.
+
+A queued deterministic-baseline run does not represent AI classification. Worker execution, claiming, leases, retries, recovery, and AgentRun inspection remain planned.
+
+Scheduling behavior is documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md).
 
 ### Workspace and ticket API
 
@@ -196,13 +219,15 @@ The repository includes:
 
 - unit tests isolated from Docker and network services;
 - integration tests against real PostgreSQL and Qdrant services;
-- domain invariant tests;
+- domain invariant tests, including AgentRun and AgentRunAttempt;
 - application service unit coverage;
+- transactional ticket-intake unit coverage;
 - workspace and ticket API schema and pagination unit coverage;
 - ORM mapping, named-constraint, and model-registration tests;
 - repository integration and concurrency-sensitive tests;
 - workspace and ticket API integration coverage;
-- Alembic upgrade and downgrade coverage;
+- atomic ticket and AgentRun commit and rollback coverage;
+- Alembic upgrade, downgrade, and metadata-parity coverage;
 - settings validation tests;
 - lifecycle tests;
 - dependency failure-path tests;
@@ -216,12 +241,13 @@ The repository includes:
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces` and `tickets` modules with domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs.
+The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module currently provides durable scheduling foundations and is coordinated during ticket intake.
 
 Future implementation phases are expected to introduce or extend modules for:
 
-- asynchronous processing and AgentRun lifecycle;
+- PostgreSQL-backed worker execution and AgentRun lifecycle transitions;
 - queue claiming, leases, retries, and worker recovery;
+- AgentRun inspection endpoints;
 - structured LLM classification;
 - internal runbook ingestion;
 - semantic retrieval and Qdrant indexing;
@@ -249,6 +275,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   └── script.py.mako
 ├── docs/
 │   ├── architecture/
+│   │   ├── agent-run-scheduling.md
 │   │   ├── overview.md
 │   │   ├── runtime-topology.md
 │   │   └── workspace-data-boundary.md
@@ -273,6 +300,8 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   ├── main.py
 │       │   ├── router.py
 │       │   └── state.py
+│       ├── application/
+│       │   └── ticket_intake.py
 │       ├── core/
 │       │   ├── logging.py
 │       │   ├── request_context.py
@@ -282,6 +311,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   ├── postgresql/
 │       │   └── qdrant/
 │       └── modules/
+│           ├── agent_runs/
 │           ├── tickets/
 │           └── workspaces/
 ├── tests/
@@ -298,7 +328,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces` and `tickets` modules include domain, application, infrastructure, and API layers.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain and infrastructure layers. Workspace and ticket modules also expose application and API layers. Cross-module ticket intake lives under `supportops.application`.
 
 ## Local setup
 
@@ -450,7 +480,7 @@ Validate offline migration execution:
 uv run alembic upgrade head --sql
 ```
 
-The current head creates the `workspaces` and `tickets` tables. Downgrade commands must run only against the local development or test database.
+The current head creates the `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables. Downgrade commands must run only against the local development or test database.
 
 ## Docker image
 
@@ -528,7 +558,8 @@ Implemented:
 - application services and API error contracts;
 - versioned workspace and ticket HTTP endpoints;
 - opaque HTTP cursor pagination;
-- request and correlation identifier persistence.
+- request and correlation identifier persistence;
+- atomic ticket intake with initial AgentRun scheduling.
 
 Planned:
 
@@ -537,14 +568,23 @@ Planned:
 
 ### Asynchronous processing
 
+Implemented:
+
+- AgentRun and AgentRunAttempt domain and persistence foundations;
+- atomic Ticket and initial AgentRun scheduling;
+- database-enforced workspace and ticket ownership;
+- duplicate initial scheduling prevention;
+- persisted initial retry budget;
+- minimal processing-run reference on ticket creation.
+
 Planned:
 
-- AgentRun lifecycle;
-- PostgreSQL-backed work records;
+- PostgreSQL-backed worker execution;
 - queue claiming and leases;
 - retry behavior;
 - stale ownership recovery;
 - worker recovery;
+- AgentRun inspection endpoints;
 - idempotent processing.
 
 ### Retrieval
@@ -583,11 +623,12 @@ The following capabilities remain deferred to preserve architectural focus and a
 
 - authentication and authorization;
 - authenticated tenant isolation;
-- asynchronous processing;
-- AgentRun lifecycle;
-- queue claiming, leases, retries, and worker recovery;
+- PostgreSQL-backed worker execution;
+- queue claiming, leases, retries, and stale lease recovery;
+- AgentRun inspection endpoints;
 - Redis, Celery, Kafka, and SQS;
 - LLM provider integrations;
+- AI classification;
 - prompt execution and versioning;
 - embeddings and retrieval;
 - Qdrant collections and indexing;
@@ -608,12 +649,15 @@ The following capabilities remain deferred to preserve architectural focus and a
 
 Workspace scoping establishes data ownership. It is not authentication or authorization, and it does not establish caller identity or secure multi-tenancy.
 
+Durable AgentRun scheduling is implemented. Worker execution remains an intentional scope boundary until claiming, leases, retries, and recovery are introduced as a separately reviewable capability.
+
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
 ## Documentation
 
 - [Architecture overview](docs/architecture/overview.md)
 - [Runtime topology](docs/architecture/runtime-topology.md)
+- [Transactional AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
 - [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)

@@ -11,7 +11,8 @@ documentation.
 The API currently supports:
 
 - workspace creation and retrieval;
-- workspace-scoped ticket creation;
+- workspace-scoped ticket creation with atomic initial AgentRun scheduling;
+- a minimal processing-run reference on ticket creation;
 - workspace-scoped ticket retrieval;
 - workspace-scoped ticket listing;
 - opaque cursor pagination;
@@ -21,6 +22,10 @@ The API currently supports:
 The current API does not include authentication or authorization. Workspace
 scoping establishes an explicit data ownership boundary but does not establish
 trusted tenant isolation.
+
+A queued deterministic-baseline processing run records that durable work has
+been scheduled. It does not represent AI classification. AgentRun inspection
+endpoints are not implemented yet.
 
 ## Prerequisites
 
@@ -93,21 +98,64 @@ $ticketResponse = Invoke-WebRequest `
     description = "The dashboard returns an access error after sign-in."
   } | ConvertTo-Json)
 
-$ticket = $ticketResponse.Content | ConvertFrom-Json
+$payload = $ticketResponse.Content | ConvertFrom-Json
+$ticket = $payload.ticket
+$processingRun = $payload.processing_run
 $ticketId = $ticket.id
 
-$ticket
+$payload
 $ticketResponse.Headers["X-Request-ID"]
 $ticketResponse.Headers["X-Correlation-ID"]
 ```
 
+Expected status:
+
+```text
+201 Created
+```
+
+`201 Created` means the ticket was created successfully. Processing is
+scheduled asynchronously and is not executed by the API response path.
+
+Expected response shape:
+
+```json
+{
+  "ticket": {
+    "id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+    "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+    "subject": "Unable to access the billing dashboard",
+    "description": "The dashboard returns an access error after sign-in.",
+    "status": "open",
+    "external_reference": null,
+    "ingestion_request_id": "dfe63a63-031c-4ea9-89dd-d556bd51766a",
+    "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
+    "created_at": "2026-07-31T12:00:00Z",
+    "updated_at": "2026-07-31T12:00:00Z"
+  },
+  "processing_run": {
+    "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+    "status": "queued",
+    "workflow_name": "ticket-processing",
+    "workflow_version": "deterministic-baseline-v1"
+  }
+}
+```
+
 Expected behavior:
 
-- status `201 Created`;
+- nested `ticket` object;
+- nested `processing_run` object;
 - initial ticket status `open`;
+- processing-run status `queued`;
+- workflow name `ticket-processing`;
+- workflow version `deterministic-baseline-v1`;
 - `workspace_id` equals workspace A;
 - `ingestion_request_id` equals `X-Request-ID`;
 - `correlation_id` equals `X-Correlation-ID`.
+
+A queued deterministic-baseline run does not indicate that AI classification
+has occurred.
 
 ## Retrieve the ticket through workspace A
 
@@ -191,7 +239,7 @@ Workspace B does not receive workspace A tickets.
 ## Create a ticket with an external reference
 
 ```powershell
-$referencedTicket = Invoke-RestMethod `
+$referencedTicketResponse = Invoke-RestMethod `
   -Method Post `
   -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/tickets" `
   -ContentType "application/json" `
@@ -201,7 +249,9 @@ $referencedTicket = Invoke-RestMethod `
     external_reference = "SUP-1042"
   } | ConvertTo-Json)
 
-$referencedTicket
+$referencedTicketResponse
+$referencedTicketResponse.ticket
+$referencedTicketResponse.processing_run
 ```
 
 Expected status:
@@ -210,6 +260,7 @@ Expected status:
 201 Created
 ```
 
+The response includes the nested ticket and a queued processing-run reference.
 ## Repeat the external reference in workspace A
 
 ```powershell
@@ -252,7 +303,7 @@ Invoke-RestMethod `
     subject = "Same reference in another workspace"
     description = "External references are scoped by workspace."
     external_reference = "SUP-1042"
-  } | ConvertTo-Json
+  } | ConvertTo-Json)
 ```
 
 Expected status:
@@ -283,15 +334,17 @@ $correlatedTicket = $correlatedResponse.Content | ConvertFrom-Json
 $correlationId
 $correlatedResponse.Headers["X-Request-ID"]
 $correlatedResponse.Headers["X-Correlation-ID"]
-$correlatedTicket.ingestion_request_id
-$correlatedTicket.correlation_id
+$correlatedTicket.ticket.ingestion_request_id
+$correlatedTicket.ticket.correlation_id
+$correlatedTicket.processing_run.status
 ```
 
 Expected behavior:
 
 - the response correlation ID equals `$correlationId`;
 - the request ID is independently generated;
-- the ticket persists both identifiers.
+- the ticket persists both identifiers;
+- the response includes a queued processing-run reference.
 
 ## Validate cursor pagination
 
