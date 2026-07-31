@@ -4,6 +4,10 @@
 def register_persistence_models() -> None:
     """Import all persistence records into the shared SQLAlchemy metadata."""
 
+    from supportops.modules.agent_runs.infrastructure.models import (
+        AgentRunAttemptRecord,
+        AgentRunRecord,
+    )
     from supportops.modules.tickets.infrastructure.models import (
         TicketRecord,
     )
@@ -14,4 +18,6 @@ def register_persistence_models() -> None:
     _ = (
         WorkspaceRecord,
         TicketRecord,
+        AgentRunRecord,
+        AgentRunAttemptRecord,
     )
