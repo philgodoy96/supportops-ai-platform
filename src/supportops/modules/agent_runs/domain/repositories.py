@@ -1,12 +1,14 @@
 """AgentRun repository contracts."""
 
+from collections.abc import Sequence
 from typing import Protocol
+from uuid import UUID
 
 from supportops.modules.agent_runs.domain.claiming import (
     AgentRunClaim,
     ClaimAgentRunCommand,
 )
-from supportops.modules.agent_runs.domain.models import AgentRun
+from supportops.modules.agent_runs.domain.models import AgentRun, AgentRunAttempt
 from supportops.modules.agent_runs.domain.recovery import (
     RecoverExpiredAgentRunCommand,
     RecoverExpiredAgentRunResult,
@@ -55,5 +57,28 @@ class AgentRunRepository(Protocol):
         command: RecoverExpiredAgentRunCommand,
     ) -> RecoverExpiredAgentRunResult | None:
         """Atomically recover the next expired running AgentRun, if available."""
+
+        ...
+
+
+class AgentRunQueryRepository(Protocol):
+    """Read-only persistence contract for AgentRun inspection."""
+
+    async def get(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_run_id: UUID,
+    ) -> AgentRun | None:
+        """Return one workspace-scoped AgentRun when it exists."""
+
+        ...
+
+    async def list_attempts(
+        self,
+        *,
+        agent_run_id: UUID,
+    ) -> Sequence[AgentRunAttempt]:
+        """Return attempts ordered by attempt number ascending."""
 
         ...
