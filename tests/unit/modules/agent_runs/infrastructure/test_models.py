@@ -198,6 +198,7 @@ def test_agent_run_metadata_declares_expected_constraints() -> None:
         "ck_agent_runs_agent_run_started_attempt_state",
         "ck_agent_runs_agent_run_lease_fields_complete",
         "ck_agent_runs_agent_run_lease_state",
+        "ck_agent_runs_agent_run_lease_expiration_order",
         "ck_agent_runs_agent_run_completion_state",
         "ck_agent_runs_agent_run_error_fields_complete",
         "ck_agent_runs_agent_run_error_code_format",
@@ -244,4 +245,5 @@ def test_attempt_metadata_declares_expected_constraints() -> None:
         "ck_agent_run_attempts_agent_run_attempt_error_summary_format",
         "ck_agent_run_attempts_agent_run_attempt_success_error_state",
         "ck_agent_run_attempts_agent_run_attempt_failure_error_state",
+        "ck_agent_run_attempts_agent_run_attempt_active_error_state",
     }.issubset(constraint_names)

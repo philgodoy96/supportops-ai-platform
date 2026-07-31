@@ -11,7 +11,7 @@ from supportops.core.settings import Settings
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "6d9f0a2b4c31"
+EXPECTED_HEAD = "a2c4e6f8091b"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
