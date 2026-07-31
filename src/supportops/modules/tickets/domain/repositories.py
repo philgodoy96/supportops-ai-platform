@@ -8,6 +8,10 @@ from uuid import UUID
 from supportops.modules.tickets.domain.models import Ticket
 
 
+class TicketExternalReferenceConflictError(Exception):
+    """Raised when an external reference already exists in one workspace."""
+
+
 class TicketRepository(Protocol):
     """Workspace-scoped persistence operations for support tickets."""
 
