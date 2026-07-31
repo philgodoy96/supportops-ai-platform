@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     postgresql_max_overflow: int = Field(default=10, ge=0, le=100)
     postgresql_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    worker_id: str | None = Field(default=None, max_length=128)
     worker_executor: Literal["deterministic-ticket-processing"] = "deterministic-ticket-processing"
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: float = Field(default=45.0, gt=0, le=3600)
@@ -96,6 +97,22 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @field_validator("worker_id")
+    @classmethod
+    def validate_worker_id(cls, value: str | None) -> str | None:
+        """Reject empty or whitespace-padded worker identities."""
+
+        if value is None:
+            return None
+
+        if not value:
+            raise ValueError("worker_id must not be empty")
+
+        if value != value.strip():
+            raise ValueError("worker_id must not contain surrounding whitespace")
+
+        return value
 
     @model_validator(mode="after")
     def validate_worker_timing_relationships(self) -> Self:
