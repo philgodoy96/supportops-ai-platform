@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document describes the intended runtime topology of SupportOps AI Platform for the current foundation and workspace-scoped persistence phase, and the planned evolution toward separate API and worker processes.
+This document describes the intended runtime topology of SupportOps AI Platform for the current foundation and Slice 1 workspace and ticket API phase, and the planned evolution toward separate API and worker processes.
 
 The current topology is intentionally small. It provides the minimum operational foundation required for reliable local development, testing, and future platform growth without introducing premature distributed infrastructure.
 
@@ -48,13 +48,17 @@ The FastAPI process owns:
 - Qdrant client lifecycle;
 - HTTP request context middleware;
 - trace response headers;
-- liveness and readiness endpoints.
+- liveness and readiness endpoints;
+- versioned `/api/v1` business routes;
+- stable expected-error handlers.
 
 The process is expected to run through Uvicorn.
 
 The application may remain alive when PostgreSQL or Qdrant is unavailable. Dependency availability is represented through readiness rather than process termination.
 
 Invalid required configuration remains a startup error.
+
+Business routes persist and query PostgreSQL. They do not enqueue asynchronous work and do not call Qdrant.
 
 ## PostgreSQL runtime role
 
@@ -73,9 +77,11 @@ PostgreSQL currently owns:
 - uniqueness constraints for workspace slugs and workspace-scoped external references;
 - the workspace-leading ticket listing index.
 
-Repository operations are designed to use request-scoped async sessions in the future API process. The engine and session factory remain process-owned.
+Repository operations use request-scoped async sessions for business HTTP routes. The engine and session factory remain process-owned.
 
-Workspace and ticket HTTP endpoints are not yet implemented, so request-scoped session injection is not exposed through business routes today. Integration tests exercise repositories with explicit async sessions and the transaction adapter.
+Each request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases commit through the application-owned transaction adapter.
+
+Business routes do not enqueue work or call Qdrant. Qdrant remains limited to readiness connectivity checks in the current phase.
 
 Future phases are expected to extend PostgreSQL ownership for:
 
@@ -130,15 +136,40 @@ During runtime:
 
 Each HTTP request follows this flow:
 
-1. generate a request ID;
-2. resolve a sanitized correlation ID;
-3. bind context for the request;
-4. execute the route;
-5. attach response headers;
-6. emit one structured completion event;
-7. reset context in a finally path.
+1. request context middleware generates a request ID and resolves a sanitized correlation ID;
+2. the middleware binds context for the request;
+3. FastAPI provides a request-scoped async PostgreSQL session;
+4. route dependencies construct repositories and application services explicitly;
+5. the application use case executes;
+6. command use cases open a PostgreSQL transaction through the application-owned adapter;
+7. the route maps domain results to response schemas;
+8. the middleware attaches `X-Request-ID` and `X-Correlation-ID` response headers;
+9. the middleware emits one structured completion event;
+10. context is reset in a finally path.
 
 The request context is in-process and task-local.
+
+The engine and session factory are process-owned. Sessions are request-scoped.
+
+Business routes under `/api/v1` do not enqueue asynchronous work and do not call Qdrant.
+
+### Route versioning
+
+Business routes are versioned:
+
+```text
+/api/v1/workspaces
+/api/v1/workspaces/{workspace_id}
+/api/v1/workspaces/{workspace_id}/tickets
+/api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
+```
+
+Operational health routes remain unversioned:
+
+```text
+GET /health/live
+GET /health/ready
+```
 
 ### Shutdown
 
@@ -237,7 +268,9 @@ Expected execution model:
 3. start PostgreSQL and Qdrant with Docker Compose;
 4. start the FastAPI process with `uv run`;
 5. call liveness and readiness endpoints;
-6. run local quality and test commands.
+6. apply the current Alembic migration head;
+7. exercise workspace and ticket routes when validating Slice 1 behavior;
+8. run local quality and test commands.
 
 The application is not required to run inside Docker Compose for the primary development loop.
 
@@ -271,7 +304,10 @@ Unit tests validate:
 - unexpected exception behavior with retained trace headers;
 - liveness;
 - readiness aggregation;
-- dependency failure responses.
+- dependency failure responses;
+- application service command and query behavior;
+- workspace and ticket API schemas;
+- opaque cursor encoding.
 
 ### Integration tests
 
@@ -298,7 +334,10 @@ Integration tests validate:
 - Alembic upgrade, downgrade, and re-upgrade;
 - workspace repository persistence;
 - ticket repository persistence and workspace scoping;
-- concurrency-sensitive uniqueness enforcement.
+- concurrency-sensitive uniqueness enforcement;
+- workspace and ticket HTTP API behavior;
+- stable expected-error responses;
+- opaque cursor pagination.
 
 ## Continuous integration topology
 
