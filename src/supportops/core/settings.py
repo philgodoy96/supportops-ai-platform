@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     postgresql_max_overflow: int = Field(default=10, ge=0, le=100)
     postgresql_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    worker_max_attempts: int = Field(default=3, ge=1, le=100)
+
     qdrant_url: str = Field(min_length=1)
     qdrant_api_key: str | None = None
 

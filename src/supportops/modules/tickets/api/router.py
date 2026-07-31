@@ -17,6 +17,7 @@ from supportops.modules.tickets.api.pagination import (
 )
 from supportops.modules.tickets.api.schemas import (
     TicketCreateRequest,
+    TicketCreateResponse,
     TicketListResponse,
     TicketResponse,
 )
@@ -32,14 +33,14 @@ router = APIRouter(
 
 @router.post(
     "",
-    response_model=TicketResponse,
+    response_model=TicketCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_ticket(
     workspace_id: UUID,
     request: TicketCreateRequest,
     service: CreateTicketDependency,
-) -> TicketResponse:
+) -> TicketCreateResponse:
     """Create a support ticket inside one workspace."""
 
     context = get_request_context()
@@ -49,7 +50,7 @@ async def create_ticket(
             "HTTP request context is unavailable.",
         )
 
-    ticket = await service.execute(
+    result = await service.execute(
         workspace_id=workspace_id,
         subject=request.subject,
         description=request.description,
@@ -58,7 +59,10 @@ async def create_ticket(
         correlation_id=context.correlation_id,
     )
 
-    return TicketResponse.from_domain(ticket)
+    return TicketCreateResponse.from_domains(
+        ticket=result.ticket,
+        processing_run=result.processing_run,
+    )
 
 
 @router.get(

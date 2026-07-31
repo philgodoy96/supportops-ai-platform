@@ -5,12 +5,19 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from supportops.api.dependencies import get_postgresql_session
+from supportops.api.dependencies import (
+    get_application_state,
+    get_postgresql_session,
+)
+from supportops.api.state import ApplicationState
+from supportops.application.ticket_intake import CreateTicketWithInitialRun
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
 )
+from supportops.modules.agent_runs.infrastructure.repository import (
+    SqlAlchemyAgentRunRepository,
+)
 from supportops.modules.tickets.application.services import (
-    CreateTicket,
     GetTicket,
     ListTickets,
 )
@@ -26,16 +33,24 @@ PostgresqlSessionDependency = Annotated[
     Depends(get_postgresql_session),
 ]
 
+ApplicationStateDependency = Annotated[
+    ApplicationState,
+    Depends(get_application_state),
+]
+
 
 def get_create_ticket(
     session: PostgresqlSessionDependency,
-) -> CreateTicket:
+    application_state: ApplicationStateDependency,
+) -> CreateTicketWithInitialRun:
     """Construct the create-ticket use case."""
 
-    return CreateTicket(
+    return CreateTicketWithInitialRun(
         workspace_repository=SqlAlchemyWorkspaceRepository(session),
         ticket_repository=SqlAlchemyTicketRepository(session),
+        agent_run_repository=SqlAlchemyAgentRunRepository(session),
         transaction_manager=SqlAlchemyTransactionManager(session),
+        max_attempts=application_state.settings.worker_max_attempts,
     )
 
 
@@ -61,7 +76,7 @@ def get_list_tickets(
 
 
 CreateTicketDependency = Annotated[
-    CreateTicket,
+    CreateTicketWithInitialRun,
     Depends(get_create_ticket),
 ]
 
