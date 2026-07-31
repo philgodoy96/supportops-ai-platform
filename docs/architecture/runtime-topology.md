@@ -2,40 +2,43 @@
 
 ## Purpose
 
-This document describes the intended runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, and durable AgentRun scheduling phase, and the planned evolution toward separate API and worker processes.
+This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, and PostgreSQL worker phase.
 
-The current topology is intentionally small. It provides the minimum operational foundation required for reliable local development, testing, and future platform growth without introducing premature distributed infrastructure.
+The topology is intentionally small. It provides the operational foundation required for reliable local development, testing, and controlled asynchronous processing without introducing premature distributed infrastructure.
 
 ## Current runtime components
 
-The current runtime is designed around three components:
+The current runtime is designed around four components:
 
 - the FastAPI application process;
+- the PostgreSQL AgentRun worker process;
 - PostgreSQL;
 - Qdrant.
 
 ```mermaid
 flowchart LR
-    Developer[Developer or Test Runner]
-    API[FastAPI Application]
+    Client[API Client]
+    API[FastAPI Process]
+    Worker[PostgreSQL Worker Process]
     PostgreSQL[(PostgreSQL)]
     Qdrant[(Qdrant)]
 
-    Developer -->|HTTP| API
+    Client -->|HTTP| API
     API -->|Async SQLAlchemy / asyncpg| PostgreSQL
+    Worker -->|Async SQLAlchemy / asyncpg| PostgreSQL
     API -->|Async Qdrant client| Qdrant
 ```
 
-The application process is expected to start independently from Docker Compose during the default local development workflow.
+The API and worker processes start independently from Docker Compose during the default local development workflow.
 
 Docker Compose is responsible for local infrastructure services:
 
 - PostgreSQL;
 - Qdrant.
 
-This separation keeps the application development loop fast while preserving reproducible infrastructure startup.
+A worker service is intentionally not added to Docker Compose in this phase. This separation keeps the application and worker development loops explicit while preserving reproducible infrastructure startup.
 
-## FastAPI application process
+## FastAPI process
 
 The FastAPI process owns:
 
@@ -59,19 +62,38 @@ The application may remain alive when PostgreSQL or Qdrant is unavailable. Depen
 
 Invalid required configuration remains a startup error.
 
-Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun in the same application-owned transaction. The API does not claim runs, acquire leases, execute retries, or recover stale ownership. Business routes do not call Qdrant.
+Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun in the same application-owned transaction. The API does not claim runs, acquire leases, execute workflows, or recover stale ownership. Business routes do not call Qdrant.
+
+## Worker process
+
+The worker is a separate Python process exposed through the `supportops-worker` project script.
+
+The worker process owns:
+
+- loading and validating shared settings at process startup;
+- creating a process-owned PostgreSQL engine and session factory;
+- resolving configured or generated worker identity;
+- composing the deterministic baseline executor and retry policy;
+- running continuous recovery, claim, and processing cycles;
+- emitting structured operational cycle logs;
+- cooperative SIGINT and SIGTERM shutdown;
+- disposing the SQLAlchemy engine on exit.
+
+The worker uses PostgreSQL as its durable work queue and source of truth. It does not initialize or depend on Qdrant.
+
+Worker identity may be configured through `SUPPORTOPS_WORKER_ID` or generated from hostname, process ID, and a UUID suffix.
 
 ## PostgreSQL runtime role
 
-PostgreSQL is the transactional source of truth for the platform.
+PostgreSQL is the transactional source of truth and the durable AgentRun work queue.
 
 PostgreSQL currently owns:
 
 - local service provisioning;
 - connection configuration;
-- async engine initialization;
-- process-owned engine and session factory lifecycle;
-- connectivity validation;
+- async engine initialization for API and worker processes;
+- process-owned engine and session factory lifecycles;
+- connectivity validation for the API readiness path;
 - Alembic migrations;
 - `workspaces` and `tickets` tables;
 - `agent_runs` and `agent_run_attempts` tables;
@@ -80,20 +102,41 @@ PostgreSQL currently owns:
 - uniqueness constraints for workspace slugs and workspace-scoped external references;
 - unique initial trigger enforcement for AgentRun scheduling;
 - the workspace-leading ticket listing index;
-- query-driven indexes reserved for future claim and recovery paths.
+- claim and recovery indexes and row-lock coordination;
+- lease ownership, retry scheduling, and attempt history.
 
-Repository operations use request-scoped async sessions for business HTTP routes. The engine and session factory remain process-owned.
+Repository operations use request-scoped async sessions for business HTTP routes. The worker opens one new `AsyncSession` per polling cycle. Engines and session factories remain process-owned.
 
-Each request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter.
+Each API request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter.
 
-Business routes do not call Qdrant. Qdrant remains limited to readiness connectivity checks in the current phase.
+Business routes do not call Qdrant. Qdrant remains limited to API readiness connectivity checks in the current phase.
 
-Future phases are expected to extend PostgreSQL ownership for:
+Future phases may extend PostgreSQL ownership for:
 
-- worker claim and lease transitions;
 - approvals;
 - audit records;
 - usage events.
+
+## Session and transaction lifetimes
+
+### API process
+
+- the SQLAlchemy engine and session factory are process-owned;
+- each HTTP request receives one request-scoped async session;
+- write commands open short application-owned transactions;
+- ticket intake commits both the Ticket and initial AgentRun before the HTTP response returns;
+- transactions do not span HTTP client waits beyond the request.
+
+### Worker process
+
+- the SQLAlchemy engine and session factory are process-owned and independent from the API process;
+- each polling cycle opens one new `AsyncSession` and closes it when the cycle completes;
+- recovery uses one short transaction;
+- claim uses one short transaction that commits before executor work begins;
+- ticket loading uses one short transaction;
+- fenced success or failure persistence uses one short transaction;
+- executor work runs outside database transactions;
+- idle waits do not hold open transactions.
 
 ## Qdrant runtime role
 
@@ -102,19 +145,180 @@ Qdrant is a rebuildable retrieval index.
 During the current phase, Qdrant is used only to establish:
 
 - local service provisioning;
-- client configuration;
-- client lifecycle;
-- connectivity validation.
+- client configuration for the API process;
+- client lifecycle for the API process;
+- connectivity validation through API readiness.
 
 No collections, vectors, embeddings, ingestion workflows, or retrieval behavior are created.
 
-Qdrant is not involved in workspace, ticket, or AgentRun persistence. Ticket ownership, uniqueness, listing, repository behavior, and AgentRun scheduling are PostgreSQL concerns only.
+Qdrant is not involved in workspace, ticket, or AgentRun persistence. The worker must not connect to Qdrant. Ticket ownership, uniqueness, listing, repository behavior, AgentRun scheduling, claiming, and execution are PostgreSQL concerns only.
 
 Future retrieval data must remain reproducible from authoritative source content.
 
+## Request flow for ticket creation
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant PostgreSQL
+
+    Client->>API: POST workspace ticket
+    API->>PostgreSQL: Begin transaction
+    API->>PostgreSQL: Validate workspace
+    API->>PostgreSQL: Insert Ticket
+    API->>PostgreSQL: Insert initial AgentRun
+    API->>PostgreSQL: Commit
+    API-->>Client: 201 Created with queued processing_run
+```
+
+Ticket acceptance and asynchronous processing success are separate outcomes. The API returns after the scheduling transaction commits. The HTTP request does not execute the workflow. The response includes a minimal `processing_run` projection with status `queued`.
+
+## Worker cycle flow
+
+Each worker cycle:
+
+1. opens one scoped session;
+2. attempts expired lease recovery;
+3. attempts to claim one available AgentRun;
+4. if no claim is available, reports an idle cycle and sleeps interruptibly;
+5. if a claim succeeds, processes the claimed run outside the claim transaction;
+6. emits a structured cycle completion log;
+7. closes the session.
+
+The worker processes at most one claimed run per cycle. It sleeps only after an idle cycle. Delivery semantics are at-least-once execution.
+
+```mermaid
+flowchart TD
+    Start[Begin cycle with scoped session]
+    Recover[Recover one expired running lease]
+    Claim[Claim one available AgentRun]
+    Idle[Idle cycle]
+    Process[Execute claimed run outside transactions]
+    Persist[Persist fenced success or failure]
+    Log[Emit structured cycle log]
+    Close[Close session]
+
+    Start --> Recover
+    Recover --> Claim
+    Claim -->|No eligible run| Idle
+    Claim -->|Claim committed| Process
+    Idle --> Log
+    Process --> Persist
+    Persist --> Log
+    Log --> Close
+```
+
+## Claim transaction
+
+Eligible claim states are:
+
+```text
+queued
+retry_scheduled
+```
+
+Claim eligibility also requires:
+
+- `available_at` due at claim time;
+- `attempt_count` below `max_attempts`.
+
+Deterministic claim ordering is:
+
+```text
+available_at ASC, created_at ASC, id ASC
+```
+
+PostgreSQL `FOR UPDATE SKIP LOCKED` allows multiple worker processes to claim distinct runs safely.
+
+A successful claim:
+
+- changes the run to `running`;
+- increments `attempt_count`;
+- creates an `AgentRunAttempt`;
+- assigns a lease owner, lease token, and lease expiry;
+- commits before executor work begins.
+
+## Executor outside transaction
+
+The current executor is `deterministic-ticket-processing`.
+
+The persisted workflow contract is:
+
+```text
+workflow_name = ticket-processing
+workflow_version = deterministic-baseline-v1
+trigger_key = initial-ticket-processing
+```
+
+The deterministic baseline validates that contract and performs no external I/O, LLM call, retrieval, or ticket classification. It exists to validate the durable execution architecture independently from future AI behavior.
+
+After the claim transaction commits:
+
+1. the processor loads the ticket in a short transaction;
+2. the executor runs outside database transactions under a bounded timeout;
+3. typed retryable and terminal failures are handled explicitly;
+4. unexpected exceptions become sanitized retryable failures;
+5. raw exception text is not persisted;
+6. success or failure is persisted in a separate fenced transaction.
+
+## Fenced completion transaction
+
+Outcome persistence uses lease-token fencing.
+
+Successful completion:
+
+- changes the run to `succeeded`;
+- closes the active attempt with outcome `succeeded`;
+- clears previous safe error details;
+- clears lease ownership.
+
+Retryable failures and timeouts are retried only while attempt budget remains. Retry scheduling uses bounded exponential backoff and moves the run to `retry_scheduled` with a future `available_at`.
+
+Terminal failures and exhausted retryable failures change the run to `failed`.
+
+Attempt outcomes used by the worker include:
+
+```text
+succeeded
+retryable_failure
+terminal_failure
+timed_out
+lease_expired
+```
+
+A repeated or stale completion returns `lease_lost` and does not modify the current state. Exactly-once execution is not claimed. Future executors and tools must make side effects idempotent or otherwise safely fenced.
+
+## Expired lease recovery
+
+Every worker cycle attempts recovery before claiming available work.
+
+Recovery:
+
+- selects expired `running` runs using deterministic ordering and `FOR UPDATE SKIP LOCKED`;
+- closes the abandoned attempt with outcome `lease_expired`;
+- does not increment `attempt_count`;
+- does not create a new attempt;
+- returns a recoverable run to `retry_scheduled` with a future `available_at`;
+- marks an exhausted run as `failed`.
+
+Recovery and claim remain separate operations.
+
+## Graceful shutdown
+
+SIGINT and SIGTERM request cooperative shutdown.
+
+Shutdown behavior:
+
+- the idle wait is interruptible;
+- the active cycle may finish within the configured shutdown grace period;
+- the loop task is cancelled when the grace period is exceeded;
+- the SQLAlchemy engine is disposed during shutdown;
+- structured logs record shutdown request, grace exceeded, and stop events.
+
 ## Application lifecycle
 
-The application lifecycle is explicit.
+The API application lifecycle is explicit.
 
 ### Startup
 
@@ -155,7 +359,7 @@ The request context is in-process and task-local.
 
 The engine and session factory are process-owned. Sessions are request-scoped.
 
-Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and do not call Qdrant. Worker claim, lease, retry, and recovery behavior are not operational in the current phase.
+Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and do not call Qdrant. Worker claim, lease, retry, recovery, and execution behavior run in the separate worker process.
 
 ### Route versioning
 
@@ -204,7 +408,7 @@ Request context is bound for the duration of the request and reset after complet
 
 ## Health topology
 
-The health model separates process health from dependency readiness.
+The health model separates process health from dependency readiness for the API process.
 
 ```mermaid
 flowchart TD
@@ -246,22 +450,28 @@ If any required dependency is unavailable, timed out, or returns an unexpected f
 - the failing dependency is identified;
 - credentials and full connection strings are not returned.
 
+The worker does not expose these health endpoints and does not require Qdrant.
+
 ## Local development topology
 
-The default local workflow is:
+The default local workflow uses three terminals:
 
 ```mermaid
 flowchart LR
     TerminalA[Terminal: Docker Compose]
-    TerminalB[Terminal: Uvicorn]
+    TerminalB[Terminal: Uvicorn API]
+    TerminalC[Terminal: supportops-worker]
     PostgreSQL[(PostgreSQL Container)]
     Qdrant[(Qdrant Container)]
     API[Local FastAPI Process]
+    Worker[Local Worker Process]
 
     TerminalA --> PostgreSQL
     TerminalA --> Qdrant
     TerminalB --> API
+    TerminalC --> Worker
     API --> PostgreSQL
+    Worker --> PostgreSQL
     API --> Qdrant
 ```
 
@@ -270,13 +480,29 @@ Expected execution model:
 1. install dependencies with `uv`;
 2. create a local environment file;
 3. start PostgreSQL and Qdrant with Docker Compose;
-4. start the FastAPI process with `uv run`;
-5. call liveness and readiness endpoints;
-6. apply the current Alembic migration head;
-7. exercise workspace and ticket routes, including atomic AgentRun scheduling on ticket creation;
-8. run local quality and test commands.
+4. apply the current Alembic migration head;
+5. start the FastAPI process with `uv run`;
+6. start the worker with `uv run supportops-worker`;
+7. create a ticket through the API and observe a queued `processing_run`;
+8. observe structured worker cycle logs;
+9. stop the worker with Ctrl+C and verify graceful shutdown logs;
+10. run local quality and test commands.
 
-The application is not required to run inside Docker Compose for the primary development loop.
+Docker Compose intentionally does not run the worker.
+
+## Multi-worker safety
+
+Multiple worker processes may run concurrently against the same PostgreSQL database.
+
+Safety properties:
+
+- claim and recovery use `FOR UPDATE SKIP LOCKED`;
+- distinct workers claim distinct runs;
+- lease-token fencing rejects stale completions;
+- delivery semantics remain at-least-once execution;
+- process crashes leave recoverable lease state in PostgreSQL.
+
+Shared Python code does not imply shared runtime memory.
 
 ## Test topology
 
@@ -288,15 +514,17 @@ Unit tests run without network services.
 flowchart LR
     Pytest[pytest]
     App[FastAPI Application]
+    Worker[Worker Composition]
     FakeChecks[Mocked Dependency Checks]
 
     Pytest --> App
+    Pytest --> Worker
     App --> FakeChecks
 ```
 
 Unit tests validate:
 
-- settings behavior;
+- settings behavior, including worker timing invariants;
 - application construction;
 - request-context creation and cleanup;
 - async-task isolation;
@@ -312,6 +540,9 @@ Unit tests validate:
 - application service command and query behavior;
 - AgentRun domain invariants;
 - transactional ticket-intake orchestration;
+- retry policy, claim contracts, fencing, recovery, processor, and worker cycles;
+- deterministic executor behavior;
+- worker identity and graceful shutdown;
 - workspace and ticket API schemas;
 - opaque cursor encoding.
 
@@ -323,11 +554,14 @@ Integration tests use live PostgreSQL and Qdrant services.
 flowchart LR
     Pytest[pytest Integration Suite]
     API[FastAPI Application]
+    WorkerLogic[AgentRun Worker Paths]
     PostgreSQL[(PostgreSQL)]
     Qdrant[(Qdrant)]
 
     Pytest --> API
+    Pytest --> WorkerLogic
     API --> PostgreSQL
+    WorkerLogic --> PostgreSQL
     API --> Qdrant
 ```
 
@@ -342,9 +576,14 @@ Integration tests validate:
 - ticket repository persistence and workspace scoping;
 - concurrency-sensitive uniqueness enforcement;
 - atomic ticket and AgentRun commit and rollback behavior;
+- PostgreSQL claim ordering and `SKIP LOCKED` concurrency;
+- fenced transitions and expired lease recovery;
+- processor transaction separation;
 - workspace and ticket HTTP API behavior;
 - stable expected-error responses;
 - opaque cursor pagination.
+
+Qdrant-dependent tests are not worker tests. PostgreSQL integration coverage is required for concurrency and row-locking behavior.
 
 ## Continuous integration topology
 
@@ -377,64 +616,38 @@ flowchart TD
 
 The initial workflow intentionally avoids a runtime matrix because Python 3.12 is the supported platform version.
 
-## Future API and worker topology
-
-A later phase will introduce a separate asynchronous worker process. The worker is planned and is not currently operational.
-
-```mermaid
-flowchart LR
-    Client[API Client]
-    API[FastAPI Process]
-    Worker[Worker Process Planned]
-    PostgreSQL[(PostgreSQL)]
-    Qdrant[(Qdrant)]
-
-    Client -->|HTTP| API
-    API -->|Atomic Ticket and AgentRun scheduling| PostgreSQL
-    Worker -.->|Planned claim and execution| PostgreSQL
-    Worker -.->|Planned retrieval| Qdrant
-```
-
-The API and worker will:
-
-- run as separate operating system processes;
-- import the same `supportops` Python package;
-- use the same application services and domain model;
-- use the same PostgreSQL database;
-- use shared infrastructure adapters;
-- maintain independent process lifecycle and connection pools.
-
-The API currently persists queued AgentRun records. Claim, lease acquisition, lease-token fencing, retries, stale lease recovery, and graceful worker shutdown remain planned and are not currently operational.
-
 ## Process separation implications
 
-When the API and worker become separate processes:
+The API and worker run as separate processes:
 
-- each process will create and dispose its own database engine;
-- each process will own its own Qdrant client where required;
-- in-memory state will not be shared;
-- configuration will be loaded independently;
-- logging context will be process-specific;
+- each process creates and disposes its own database engine;
+- only the API owns a Qdrant client in the current phase;
+- in-memory state is not shared;
+- configuration is loaded independently;
+- logging context is process-specific;
 - connection pool sizing must account for combined process concurrency;
-- graceful shutdown must be implemented independently;
-- database state will coordinate durable work;
+- graceful shutdown is implemented independently;
+- database state coordinates durable work;
 - process crashes must not lose authoritative workflow state.
 
-Shared Python code does not imply shared runtime memory.
-
-Ticket intake already persists request and correlation identifiers on both the ticket and its initial AgentRun. Future cross-process worker execution will preserve the run correlation identifier while generating a separate execution request identifier for each claimed attempt.
+Ticket intake persists request and correlation identifiers on both the ticket and its initial AgentRun. Worker execution preserves the run correlation identifier while generating a separate execution request identifier for each claimed attempt.
 
 ## Failure scenarios
 
 ### Invalid configuration
 
-Missing or invalid required configuration prevents application construction.
+Missing or invalid required configuration prevents application or worker construction.
 
 The failure should be explicit and must not expose secret values.
 
+Worker construction also rejects invalid timing relationships:
+
+- lease duration must exceed execution timeout by at least five seconds;
+- retry maximum must not be smaller than retry base.
+
 ### PostgreSQL unavailable
 
-Expected behavior:
+Expected API behavior:
 
 - the process may start;
 - liveness remains healthy;
@@ -442,9 +655,14 @@ Expected behavior:
 - overall readiness returns a non-success status;
 - the failure is logged safely.
 
+Expected worker behavior:
+
+- the worker depends on PostgreSQL for recovery, claim, and outcome persistence;
+- unavailable PostgreSQL surfaces as a runtime failure through the worker process path.
+
 ### Qdrant unavailable
 
-Expected behavior:
+Expected API behavior:
 
 - the process may start;
 - liveness remains healthy;
@@ -452,9 +670,11 @@ Expected behavior:
 - overall readiness returns a non-success status;
 - the failure is logged safely.
 
+The worker does not require Qdrant.
+
 ### Dependency timeout
 
-A slow dependency check must terminate within the configured health-check timeout.
+A slow API dependency check must terminate within the configured health-check timeout.
 
 The readiness response reports the dependency as unhealthy without waiting indefinitely.
 
@@ -504,8 +724,8 @@ The current topology excludes:
 - Kubernetes;
 - cloud load balancers;
 - managed cloud databases;
-- an operational worker process;
+- a Docker Compose worker service;
 - ingestion workers;
 - AI provider calls.
 
-These components will not be introduced until a concrete capability and operational requirement justify them. The API schedules durable AgentRun records, but worker claim, lease, retry, and recovery behavior are not currently operational.
+These components are not introduced until a concrete capability and operational requirement justify them. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL provides transactional durability and adequate local and portfolio scope for this phase.

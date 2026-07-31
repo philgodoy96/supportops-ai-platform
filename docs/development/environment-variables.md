@@ -207,7 +207,7 @@ Allowed range:
 1-50
 ```
 
-API and future worker processes will own independent pools.
+API and worker processes own independent pools.
 
 Total database connection planning must account for every running process.
 
@@ -320,11 +320,311 @@ Continuous integration uses a higher value to reduce shared-runner flakiness:
 
 This does not change the local default.
 
-## Worker scheduling configuration
+## PostgreSQL worker configuration
+
+Worker settings are part of the shared `Settings` model and are validated at
+process startup for both API and worker construction. The worker process uses
+these values for identity, polling, claiming, execution timeout, retry
+scheduling, and cooperative shutdown. Ticket intake copies
+`SUPPORTOPS_WORKER_MAX_ATTEMPTS` into newly scheduled `AgentRun` records.
+
+Cross-field invariants:
+
+- `SUPPORTOPS_WORKER_LEASE_SECONDS` must exceed
+  `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` by at least five seconds;
+- `SUPPORTOPS_WORKER_RETRY_MAX_SECONDS` must not be smaller than
+  `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`.
+
+The supported executor value is exactly:
+
+```text
+deterministic-ticket-processing
+```
+
+### `SUPPORTOPS_WORKER_ID`
+
+Optional worker identity.
+
+Settings field:
+
+```text
+worker_id
+```
+
+Type:
+
+```text
+string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+When omitted, the worker generates an identity from hostname, process ID, and a
+UUID suffix, truncated to 128 characters.
+
+Constraints:
+
+- maximum length of 128 characters;
+- must not be empty when provided;
+- must not contain surrounding whitespace.
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- identifies the lease owner and attempt worker ID;
+- distinguishes concurrent worker processes in operational logs.
+
+Example safe value:
+
+```text
+worker-local-1
+```
+
+### `SUPPORTOPS_WORKER_EXECUTOR`
+
+Configured executor name.
+
+Settings field:
+
+```text
+worker_executor
+```
+
+Type:
+
+```text
+literal string
+```
+
+Default:
+
+```text
+deterministic-ticket-processing
+```
+
+Accepted value:
+
+```text
+deterministic-ticket-processing
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- selects the deterministic baseline executor;
+- records the configured executor in worker startup logs.
+
+Example safe value:
+
+```text
+deterministic-ticket-processing
+```
+
+### `SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS`
+
+Idle polling interval between worker cycles.
+
+Settings field:
+
+```text
+worker_poll_interval_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+1.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 60
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- waits only after an idle cycle;
+- remains interruptible by cooperative shutdown.
+
+Example safe value:
+
+```text
+1.0
+```
+
+### `SUPPORTOPS_WORKER_LEASE_SECONDS`
+
+Lease duration assigned when a run is claimed.
+
+Settings field:
+
+```text
+worker_lease_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+45.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 3600
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- bounds ownership of a claimed `AgentRun`;
+- must leave headroom beyond the execution timeout for fenced completion.
+
+Example safe value:
+
+```text
+45.0
+```
+
+### `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS`
+
+Maximum executor runtime for one claimed attempt.
+
+Settings field:
+
+```text
+worker_execution_timeout_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+30.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 1800
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- bounds executor work outside database transactions;
+- timeout outcomes are persisted as `timed_out` and may retry while budget remains.
+
+Example safe value:
+
+```text
+30.0
+```
+
+### `SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS`
+
+Grace period for cooperative worker shutdown.
+
+Settings field:
+
+```text
+worker_shutdown_grace_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+10.0
+```
+
+Accepted range:
+
+```text
+0 through 300
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- allows the active cycle to finish after SIGINT or SIGTERM;
+- cancels the loop task when the grace period is exceeded;
+- a value of `0` cancels immediately after shutdown is requested.
+
+Example safe value:
+
+```text
+10.0
+```
 
 ### `SUPPORTOPS_WORKER_MAX_ATTEMPTS`
 
-Integer retry budget copied into each newly created `AgentRun` during ticket intake.
+Integer retry budget copied into each newly created `AgentRun` during ticket
+intake and enforced during worker retries and recovery.
+
+Settings field:
+
+```text
+worker_max_attempts
+```
 
 Type:
 
@@ -344,15 +644,118 @@ Accepted range:
 1 through 100
 ```
 
+Applies to:
+
+```text
+API and worker
+```
+
 Purpose:
 
 - defines the maximum number of attempts available to a newly scheduled AgentRun;
 - is persisted on the AgentRun at ticket intake time;
-- remains immutable for that run after scheduling.
+- remains immutable for that run after scheduling;
+- gates retry scheduling and exhausted recovery outcomes in the worker.
 
-Existing runs retain their persisted retry budget after configuration changes. Changing this setting affects only AgentRun records created after the new value is loaded.
+Existing runs retain their persisted retry budget after configuration changes.
+Changing this setting affects only AgentRun records created after the new value
+is loaded.
 
-This setting does not activate worker execution. Claim, lease, retry, and recovery behavior remain planned.
+Example safe value:
+
+```text
+3
+```
+
+### `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`
+
+Base delay used by bounded exponential backoff.
+
+Settings field:
+
+```text
+worker_retry_base_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+2.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 3600
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- calculates the initial retry delay after a retryable failure or timeout;
+- also informs the delay used when recovering an expired lease with remaining budget.
+
+Example safe value:
+
+```text
+2.0
+```
+
+### `SUPPORTOPS_WORKER_RETRY_MAX_SECONDS`
+
+Maximum delay used by bounded exponential backoff.
+
+Settings field:
+
+```text
+worker_retry_max_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+60.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 86400
+```
+
+Applies to:
+
+```text
+worker
+```
+
+Purpose:
+
+- caps retry delays so backoff remains bounded;
+- must not be smaller than `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`.
+
+Example safe value:
+
+```text
+60.0
+```
 
 ## Docker Compose variables
 
@@ -467,7 +870,9 @@ SUPPORTOPS_QDRANT_API_KEY=
 SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS=2
 ```
 
-`SUPPORTOPS_WORKER_MAX_ATTEMPTS` defaults to `3` when unset and does not need to appear in the local example file.
+`SUPPORTOPS_WORKER_*` values use validated defaults when unset and do not need
+to appear in the local example file for basic local development. Set
+`SUPPORTOPS_WORKER_ID` explicitly when distinguishing concurrent local workers.
 
 ## Validation behavior
 
@@ -480,12 +885,19 @@ SUPPORTOPS_POSTGRESQL_URL
 SUPPORTOPS_QDRANT_URL
 ```
 
+The shared settings model still requires `SUPPORTOPS_QDRANT_URL` for process
+construction. The worker validates that shared model at startup but does not
+initialize or connect to Qdrant.
+
 Examples of invalid configuration include:
 
 - malformed PostgreSQL DSN;
 - blank Qdrant URL;
 - API port outside the valid range;
 - worker maximum attempts outside the accepted range;
+- worker lease duration that does not exceed execution timeout by at least five seconds;
+- worker retry maximum smaller than retry base;
+- unsupported worker executor value;
 - non-positive pool timeout;
 - non-positive dependency health timeout;
 - unsupported environment value;

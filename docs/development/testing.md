@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -47,6 +47,14 @@ They validate:
 - AgentRun and AgentRunAttempt domain invariant tests;
 - application service command and query behavior;
 - transactional ticket-intake orchestration;
+- retry policy calculation and attempt-budget gates;
+- claim contracts and transition fencing contracts;
+- deterministic executor workflow-contract validation;
+- processor timeout, terminal, retryable, and sanitized unexpected-failure outcomes;
+- worker cycle recovery-before-claim orchestration;
+- polling-loop idle waits and interruptible shutdown behavior;
+- scoped-session worker runtime composition;
+- worker process identity resolution and graceful shutdown;
 - SQLAlchemy mapping and metadata tests for AgentRun persistence;
 - named PostgreSQL constraints declared on persistence records;
 - persistence model registration;
@@ -77,7 +85,7 @@ Unit tests can also be run directly:
 uv run pytest tests/unit
 ```
 
-Targeted domain, application, persistence, and API unit coverage:
+Targeted domain, application, persistence, API, and worker unit coverage:
 
 ```powershell
 uv run pytest tests/unit/modules/workspaces/domain tests/unit/modules/tickets/domain
@@ -89,6 +97,25 @@ uv run pytest tests/unit/modules/agent_runs/infrastructure
 uv run pytest tests/unit/modules/workspaces/api
 uv run pytest tests/unit/modules/tickets/api
 uv run pytest tests/unit/infrastructure/postgresql
+```
+
+Worker unit coverage:
+
+```powershell
+uv run pytest tests/unit/modules/agent_runs/application
+uv run pytest tests/unit/modules/agent_runs/infrastructure/test_worker_runtime.py
+uv run pytest tests/unit/worker
+```
+
+Focused worker-related application unit tests:
+
+```powershell
+uv run pytest tests/unit/modules/agent_runs/application/test_retry_policy.py
+uv run pytest tests/unit/modules/agent_runs/application/test_deterministic_executor.py
+uv run pytest tests/unit/modules/agent_runs/application/test_processor.py
+uv run pytest tests/unit/modules/agent_runs/application/test_worker.py
+uv run pytest tests/unit/modules/agent_runs/application/test_worker_loop.py
+uv run pytest tests/unit/worker/test_main.py
 ```
 
 Application service unit coverage:
@@ -135,6 +162,12 @@ They validate:
 - atomic ticket and run commit;
 - run insertion failure rolling back the ticket;
 - duplicate ticket conflict creating no additional run;
+- PostgreSQL claim ordering;
+- `FOR UPDATE SKIP LOCKED` claim concurrency;
+- fenced success and failure transitions;
+- stale lease-token rejection;
+- expired lease recovery;
+- processor transaction separation against live PostgreSQL;
 - workspace API creation and retrieval;
 - duplicate slug conflict responses;
 - ticket API intake, retrieval, and listing;
@@ -152,7 +185,9 @@ They validate:
 
 Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
 
-Full API integration tests require PostgreSQL and applied migrations. Qdrant remains required for readiness and shared integration fixtures, but business routes do not call Qdrant.
+Full API integration tests require PostgreSQL and applied migrations. Qdrant remains required for readiness and shared integration fixtures, but business routes do not call Qdrant. Qdrant-dependent tests are not worker tests.
+
+PostgreSQL integration tests are required for claim ordering, `SKIP LOCKED` concurrency, lease-token fencing, and expired lease recovery because those behaviors depend on real row locking and commit visibility.
 
 Integration tests are marked with:
 
@@ -187,13 +222,14 @@ Run only the integration directory:
 uv run pytest tests/integration
 ```
 
-Targeted Alembic, repository, and API integration coverage:
+Targeted Alembic, repository, AgentRun, and API integration coverage:
 
 ```powershell
 uv run pytest tests/integration/test_alembic.py
 uv run pytest tests/integration/modules/workspaces/infrastructure
 uv run pytest tests/integration/modules/tickets/infrastructure
 uv run pytest tests/integration/application/test_ticket_intake.py
+uv run pytest tests/integration/modules/agent_runs
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
 ```
@@ -205,6 +241,23 @@ Atomic ticket and AgentRun scheduling coverage:
 ```powershell
 uv run pytest tests/integration/application/test_ticket_intake.py
 ```
+
+AgentRun worker integration coverage:
+
+```powershell
+uv run pytest tests/integration/modules/agent_runs/infrastructure/test_claim_repository.py
+uv run pytest tests/integration/modules/agent_runs/infrastructure/test_transition_repository.py
+uv run pytest tests/integration/modules/agent_runs/infrastructure/test_recovery_repository.py
+uv run pytest tests/integration/modules/agent_runs/application/test_processor.py
+```
+
+These AgentRun integration tests verify:
+
+- deterministic claim ordering;
+- `SKIP LOCKED` concurrency across concurrent claimers;
+- fenced transitions and stale-token rejection;
+- expired lease recovery without incrementing attempt count;
+- processor transaction separation for ticket load, executor work, and outcome persistence.
 
 Workspace and ticket API integration coverage:
 
@@ -218,6 +271,18 @@ Run all tests:
 
 ```powershell
 uv run pytest
+```
+
+Run the complete unit suite:
+
+```powershell
+uv run pytest -m "not integration"
+```
+
+Run the complete integration suite:
+
+```powershell
+uv run pytest -m integration
 ```
 
 The project uses pytest importlib mode:
@@ -713,15 +778,6 @@ Later implementation phases are expected to add tests for:
 
 - authorization boundaries;
 - authenticated tenant isolation;
-- asynchronous job claiming;
-- queue leases, retries, and worker recovery;
-- attempt creation during execution;
-- lease-token fencing transitions;
-- duplicate execution;
-- idempotency;
-- retry scheduling;
-- stale lease recovery;
-- graceful worker shutdown;
 - AgentRun inspection endpoints;
 - structured LLM outputs;
 - retrieval quality and Qdrant indexing;
@@ -731,6 +787,7 @@ Later implementation phases are expected to add tests for:
 - token and cost accounting;
 - prompt versioning;
 - prompt regression;
-- evaluation thresholds.
+- evaluation thresholds;
+- idempotent side effects for future executors and tools.
 
-Authentication, worker execution, and AI classification remain intentional scope boundaries for the current suite. Durable AgentRun scheduling coverage is part of the current suite.
+Authentication, AI classification, and AgentRun inspection remain intentional scope boundaries for the current suite. Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery, deterministic execution, and worker process coverage are part of the current suite.

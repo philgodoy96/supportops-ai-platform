@@ -9,14 +9,19 @@ The current platform includes:
 - Python dependency management with `uv`;
 - PostgreSQL and Qdrant through Docker Compose;
 - a FastAPI application process;
+- a separate `supportops-worker` process;
 - liveness and readiness endpoints;
 - structured JSON logging with HTTP request traceability;
-- Alembic migrations for workspace and ticket tables;
+- Alembic migrations for workspace, ticket, and AgentRun tables;
 - versioned workspace and ticket HTTP APIs;
+- durable AgentRun scheduling and PostgreSQL worker execution;
 - unit and integration tests;
 - local quality checks.
 
-Asynchronous processing and AI capabilities are intentionally outside the current implementation scope. Workspace scoping is not authentication or authorization.
+AI classification, retrieval, and AgentRun inspection endpoints remain outside
+the current implementation scope. Workspace scoping is not authentication or
+authorization. Docker Compose provisions infrastructure only and intentionally
+does not run the worker.
 
 ## Prerequisites
 
@@ -139,7 +144,7 @@ Apply the current migration head before exercising business routes:
 uv run alembic upgrade head
 ```
 
-Run the FastAPI application:
+Run the FastAPI application in one terminal:
 
 ```powershell
 uv run uvicorn supportops.api.main:app `
@@ -151,7 +156,27 @@ The process emits structured JSON logs.
 
 The application may start even when PostgreSQL or Qdrant is unavailable. Dependency availability is represented by readiness.
 
-Business routes under `/api/v1` require a migrated PostgreSQL database. They do not enqueue asynchronous work and do not call Qdrant.
+Business routes under `/api/v1` require a migrated PostgreSQL database. Ticket creation schedules a durable `AgentRun` transactionally and does not execute the workflow. Business routes do not call Qdrant.
+
+## Start the worker
+
+In a separate terminal, start the PostgreSQL worker:
+
+```powershell
+$env:SUPPORTOPS_WORKER_ID="worker-local-1"
+uv run supportops-worker
+```
+
+Expected startup behavior:
+
+- settings validate successfully;
+- the process emits a structured `worker_started` log;
+- the worker begins recovery, claim, and processing cycles against PostgreSQL;
+- the worker does not initialize or connect to Qdrant.
+
+Docker Compose intentionally does not run the worker. Keep the API terminal and the worker terminal running while exercising ticket intake.
+
+If `SUPPORTOPS_WORKER_ID` is omitted, the worker generates an identity from hostname, process ID, and a UUID suffix.
 
 ## Validate liveness
 
@@ -225,6 +250,7 @@ $ticketResponse = Invoke-WebRequest `
 
 $ticket = $ticketResponse.Content | ConvertFrom-Json
 $ticket
+$ticket.processing_run
 $ticketResponse.Headers["X-Request-ID"]
 $ticketResponse.Headers["X-Correlation-ID"]
 ```
@@ -234,8 +260,16 @@ Expected behavior:
 - workspace creation returns HTTP `201`;
 - ticket creation returns HTTP `201`;
 - ticket status is `open`;
+- `processing_run.status` is `queued`;
+- `processing_run.workflow_name` is `ticket-processing`;
+- `processing_run.workflow_version` is `deterministic-baseline-v1`;
 - `ingestion_request_id` matches `X-Request-ID`;
-- `correlation_id` matches `X-Correlation-ID`.
+- `correlation_id` matches `X-Correlation-ID`;
+- the response confirms ticket acceptance, not final processing success.
+
+With the worker running, observe structured worker logs such as
+`worker_cycle_completed` for claimed and processed runs. The deterministic
+baseline validates the workflow contract and does not perform AI classification.
 
 Complete request examples, conflict cases, cross-workspace isolation, and cursor pagination are documented in:
 
@@ -243,6 +277,18 @@ Complete request examples, conflict cases, cross-workspace isolation, and cursor
 docs/development/api-examples.md
 ```
 
+## Stop the worker
+
+In the worker terminal, stop the process with `Ctrl+C`.
+
+Expected graceful shutdown behavior:
+
+- a structured `worker_shutdown_requested` log;
+- the active cycle may finish within the configured shutdown grace period;
+- a structured `worker_stopped` log after engine disposal.
+
+If the grace period is exceeded, the process emits
+`worker_shutdown_grace_exceeded` before cancelling the active loop task.
 ## Validate dependency failure behavior
 
 Stop PostgreSQL:
@@ -313,7 +359,8 @@ uv run alembic current
 uv run alembic heads
 ```
 
-The current head creates the `workspaces` and `tickets` tables.
+The current head creates the `workspaces`, `tickets`, `agent_runs`, and
+`agent_run_attempts` tables.
 
 `alembic downgrade` must only run against the local development or test database. Do not run downgrades against shared or production databases.
 
@@ -333,7 +380,8 @@ docker compose exec postgresql `
   -c "\dt"
 ```
 
-After `alembic upgrade head`, the schema includes `workspaces` and `tickets`.
+After `alembic upgrade head`, the schema includes `workspaces`, `tickets`,
+`agent_runs`, and `agent_run_attempts`.
 
 ## Run quality checks
 
