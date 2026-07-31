@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from supportops.modules.agent_runs.domain.models import AgentRun
 from supportops.modules.tickets.domain.models import Ticket
 
 
@@ -92,6 +93,52 @@ class TicketResponse(BaseModel):
             correlation_id=ticket.correlation_id,
             created_at=ticket.created_at,
             updated_at=ticket.updated_at,
+        )
+
+
+class TicketProcessingRunResponse(BaseModel):
+    """Initial processing reference returned with a created ticket."""
+
+    id: UUID
+    status: str
+    workflow_name: str
+    workflow_version: str
+
+    @classmethod
+    def from_domain(
+        cls,
+        agent_run: AgentRun,
+    ) -> "TicketProcessingRunResponse":
+        """Create a processing reference from an AgentRun entity."""
+
+        return cls(
+            id=agent_run.id,
+            status=agent_run.status.value,
+            workflow_name=agent_run.workflow_name,
+            workflow_version=agent_run.workflow_version,
+        )
+
+
+class TicketCreateResponse(BaseModel):
+    """Created ticket and its durable processing reference."""
+
+    ticket: TicketResponse
+    processing_run: TicketProcessingRunResponse
+
+    @classmethod
+    def from_domains(
+        cls,
+        *,
+        ticket: Ticket,
+        processing_run: AgentRun,
+    ) -> "TicketCreateResponse":
+        """Create the ticket-intake API response."""
+
+        return cls(
+            ticket=TicketResponse.from_domain(ticket),
+            processing_run=TicketProcessingRunResponse.from_domain(
+                processing_run,
+            ),
         )
 
 

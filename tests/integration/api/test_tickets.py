@@ -57,7 +57,10 @@ async def create_ticket(
 
     assert response.status_code == 201
 
-    return response.json(), dict(response.headers)
+    payload = response.json()
+    ticket = cast(dict[str, object], payload["ticket"])
+
+    return ticket, dict(response.headers)
 
 
 async def test_create_ticket_persists_trace_identifiers(
@@ -71,18 +74,36 @@ async def test_create_ticket_persists_trace_identifiers(
     )
     correlation_id = str(uuid4())
 
-    ticket, headers = await create_ticket(
-        integration_client,
-        workspace_id=workspace["id"],
-        external_reference="SUP-1042",
-        correlation_id=correlation_id,
+    response = await integration_client.post(
+        f"/api/v1/workspaces/{workspace['id']}/tickets",
+        json={
+            "subject": "Unable to access billing",
+            "description": ("The dashboard returns an access error."),
+            "external_reference": "SUP-1042",
+        },
+        headers={"X-Correlation-ID": correlation_id},
     )
+
+    assert response.status_code == 201
+
+    payload = response.json()
+    ticket = payload["ticket"]
+    processing_run = payload["processing_run"]
+    headers = dict(response.headers)
 
     assert ticket["workspace_id"] == workspace["id"]
     assert ticket["status"] == "open"
     assert ticket["external_reference"] == "SUP-1042"
     assert ticket["ingestion_request_id"] == headers["x-request-id"]
     assert ticket["correlation_id"] == correlation_id
+    assert processing_run["status"] == "queued"
+    assert processing_run["workflow_name"] == "ticket-processing"
+    assert set(processing_run) == {
+        "id",
+        "status",
+        "workflow_name",
+        "workflow_version",
+    }
     assert headers["x-correlation-id"] == correlation_id
 
 

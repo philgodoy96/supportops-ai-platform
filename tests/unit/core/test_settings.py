@@ -22,6 +22,7 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_POSTGRESQL_POOL_SIZE",
     "SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW",
     "SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS",
+    "SUPPORTOPS_WORKER_MAX_ATTEMPTS",
     "SUPPORTOPS_QDRANT_URL",
     "SUPPORTOPS_QDRANT_API_KEY",
     "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
@@ -65,8 +66,29 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.postgresql_pool_size == 5
     assert settings.postgresql_max_overflow == 10
     assert settings.postgresql_pool_timeout_seconds == 10.0
+    assert settings.worker_max_attempts == 3
     assert settings.qdrant_api_key is None
     assert settings.dependency_health_timeout_seconds == 2.0
+
+
+def test_settings_load_worker_max_attempts_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_ATTEMPTS", "5")
+
+    settings_type = cast(Any, Settings)
+    settings = cast(
+        Settings,
+        settings_type(
+            _env_file=None,
+            postgresql_url=(
+                "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+            ),
+            qdrant_url="http://localhost:6333",
+        ),
+    )
+
+    assert settings.worker_max_attempts == 5
 
 
 def test_settings_normalize_trimmed_values() -> None:
@@ -112,6 +134,8 @@ def test_settings_reject_blank_required_strings(
         ("postgresql_pool_size", 0),
         ("postgresql_max_overflow", -1),
         ("postgresql_pool_timeout_seconds", 0),
+        ("worker_max_attempts", 0),
+        ("worker_max_attempts", 101),
         ("dependency_health_timeout_seconds", 0),
         ("dependency_health_timeout_seconds", 31),
     ],

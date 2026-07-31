@@ -82,6 +82,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests"]
 mypy_path = "src"
+explicit_package_bases = true
 pretty = true
 show_error_codes = true
 show_error_context = true

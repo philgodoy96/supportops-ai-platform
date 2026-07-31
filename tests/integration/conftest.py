@@ -113,6 +113,8 @@ async def clean_business_tables(
 
     async def cleanup() -> None:
         async with postgresql_engine.connect() as connection:
+            await connection.execute(text("DELETE FROM agent_run_attempts"))
+            await connection.execute(text("DELETE FROM agent_runs"))
             await connection.execute(text("DELETE FROM tickets"))
             await connection.execute(text("DELETE FROM workspaces"))
             await connection.commit()
