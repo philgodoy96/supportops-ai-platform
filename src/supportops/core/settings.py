@@ -2,8 +2,9 @@
 
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal, Self
 
-from pydantic import Field, PostgresDsn, field_validator
+from pydantic import Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,7 +60,14 @@ class Settings(BaseSettings):
     postgresql_max_overflow: int = Field(default=10, ge=0, le=100)
     postgresql_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    worker_executor: Literal["deterministic-ticket-processing"] = "deterministic-ticket-processing"
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    worker_lease_seconds: float = Field(default=45.0, gt=0, le=3600)
+    worker_execution_timeout_seconds: float = Field(default=30.0, gt=0, le=1800)
+    worker_shutdown_grace_seconds: float = Field(default=10.0, ge=0, le=300)
     worker_max_attempts: int = Field(default=3, ge=1, le=100)
+    worker_retry_base_seconds: float = Field(default=2.0, gt=0, le=3600)
+    worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 
     qdrant_url: str = Field(min_length=1)
     qdrant_api_key: str | None = None
@@ -88,6 +96,23 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @model_validator(mode="after")
+    def validate_worker_timing_relationships(self) -> Self:
+        """Reject worker timing relationships that cannot safely coexist."""
+
+        if self.worker_lease_seconds < self.worker_execution_timeout_seconds + 5:
+            raise ValueError(
+                "worker_lease_seconds must exceed "
+                "worker_execution_timeout_seconds by at least 5 seconds."
+            )
+
+        if self.worker_retry_max_seconds < self.worker_retry_base_seconds:
+            raise ValueError(
+                "worker_retry_max_seconds must not be smaller than worker_retry_base_seconds."
+            )
+
+        return self
 
 
 @lru_cache
