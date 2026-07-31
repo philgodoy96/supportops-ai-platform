@@ -109,10 +109,15 @@ Once the API transaction commits:
 3. no `AgentRunAttempt` has been created yet;
 4. the HTTP response returns a minimal `processing_run` projection;
 5. the separate worker process becomes responsible for recovery, claim,
-   execution, and fenced outcome persistence.
+   execution, and fenced outcome persistence;
+6. clients may inspect the persisted `AgentRun` and attempt history through
+   workspace-scoped read-only endpoints.
 
 The API does not claim runs, acquire leases, execute the workflow, or report
 final processing success in the ticket creation response.
+
+Inspection endpoints report current persisted state. They do not guarantee
+future completion.
 
 ## Worker claim eligibility
 
@@ -333,8 +338,57 @@ The minimal processing reference intentionally excludes:
 - attempt history;
 - internal persistence state.
 
-Detailed run inspection is introduced through a separate workspace-scoped API
-boundary.
+Detailed run inspection is available through workspace-scoped read-only
+endpoints:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}
+GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/attempts
+```
+
+## Inspection after scheduling
+
+After ticket creation returns `processing_run`, the client can:
+
+1. read the `AgentRun`;
+2. inspect status and retry budget;
+3. inspect ordered attempt history;
+4. distinguish `queued`, `running`, `retry_scheduled`, `succeeded`, and
+   `failed` states;
+5. inspect safe error metadata without accessing runtime fencing identifiers.
+
+The worker updates durable state through claim, execution, and fenced outcome
+persistence. Inspection endpoints expose that persisted lifecycle. They are
+observational only and cannot alter retries, leases, or state transitions.
+
+Public `AgentRun` fields include ownership, workflow identity, status, retry
+budget, availability and completion timestamps, safe `last_error` metadata,
+and `correlation_id`.
+
+Public fields intentionally exclude:
+
+- `lease_owner`;
+- `lease_token`;
+- `lease_expires_at`;
+- `ingestion_request_id`.
+
+Public `AgentRunAttempt` fields include attempt identity, attempt number,
+worker identity, timing, outcome, and safe error metadata.
+
+Public attempt fields intentionally exclude:
+
+- `agent_run_id`;
+- `lease_token`;
+- `execution_request_id`.
+
+Attempt history is ordered by `attempt_number` ascending in PostgreSQL.
+Pagination is intentionally omitted because `max_attempts` is bounded. Queued
+runs may return an empty `items` array. Active attempts may have null
+`finished_at`, `outcome`, and `error`.
+
+Missing and cross-workspace lookups both return `404` with
+`agent_run_not_found`. Attempt ownership is established indirectly through the
+workspace-scoped `AgentRun`, not through the attempt records themselves.
 
 ## Persistence model
 
@@ -374,8 +428,13 @@ The current implementation provides:
 - stable initial workflow identity;
 - minimal processing references in the ticket creation response;
 - handoff to PostgreSQL worker claim, execution, fencing, retry, and recovery;
+- workspace-scoped AgentRun and attempt-history inspection;
+- safe operational metadata projections that omit fencing identifiers;
 - integration coverage for commit and rollback behavior.
 
-AgentRun inspection endpoints remain planned. Redis, Celery, Kafka, SQS, and an
-outbox remain intentionally deferred because PostgreSQL already provides
-transactional durability and adequate local and portfolio scope for this phase.
+Manual retry, cancellation, lease revocation, worker administration, global
+AgentRun listing, status filtering, pagination across runs, WebSockets,
+Server-Sent Events, and frontend monitoring remain intentionally deferred.
+Redis, Celery, Kafka, SQS, and an outbox remain intentionally deferred because
+PostgreSQL already provides transactional durability and adequate local and
+portfolio scope for this phase.

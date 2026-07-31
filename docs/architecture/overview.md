@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, and the PostgreSQL-backed worker. Retrieval and AI orchestration remain later phases.
+The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, and workspace-scoped AgentRun inspection. Retrieval and AI orchestration remain later phases.
 
 ## Architectural principles
 
@@ -42,7 +42,7 @@ The processes have distinct runtime responsibilities while remaining part of one
 
 Current ownership:
 
-- the API owns HTTP acceptance and transactional Ticket plus initial AgentRun scheduling;
+- the API owns HTTP acceptance, transactional Ticket plus initial AgentRun scheduling, and read-only AgentRun inspection;
 - the worker owns expired lease recovery, claim, execution, and fenced outcome persistence;
 - PostgreSQL owns tickets, AgentRuns, attempts, leases, retry scheduling, and execution history;
 - Qdrant remains outside the worker flow and is used by the API only for its current connectivity lifecycle.
@@ -87,7 +87,7 @@ The API boundary may depend on `supportops.core`, `supportops.infrastructure`, `
 
 Infrastructure and core packages must not depend on the API package.
 
-Operational health routes remain unversioned. Workspace and ticket business routes are versioned under `/api/v1`.
+Operational health routes remain unversioned. Workspace, ticket, and AgentRun business routes are versioned under `/api/v1`.
 
 ### Worker boundary
 
@@ -184,7 +184,7 @@ infrastructure/
 api/
 ```
 
-The `agent_runs` module provides domain, application, and infrastructure layers for durable scheduling, claiming, execution, retry, and recovery. AgentRun inspection APIs remain planned.
+The `agent_runs` module follows the same layout. It provides domain, application, infrastructure, and API layers for durable scheduling, claiming, execution, retry, recovery, and workspace-scoped inspection.
 
 ### Domain
 
@@ -218,7 +218,7 @@ lease_expired
 
 Application packages own use cases and transaction orchestration.
 
-Command use cases such as workspace creation own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, and ticket listing execute reads without opening a write transaction.
+Command use cases such as workspace creation own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, ticket listing, AgentRun retrieval, and AgentRunAttempt listing execute reads without opening a write transaction.
 
 `CreateTicketWithInitialRun` is the cross-module ticket intake command. It validates the workspace, persists the ticket, and persists the initial AgentRun in one shared SQLAlchemy session and one application-owned transaction. Repositories flush without committing independently.
 
@@ -228,7 +228,14 @@ The `agent_runs` application layer owns:
 - the deterministic baseline executor;
 - claimed-run processing outside claim transactions;
 - one-cycle worker orchestration;
-- the continuous polling loop.
+- the continuous polling loop;
+- workspace-scoped AgentRun inspection use cases.
+
+`GetAgentRun` performs workspace-scoped lookup through `AgentRunQueryRepository`. `ListAgentRunAttempts` first validates AgentRun ownership through the same workspace-scoped lookup, then lists attempts. Attempts do not carry `workspace_id` and therefore cannot establish ownership independently.
+
+`AgentRunQueryRepository` is a dedicated read-only contract. `AgentRunRepository` remains the mutation-oriented scheduling and worker contract. This separation applies interface segregation: inspection depends only on read operations, while claiming, transitions, and recovery remain on the mutation protocol.
+
+Read inspection services use the request-scoped `AsyncSession` without an explicit `TransactionManager`. They do not flush, commit, or mutate state. PostgreSQL orders attempts by `attempt_number` ascending in SQL.
 
 Application services depend on domain repository protocols. They do not depend on FastAPI or SQLAlchemy session APIs directly.
 
@@ -258,9 +265,17 @@ GET  /api/v1/workspaces/{workspace_id}
 POST /api/v1/workspaces/{workspace_id}/tickets
 GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
 GET  /api/v1/workspaces/{workspace_id}/tickets
+GET  /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}
+GET  /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/attempts
 ```
 
-Ticket creation returns a nested ticket object and a minimal processing-run reference. AgentRun inspection endpoints are not implemented yet.
+Ticket creation returns a nested ticket object and a minimal processing-run reference. Clients then inspect the persisted AgentRun and ordered attempt history through the workspace-scoped read-only endpoints.
+
+HTTP schemas project safe operational fields only. Internal lease ownership, lease tokens, lease expiry, ingestion request IDs, and execution request IDs remain private. Attempt responses exclude `agent_run_id`, lease tokens, and execution request IDs.
+
+Inspection endpoints are observational only. They do not perform mutation, retry, cancellation, or lease revocation.
+
+Missing and cross-workspace AgentRun lookups both return `404` with `agent_run_not_found`. This prevents resource ownership disclosure across workspaces.
 
 Expected application errors use a stable envelope with `code`, `message`, and `request_id`. Malformed identifiers and invalid request schemas use FastAPI validation responses.
 
@@ -317,9 +332,13 @@ Read queries do not open write transactions:
 
 - get workspace;
 - get ticket;
-- list tickets.
+- list tickets;
+- get AgentRun;
+- list AgentRunAttempts.
 
 Ticket listing verifies that the workspace exists before returning an empty page. A missing workspace returns `workspace_not_found`. An empty workspace returns an empty `items` collection with a null `next_cursor`.
+
+AgentRun lookup is always workspace-scoped. Attempt history is returned only after AgentRun ownership is validated. Queued runs may return an empty attempt `items` array. Attempt pagination is intentionally omitted because `max_attempts` is bounded.
 
 ## Versioned business API and error contract
 
@@ -348,11 +367,12 @@ Implemented expected error codes include:
 
 - `workspace_not_found`;
 - `ticket_not_found`;
+- `agent_run_not_found`;
 - `workspace_slug_conflict`;
 - `ticket_external_reference_conflict`;
 - `invalid_pagination_cursor`.
 
-Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as a missing ticket.
+Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as a missing ticket. Cross-workspace AgentRun retrieval returns the same `agent_run_not_found` contract as a missing AgentRun.
 
 ## Data ownership
 
@@ -383,6 +403,8 @@ Implemented ownership and integrity rules include:
 - persistence-independent frozen Workspace, Ticket, AgentRun, and AgentRunAttempt domain entities;
 - SQLAlchemy records with explicit mapping;
 - repository protocols, including workspace-scoped ticket `get` and `list`;
+- `AgentRunQueryRepository` for workspace-scoped AgentRun inspection reads;
+- `AgentRunRepository` for mutation-oriented scheduling and worker operations;
 - application-owned transaction boundaries;
 - repository flush without commit;
 - PostgreSQL named constraints, including unique workspace slugs and workspace-scoped external references;
@@ -438,7 +460,7 @@ The deterministic baseline validates that contract and performs no external I/O,
 
 The architecture intentionally avoids Redis, Celery, Kafka, and SQS in this phase because PostgreSQL provides transactional durability and adequate local and portfolio scope. An external queue or outbox is not required for the current worker model.
 
-AgentRun inspection endpoints remain planned.
+After scheduling, clients inspect persisted lifecycle state through workspace-scoped read-only endpoints. Inspection reports current durable status, retry budget, safe error metadata, and ordered attempt history. It does not alter retries, leases, or state transitions, and it does not guarantee future completion.
 
 Scheduling details are documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime topology details are documented in [`runtime-topology.md`](runtime-topology.md).
 
@@ -577,7 +599,7 @@ They validate behavior such as:
 - readiness aggregation;
 - dependency failure handling;
 - domain invariants, including AgentRun and AgentRunAttempt;
-- application service command and query behavior;
+- application service command and query behavior, including AgentRun inspection;
 - transactional ticket-intake orchestration;
 - retry policy, claiming, fencing, recovery, processor, and worker cycle behavior;
 - deterministic executor contract validation;
@@ -586,7 +608,8 @@ They validate behavior such as:
 - named constraints;
 - persistence model registration;
 - PostgreSQL constraint-name inspection;
-- API schemas and opaque cursor encoding.
+- API schemas and opaque cursor encoding;
+- AgentRun inspection schema projections that omit internal fencing identifiers.
 
 ### Integration tests
 
@@ -606,8 +629,10 @@ They validate:
 - fenced transitions and expired lease recovery;
 - processor transaction separation against live PostgreSQL;
 - workspace and ticket HTTP API behavior;
+- workspace-scoped AgentRun inspection HTTP behavior;
 - stable expected-error responses;
-- opaque cursor pagination.
+- opaque cursor pagination;
+- workspace-scoped SQL predicates and attempt ordering.
 
 PostgreSQL integration tests are required for concurrency and row-locking behavior. Qdrant-dependent tests are not worker tests.
 
@@ -654,7 +679,7 @@ Service extraction is not a default objective. It should be driven by clear owne
 
 ## Repository foundation scope
 
-The repository foundation, Slice 1, durable AgentRun scheduling, and the PostgreSQL worker establish:
+The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL worker, and AgentRun inspection establish:
 
 - project and dependency management;
 - local PostgreSQL and Qdrant infrastructure;
@@ -671,6 +696,7 @@ The repository foundation, Slice 1, durable AgentRun scheduling, and the Postgre
 - PostgreSQL claiming, leases, fencing, retries, and recovery;
 - deterministic baseline execution;
 - a separate worker process with cooperative shutdown;
+- workspace-scoped AgentRun inspection;
 - application services and versioned business APIs;
 - stable expected-error contracts;
 - opaque cursor pagination;
@@ -685,7 +711,11 @@ The current phase does not implement:
 
 - authentication or authorization;
 - authenticated tenant isolation;
-- AgentRun inspection endpoints;
+- manual AgentRun retry or cancellation;
+- lease revocation or worker administration;
+- global AgentRun listing, status filtering, or pagination across runs;
+- WebSockets or Server-Sent Events;
+- frontend monitoring applications;
 - Redis, Celery, Kafka, or SQS;
 - LLM calls;
 - AI classification;
@@ -704,6 +734,6 @@ The current phase does not implement:
 - public cloud deployment;
 - infrastructure as code.
 
-Ticket status remains `open` after intake. Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
+Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, and workspace-scoped AgentRun inspection are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This document provides reproducible examples for the implemented workspace and
-support ticket HTTP API.
+This document provides reproducible examples for the implemented workspace,
+support ticket, and AgentRun inspection HTTP API.
 
 The examples use placeholder values suitable for local development and public
 documentation.
@@ -15,6 +15,8 @@ The API currently supports:
 - a minimal processing-run reference on ticket creation;
 - workspace-scoped ticket retrieval;
 - workspace-scoped ticket listing;
+- workspace-scoped AgentRun inspection;
+- workspace-scoped AgentRunAttempt history inspection;
 - opaque cursor pagination;
 - stable expected-error responses;
 - request and correlation trace identifiers.
@@ -24,8 +26,11 @@ scoping establishes an explicit data ownership boundary but does not establish
 trusted tenant isolation.
 
 A queued deterministic-baseline processing run records that durable work has
-been scheduled. It does not represent AI classification. AgentRun inspection
-endpoints are not implemented yet.
+been scheduled. It does not represent AI classification.
+
+AgentRun inspection endpoints are strictly read-only. They report current
+persisted state and do not guarantee future completion. They do not perform
+mutation, retry, cancellation, or lease revocation.
 
 ## Prerequisites
 
@@ -106,6 +111,8 @@ $ticketId = $ticket.id
 $payload
 $ticketResponse.Headers["X-Request-ID"]
 $ticketResponse.Headers["X-Correlation-ID"]
+
+$agentRunId = $processingRun.id
 ```
 
 Expected status:
@@ -157,6 +164,8 @@ Expected behavior:
 A queued deterministic-baseline run does not indicate that AI classification
 has occurred.
 
+Retain `$agentRunId` for the inspection examples below.
+
 ## Retrieve the ticket through workspace A
 
 ```powershell
@@ -197,6 +206,222 @@ ticket_not_found
 ```
 
 The response does not reveal that the ticket exists in another workspace.
+
+## Inspect a queued AgentRun
+
+Immediately after ticket creation, before the worker claims the run:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/agent-runs/$agentRunId"
+```
+
+Expected status:
+
+```text
+200 OK
+```
+
+Expected queued response:
+
+```json
+{
+  "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+  "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+  "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+  "status": "queued",
+  "workflow": {
+    "name": "ticket-processing",
+    "version": "deterministic-baseline-v1",
+    "trigger_key": "initial-ticket-processing"
+  },
+  "attempt_count": 0,
+  "max_attempts": 3,
+  "available_at": "2026-07-31T12:00:00Z",
+  "first_started_at": null,
+  "completed_at": null,
+  "last_error": null,
+  "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
+  "created_at": "2026-07-31T12:00:00Z",
+  "updated_at": "2026-07-31T12:00:00Z"
+}
+```
+
+The response does not include lease ownership, lease tokens, lease expiry, or
+ingestion request identifiers.
+
+## Inspect a succeeded AgentRun
+
+After the deterministic worker processes the run:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/agent-runs/$agentRunId"
+```
+
+Expected succeeded response:
+
+```json
+{
+  "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+  "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+  "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+  "status": "succeeded",
+  "workflow": {
+    "name": "ticket-processing",
+    "version": "deterministic-baseline-v1",
+    "trigger_key": "initial-ticket-processing"
+  },
+  "attempt_count": 1,
+  "max_attempts": 3,
+  "available_at": "2026-07-31T12:00:00Z",
+  "first_started_at": "2026-07-31T12:00:01Z",
+  "completed_at": "2026-07-31T12:00:01Z",
+  "last_error": null,
+  "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
+  "created_at": "2026-07-31T12:00:00Z",
+  "updated_at": "2026-07-31T12:00:01Z"
+}
+```
+
+Inspection reports persisted state at the time of the request. It does not
+guarantee future completion for runs that are still in progress.
+
+## Inspect retry_scheduled or failed AgentRun state
+
+When a run has safe error metadata after a retryable or terminal failure, the
+`last_error` object contains only a stable code and summary:
+
+```json
+{
+  "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+  "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+  "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+  "status": "retry_scheduled",
+  "workflow": {
+    "name": "ticket-processing",
+    "version": "deterministic-baseline-v1",
+    "trigger_key": "initial-ticket-processing"
+  },
+  "attempt_count": 1,
+  "max_attempts": 3,
+  "available_at": "2026-07-31T12:00:05Z",
+  "first_started_at": "2026-07-31T12:00:01Z",
+  "completed_at": null,
+  "last_error": {
+    "code": "executor_timeout",
+    "summary": "The configured executor exceeded its execution timeout."
+  },
+  "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
+  "created_at": "2026-07-31T12:00:00Z",
+  "updated_at": "2026-07-31T12:00:01Z"
+}
+```
+
+A terminal exhaustion path uses status `failed` with the same safe
+`last_error` shape. Raw exception text is not returned.
+
+## Inspect empty attempt history
+
+Queued runs have no attempts yet:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/agent-runs/$agentRunId/attempts"
+```
+
+Expected empty history response:
+
+```json
+{
+  "items": []
+}
+```
+
+## Inspect ordered attempt history
+
+After one or more claims:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/agent-runs/$agentRunId/attempts"
+```
+
+Expected ordered history response:
+
+```json
+{
+  "items": [
+    {
+      "id": "2b39f5b7-b2a4-48d0-b079-fdad286d5315",
+      "attempt_number": 1,
+      "worker_id": "worker-local-1",
+      "started_at": "2026-07-31T12:00:01Z",
+      "finished_at": "2026-07-31T12:00:01Z",
+      "outcome": "succeeded",
+      "error": null
+    }
+  ]
+}
+```
+
+Attempts are ordered by `attempt_number` ascending. Possible outcomes are:
+
+```text
+succeeded
+retryable_failure
+terminal_failure
+timed_out
+lease_expired
+```
+
+Active attempts may return null `finished_at`, `outcome`, and `error`.
+
+Attempt responses do not include `agent_run_id`, lease tokens, or execution
+request identifiers. Attempt pagination is intentionally omitted because
+`max_attempts` is bounded.
+
+## Attempt cross-workspace AgentRun inspection
+
+```powershell
+try {
+  Invoke-RestMethod `
+    -Method Get `
+    -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceBId/agent-runs/$agentRunId"
+} catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.ErrorDetails.Message
+}
+```
+
+Expected status:
+
+```text
+404 Not Found
+```
+
+Expected error response:
+
+```json
+{
+  "error": {
+    "code": "agent_run_not_found",
+    "message": "AgentRun was not found.",
+    "request_id": "dfe63a63-031c-4ea9-89dd-d556bd51766a"
+  }
+}
+```
+
+Missing and cross-workspace AgentRuns both return this contract. The standard
+error envelope includes the request ID. The response does not reveal that the
+AgentRun exists in another workspace.
+
+The same `agent_run_not_found` contract applies to attempt-history requests for
+missing or cross-workspace runs.
 
 ## List tickets in workspace A
 
@@ -465,6 +690,7 @@ Implemented expected error codes:
 ```text
 workspace_not_found
 ticket_not_found
+agent_run_not_found
 workspace_slug_conflict
 ticket_external_reference_conflict
 invalid_pagination_cursor

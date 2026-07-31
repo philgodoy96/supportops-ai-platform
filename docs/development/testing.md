@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -61,6 +61,7 @@ They validate:
 - PostgreSQL constraint-name inspection helpers;
 - workspace API schemas;
 - ticket API schemas, including the nested processing-run response;
+- AgentRun inspection schema projections;
 - opaque ticket cursor encoding and invalid-cursor rejection.
 
 Unit tests use mocks only at external boundaries.
@@ -96,6 +97,7 @@ uv run pytest tests/unit/modules/workspaces/infrastructure tests/unit/modules/ti
 uv run pytest tests/unit/modules/agent_runs/infrastructure
 uv run pytest tests/unit/modules/workspaces/api
 uv run pytest tests/unit/modules/tickets/api
+uv run pytest tests/unit/modules/agent_runs/api
 uv run pytest tests/unit/infrastructure/postgresql
 ```
 
@@ -123,16 +125,34 @@ Application service unit coverage:
 ```powershell
 uv run pytest tests/unit/modules/workspaces/application/test_services.py
 uv run pytest tests/unit/modules/tickets/application/test_services.py
+uv run pytest tests/unit/modules/agent_runs/application/test_services.py
 uv run pytest tests/unit/application/test_ticket_intake.py
 ```
 
-Workspace schema and ticket schema plus cursor unit coverage:
+Workspace schema, ticket schema plus cursor, and AgentRun inspection schema unit coverage:
 
 ```powershell
 uv run pytest tests/unit/modules/workspaces/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_pagination.py
+uv run pytest tests/unit/modules/agent_runs/api/test_schemas.py
 ```
+
+AgentRun inspection application coverage verifies:
+
+- workspace-scoped AgentRun retrieval;
+- missing AgentRun raising `AgentRunNotFoundError`;
+- cross-workspace AgentRun lookups treated as not found;
+- empty attempt history for queued runs;
+- deterministic attempt ordering by `attempt_number`;
+- ownership validation before attempt listing.
+
+AgentRun inspection schema coverage verifies:
+
+- safe public field projection for AgentRun responses;
+- safe public field projection for attempt responses;
+- omission of `lease_owner`, `lease_token`, `lease_expires_at`, and `ingestion_request_id`;
+- omission of attempt `agent_run_id`, `lease_token`, and `execution_request_id`.
 
 ## Integration tests
 
@@ -181,6 +201,10 @@ They validate:
 - invalid cursor responses;
 - page-size validation;
 - request schema validation errors;
+- workspace-scoped AgentRun retrieval;
+- empty and ordered AgentRunAttempt history responses;
+- AgentRun HTTP `404` for missing and cross-workspace resources;
+- invalid AgentRun UUID validation;
 - absence of request bodies from completion logs, including ticket subject and description content.
 
 Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
@@ -232,6 +256,7 @@ uv run pytest tests/integration/application/test_ticket_intake.py
 uv run pytest tests/integration/modules/agent_runs
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
+uv run pytest tests/integration/api/test_agent_runs.py
 ```
 
 The concurrency-sensitive duplicate external-reference repository test remains part of the ticket infrastructure integration suite and should continue to run against real PostgreSQL.
@@ -259,11 +284,46 @@ These AgentRun integration tests verify:
 - expired lease recovery without incrementing attempt count;
 - processor transaction separation for ticket load, executor work, and outcome persistence.
 
-Workspace and ticket API integration coverage:
+AgentRun query repository integration coverage:
+
+```powershell
+uv run pytest tests/integration/modules/agent_runs/infrastructure/test_query_repository.py
+```
+
+These query-repository tests verify:
+
+- workspace-scoped PostgreSQL lookup predicates;
+- missing and cross-workspace runs returning no row;
+- empty attempt history for queued runs;
+- actual SQL ordering by `attempt_number` ascending;
+- attempt history scoped to the requested AgentRun.
+
+Workspace, ticket, and AgentRun API integration coverage:
 
 ```powershell
 uv run pytest tests/integration/api/test_workspaces.py tests/integration/api/test_tickets.py
+uv run pytest tests/integration/api/test_agent_runs.py
 ```
+
+AgentRun API integration coverage verifies:
+
+- queued AgentRun inspection after ticket creation;
+- omission of internal lease and execution identifiers from HTTP responses;
+- HTTP `404` with `agent_run_not_found` for missing and cross-workspace runs;
+- empty attempt-history envelopes;
+- ordered attempt-history envelopes;
+- FastAPI dependency composition for inspection routes;
+- stable error envelope integration;
+- invalid UUID validation responses;
+- tenant isolation behavior that does not disclose cross-workspace ownership.
+
+Integration tests are necessary for AgentRun inspection because unit tests cannot fully prove:
+
+- workspace-scoped SQL predicates against PostgreSQL;
+- actual SQL ordering of attempts;
+- FastAPI dependency composition for the mounted routes;
+- error envelope integration through registered handlers;
+- end-to-end tenant isolation behavior across HTTP and persistence.
 
 ## Full test suite
 
@@ -436,7 +496,7 @@ Run the focused request-traceability suite:
 uv run pytest tests/unit/core/test_request_context.py tests/unit/core/test_logging.py tests/unit/api/test_application.py tests/unit/api/test_request_context_middleware.py
 ```
 
-## Workspace and ticket API tests
+## Workspace, ticket, and AgentRun API tests
 
 Workspace API integration coverage verifies:
 
@@ -463,6 +523,15 @@ Ticket API integration coverage verifies:
 - page-size validation;
 - request schema validation errors.
 
+AgentRun inspection API integration coverage verifies:
+
+- workspace-scoped AgentRun retrieval;
+- empty and ordered attempt-history responses;
+- safe schema projections without fencing identifiers;
+- HTTP `404` with `agent_run_not_found` for missing and cross-workspace resources;
+- invalid UUID validation;
+- tenant-safe ownership behavior.
+
 Transactional ticket-intake integration coverage verifies:
 
 - atomic ticket and run commit;
@@ -474,7 +543,17 @@ Run the focused API and intake suites:
 ```powershell
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
+uv run pytest tests/integration/api/test_agent_runs.py
 uv run pytest tests/integration/application/test_ticket_intake.py
+```
+
+Focused AgentRun inspection coverage:
+
+```powershell
+uv run pytest tests/unit/modules/agent_runs/application/test_services.py
+uv run pytest tests/unit/modules/agent_runs/api/test_schemas.py
+uv run pytest tests/integration/modules/agent_runs/infrastructure/test_query_repository.py
+uv run pytest tests/integration/api/test_agent_runs.py
 ```
 
 Full API integration tests require PostgreSQL and applied migrations.
@@ -778,7 +857,8 @@ Later implementation phases are expected to add tests for:
 
 - authorization boundaries;
 - authenticated tenant isolation;
-- AgentRun inspection endpoints;
+- manual AgentRun retry and cancellation;
+- global AgentRun listing and status filtering;
 - structured LLM outputs;
 - retrieval quality and Qdrant indexing;
 - LangGraph orchestration;
@@ -790,4 +870,4 @@ Later implementation phases are expected to add tests for:
 - evaluation thresholds;
 - idempotent side effects for future executors and tools.
 
-Authentication, AI classification, and AgentRun inspection remain intentional scope boundaries for the current suite. Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery, deterministic execution, and worker process coverage are part of the current suite.
+Authentication and AI classification remain intentional scope boundaries for the current suite. Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery, deterministic execution, worker process coverage, and workspace-scoped AgentRun inspection are part of the current suite.

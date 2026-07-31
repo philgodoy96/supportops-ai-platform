@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, and the PostgreSQL-backed worker are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, and workspace-scoped AgentRun inspection are implemented.
 
 The current platform includes:
 
@@ -41,6 +41,10 @@ The current platform includes:
 - database-enforced workspace and ticket ownership for AgentRun records;
 - duplicate initial scheduling prevention;
 - a minimal processing-run reference returned by ticket creation;
+- workspace-scoped AgentRun inspection;
+- workspace-scoped AgentRunAttempt history inspection;
+- safe operational AgentRun metadata without lease or execution fencing identifiers;
+- tenant-safe `404` behavior for missing and cross-workspace AgentRuns;
 - workspace-scoped ticket retrieval and listing;
 - versioned `/api/v1` business routes;
 - stable expected-error responses;
@@ -58,7 +62,9 @@ Workspace scoping is a data ownership boundary. It is not authentication or auth
 
 Ticket acceptance and asynchronous processing success are separate outcomes. A queued `deterministic-baseline-v1` processing run records that durable work has been scheduled. It does not represent AI classification. The deterministic baseline validates the durable execution architecture and performs no LLM call, retrieval, or ticket classification.
 
-AgentRun inspection endpoints, LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
+Inspection endpoints report current persisted AgentRun state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions.
+
+LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
 
 ## Engineering goals
 
@@ -200,22 +206,35 @@ Implemented behavior includes:
 - deterministic baseline execution (`deterministic-ticket-processing`) outside transactions;
 - cooperative SIGINT and SIGTERM shutdown with engine disposal.
 
-A queued deterministic-baseline run does not represent AI classification. AgentRun inspection endpoints remain planned.
+A queued deterministic-baseline run does not represent AI classification.
+
+After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints. Inspection exposes status, retry budget, workflow identity, safe error metadata, and ordered attempt outcomes. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, or execution request IDs.
 
 Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md).
 
-### Workspace and ticket API
+### Workspace, ticket, and AgentRun API
 
 Slice 1 exposes versioned business routes under `/api/v1`:
 
 - workspace creation and retrieval;
 - workspace-scoped ticket creation, retrieval, and listing;
+- workspace-scoped AgentRun retrieval;
+- workspace-scoped AgentRunAttempt history listing;
 - opaque cursor pagination for ticket listing;
 - stable expected-error responses for missing resources, conflicts, and invalid cursors;
 - persistence of request and correlation identifiers on accepted tickets;
-- cross-workspace retrieval that returns the same `404` contract as a missing ticket.
+- cross-workspace retrieval that returns the same `404` contract as a missing ticket or AgentRun.
 
-Health routes remain unversioned. Workspace scoping is not authentication or authorization.
+Current operational flow:
+
+```text
+ticket accepted
+→ AgentRun scheduled
+→ worker processes
+→ client inspects persisted state
+```
+
+Health routes remain unversioned. Workspace scoping is not authentication or authorization. Inspection endpoints are strictly read-only.
 
 Reproducible request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
 
@@ -241,10 +260,11 @@ The repository includes:
 - application service unit coverage;
 - transactional ticket-intake unit coverage;
 - worker claim, retry, fencing, recovery, and process unit coverage;
-- workspace and ticket API schema and pagination unit coverage;
+- workspace, ticket, and AgentRun API schema and pagination unit coverage;
 - ORM mapping, named-constraint, and model-registration tests;
 - repository integration and concurrency-sensitive tests, including SKIP LOCKED claiming;
-- workspace and ticket API integration coverage;
+- workspace-scoped AgentRun query repository coverage;
+- workspace, ticket, and AgentRun API integration coverage;
 - atomic ticket and AgentRun commit and rollback coverage;
 - Alembic upgrade, downgrade, and metadata-parity coverage;
 - settings validation tests;
@@ -260,11 +280,10 @@ The repository includes:
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules, plus a `supportops.worker` process entry point. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, execution, retry, and recovery foundations coordinated during ticket intake and by the worker process.
+The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules, plus a `supportops.worker` process entry point. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, execution, retry, recovery, and workspace-scoped inspection foundations coordinated during ticket intake, by the worker process, and through read-only HTTP routes.
 
 Future implementation phases are expected to introduce or extend modules for:
 
-- AgentRun inspection endpoints;
 - structured LLM classification;
 - internal runbook ingestion;
 - semantic retrieval and Qdrant indexing;
@@ -329,6 +348,10 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   └── qdrant/
 │       ├── modules/
 │       │   ├── agent_runs/
+│       │   │   ├── api/
+│       │   │   ├── application/
+│       │   │   ├── domain/
+│       │   │   └── infrastructure/
 │       │   ├── tickets/
 │       │   └── workspaces/
 │       └── worker/
@@ -348,7 +371,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain and infrastructure layers. Workspace and ticket modules also expose application and API layers. The `agent_runs` module includes worker-facing application services. Cross-module ticket intake lives under `supportops.application`. The worker process entry point lives under `supportops.worker`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain, application, infrastructure, and API layers. The `agent_runs` module includes worker-facing application services and read-only inspection routes. Cross-module ticket intake lives under `supportops.application`. The worker process entry point lives under `supportops.worker`.
 
 ## Local setup
 
@@ -613,11 +636,16 @@ Implemented:
 - bounded exponential backoff retries;
 - expired lease recovery;
 - deterministic baseline executor;
-- separate worker process with cooperative shutdown.
+- separate worker process with cooperative shutdown;
+- workspace-scoped AgentRun inspection;
+- workspace-scoped AgentRunAttempt history inspection;
+- safe operational metadata projections;
+- tenant-safe `agent_run_not_found` responses.
 
 Planned:
 
-- AgentRun inspection endpoints;
+- manual retry and cancellation;
+- global AgentRun listing and status filtering;
 - idempotent side effects for future executors and tools.
 
 ### Retrieval
@@ -656,7 +684,11 @@ The following capabilities remain deferred to preserve architectural focus and a
 
 - authentication and authorization;
 - authenticated tenant isolation;
-- AgentRun inspection endpoints;
+- manual AgentRun retry and cancellation;
+- lease revocation and worker administration;
+- global AgentRun listing, status filtering, and pagination across runs;
+- WebSockets and Server-Sent Events;
+- frontend monitoring applications;
 - Redis, Celery, Kafka, and SQS;
 - LLM provider integrations;
 - AI classification;
