@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from supportops.core.request_context import get_request_context
+from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
 from supportops.modules.tickets.api.pagination import InvalidPaginationCursorError
 from supportops.modules.tickets.application.errors import (
     TicketExternalReferenceConflictApplicationError,
@@ -57,6 +58,10 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         TicketExternalReferenceConflictApplicationError,
         _ticket_external_reference_conflict_handler,
+    )
+    app.add_exception_handler(
+        AgentRunNotFoundError,
+        _agent_run_not_found_handler,
     )
     app.add_exception_handler(
         InvalidPaginationCursorError,
@@ -117,6 +122,20 @@ async def _ticket_external_reference_conflict_handler(
         status_code=409,
         code="ticket_external_reference_conflict",
         message=("Ticket external reference already exists in the workspace."),
+    )
+
+
+async def _agent_run_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="agent_run_not_found",
+        message="AgentRun was not found.",
     )
 
 
