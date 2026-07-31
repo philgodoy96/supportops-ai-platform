@@ -8,6 +8,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from supportops.core.request_context import get_request_context
+from supportops.modules.tickets.api.pagination import InvalidPaginationCursorError
+from supportops.modules.tickets.application.errors import (
+    TicketExternalReferenceConflictApplicationError,
+    TicketNotFoundError,
+)
 from supportops.modules.workspaces.application.errors import (
     WorkspaceNotFoundError,
     WorkspaceSlugConflictApplicationError,
@@ -45,6 +50,18 @@ def register_error_handlers(app: FastAPI) -> None:
         WorkspaceSlugConflictApplicationError,
         _workspace_slug_conflict_handler,
     )
+    app.add_exception_handler(
+        TicketNotFoundError,
+        _ticket_not_found_handler,
+    )
+    app.add_exception_handler(
+        TicketExternalReferenceConflictApplicationError,
+        _ticket_external_reference_conflict_handler,
+    )
+    app.add_exception_handler(
+        InvalidPaginationCursorError,
+        _invalid_pagination_cursor_handler,
+    )
 
 
 async def _workspace_not_found_handler(
@@ -72,6 +89,48 @@ async def _workspace_slug_conflict_handler(
         status_code=409,
         code="workspace_slug_conflict",
         message="Workspace slug is already in use.",
+    )
+
+
+async def _ticket_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="ticket_not_found",
+        message="Ticket was not found.",
+    )
+
+
+async def _ticket_external_reference_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="ticket_external_reference_conflict",
+        message=("Ticket external reference already exists in the workspace."),
+    )
+
+
+async def _invalid_pagination_cursor_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=400,
+        code="invalid_pagination_cursor",
+        message="Pagination cursor is invalid.",
     )
 
 
