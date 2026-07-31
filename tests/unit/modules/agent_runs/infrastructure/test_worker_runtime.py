@@ -1,0 +1,194 @@
+"""Unit tests for session-scoped PostgreSQL worker composition."""
+
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import UTC, datetime
+from typing import cast
+from unittest.mock import AsyncMock
+from uuid import UUID
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from supportops.modules.agent_runs.application.worker import (
+    RunAgentWorkerCycle,
+    WorkerCycleOutcome,
+    WorkerCycleResult,
+)
+from supportops.modules.agent_runs.infrastructure.worker_runtime import (
+    PostgreSqlAgentWorkerCycleRunner,
+)
+
+_NOW = datetime(
+    2026,
+    7,
+    31,
+    18,
+    0,
+    tzinfo=UTC,
+)
+_RUN_ID = UUID(
+    "69184ef1-4d71-452e-8070-0b784c29368e",
+)
+
+
+class RecordingSessionFactory:
+    """Produce scoped fake sessions and record lifecycle events."""
+
+    def __init__(self) -> None:
+        self.sessions_created = 0
+        self.sessions_entered = 0
+        self.sessions_exited = 0
+        self.session = AsyncMock(spec=AsyncSession)
+
+    def __call__(self) -> AbstractAsyncContextManager[AsyncSession]:
+        self.sessions_created += 1
+
+        @asynccontextmanager
+        async def session_scope() -> AsyncIterator[AsyncSession]:
+            self.sessions_entered += 1
+
+            try:
+                yield self.session
+            finally:
+                self.sessions_exited += 1
+
+        return session_scope()
+
+
+class RecordingCycle:
+    """Return a predefined result and record invocation."""
+
+    def __init__(
+        self,
+        result: WorkerCycleResult,
+    ) -> None:
+        self._result = result
+        self.executions = 0
+
+    async def execute(self) -> WorkerCycleResult:
+        self.executions += 1
+        return self._result
+
+
+class TestablePostgreSqlAgentWorkerCycleRunner(PostgreSqlAgentWorkerCycleRunner):
+    """Override composition so session scoping can be tested in isolation."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: RecordingSessionFactory,
+        cycle: RecordingCycle,
+    ) -> None:
+        super().__init__(
+            session_factory=session_factory,  # type: ignore[arg-type]
+            worker_id="worker-a",
+            executor=AsyncMock(),
+            retry_policy=AsyncMock(),
+            lease_seconds=45.0,
+            execution_timeout_seconds=30.0,
+            utc_now=lambda: _NOW,
+            uuid_provider=lambda: UUID(
+                "dd0ae456-3467-41db-93d1-a908f40e8365",
+            ),
+        )
+        self._recording_cycle = cycle
+        self.sessions_received: list[AsyncSession] = []
+
+    def _build_cycle(
+        self,
+        session: AsyncSession,
+    ) -> RunAgentWorkerCycle:
+        self.sessions_received.append(session)
+        return cast(RunAgentWorkerCycle, self._recording_cycle)
+
+
+async def test_runner_opens_and_closes_session_for_one_cycle() -> None:
+    session_factory = RecordingSessionFactory()
+    cycle = RecordingCycle(
+        WorkerCycleResult(
+            outcome=WorkerCycleOutcome.PROCESSED,
+            recovered_expired_run=False,
+            agent_run_id=_RUN_ID,
+        ),
+    )
+    runner = TestablePostgreSqlAgentWorkerCycleRunner(
+        session_factory=session_factory,
+        cycle=cycle,
+    )
+
+    result = await runner.execute()
+
+    assert result.outcome is WorkerCycleOutcome.PROCESSED
+    assert result.agent_run_id == _RUN_ID
+
+    assert session_factory.sessions_created == 1
+    assert session_factory.sessions_entered == 1
+    assert session_factory.sessions_exited == 1
+
+    assert runner.sessions_received == [
+        session_factory.session,
+    ]
+    assert cycle.executions == 1
+
+
+async def test_runner_uses_a_new_session_for_each_cycle() -> None:
+    session_factory = RecordingSessionFactory()
+    cycle = RecordingCycle(
+        WorkerCycleResult(
+            outcome=WorkerCycleOutcome.IDLE,
+            recovered_expired_run=False,
+            agent_run_id=None,
+        ),
+    )
+    runner = TestablePostgreSqlAgentWorkerCycleRunner(
+        session_factory=session_factory,
+        cycle=cycle,
+    )
+
+    first_result = await runner.execute()
+    second_result = await runner.execute()
+
+    assert first_result.outcome is WorkerCycleOutcome.IDLE
+    assert second_result.outcome is WorkerCycleOutcome.IDLE
+
+    assert session_factory.sessions_created == 2
+    assert session_factory.sessions_entered == 2
+    assert session_factory.sessions_exited == 2
+    assert cycle.executions == 2
+
+
+async def test_runner_closes_session_when_cycle_raises() -> None:
+    session_factory = RecordingSessionFactory()
+    cycle = AsyncMock()
+    cycle.execute.side_effect = RuntimeError(
+        "unexpected worker cycle failure",
+    )
+
+    class FailingRunner(PostgreSqlAgentWorkerCycleRunner):
+        def _build_cycle(
+            self,
+            session: AsyncSession,
+        ) -> RunAgentWorkerCycle:
+            del session
+            return cast(RunAgentWorkerCycle, cycle)
+
+    runner = FailingRunner(
+        session_factory=session_factory,  # type: ignore[arg-type]
+        worker_id="worker-a",
+        executor=AsyncMock(),
+        retry_policy=AsyncMock(),
+        lease_seconds=45.0,
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _NOW,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="unexpected worker cycle failure",
+    ):
+        await runner.execute()
+
+    assert session_factory.sessions_created == 1
+    assert session_factory.sessions_entered == 1
+    assert session_factory.sessions_exited == 1

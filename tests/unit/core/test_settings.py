@@ -22,6 +22,7 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_POSTGRESQL_POOL_SIZE",
     "SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW",
     "SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS",
+    "SUPPORTOPS_WORKER_ID",
     "SUPPORTOPS_WORKER_EXECUTOR",
     "SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS",
     "SUPPORTOPS_WORKER_LEASE_SECONDS",
@@ -73,6 +74,7 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.postgresql_pool_size == 5
     assert settings.postgresql_max_overflow == 10
     assert settings.postgresql_pool_timeout_seconds == 10.0
+    assert settings.worker_id is None
     assert settings.worker_executor == "deterministic-ticket-processing"
     assert settings.worker_poll_interval_seconds == 1.0
     assert settings.worker_lease_seconds == 45.0
@@ -88,6 +90,7 @@ def test_settings_use_safe_local_defaults() -> None:
 def test_settings_load_worker_configuration_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("SUPPORTOPS_WORKER_ID", "worker-local-1")
     monkeypatch.setenv(
         "SUPPORTOPS_WORKER_EXECUTOR",
         "deterministic-ticket-processing",
@@ -112,6 +115,7 @@ def test_settings_load_worker_configuration_from_environment(
         ),
     )
 
+    assert settings.worker_id == "worker-local-1"
     assert settings.worker_executor == "deterministic-ticket-processing"
     assert settings.worker_poll_interval_seconds == 0.5
     assert settings.worker_lease_seconds == 70.0
@@ -120,6 +124,28 @@ def test_settings_load_worker_configuration_from_environment(
     assert settings.worker_max_attempts == 5
     assert settings.worker_retry_base_seconds == 4.0
     assert settings.worker_retry_max_seconds == 120.0
+
+
+def test_settings_reject_empty_worker_id() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(worker_id="")
+
+
+def test_settings_reject_worker_id_with_surrounding_whitespace() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(worker_id="  worker-local-1  ")
+
+
+def test_settings_reject_worker_id_longer_than_128_characters() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(worker_id="w" * 129)
+
+
+def test_settings_accept_worker_id_with_exactly_128_characters() -> None:
+    worker_id = "w" * 128
+    settings = create_required_settings(worker_id=worker_id)
+
+    assert settings.worker_id == worker_id
 
 
 def test_settings_reject_unsupported_worker_executor() -> None:
