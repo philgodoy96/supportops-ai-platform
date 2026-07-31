@@ -22,7 +22,14 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_POSTGRESQL_POOL_SIZE",
     "SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW",
     "SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS",
+    "SUPPORTOPS_WORKER_EXECUTOR",
+    "SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS",
+    "SUPPORTOPS_WORKER_LEASE_SECONDS",
+    "SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS",
+    "SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS",
     "SUPPORTOPS_WORKER_MAX_ATTEMPTS",
+    "SUPPORTOPS_WORKER_RETRY_BASE_SECONDS",
+    "SUPPORTOPS_WORKER_RETRY_MAX_SECONDS",
     "SUPPORTOPS_QDRANT_URL",
     "SUPPORTOPS_QDRANT_API_KEY",
     "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
@@ -66,15 +73,32 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.postgresql_pool_size == 5
     assert settings.postgresql_max_overflow == 10
     assert settings.postgresql_pool_timeout_seconds == 10.0
+    assert settings.worker_executor == "deterministic-ticket-processing"
+    assert settings.worker_poll_interval_seconds == 1.0
+    assert settings.worker_lease_seconds == 45.0
+    assert settings.worker_execution_timeout_seconds == 30.0
+    assert settings.worker_shutdown_grace_seconds == 10.0
     assert settings.worker_max_attempts == 3
+    assert settings.worker_retry_base_seconds == 2.0
+    assert settings.worker_retry_max_seconds == 60.0
     assert settings.qdrant_api_key is None
     assert settings.dependency_health_timeout_seconds == 2.0
 
 
-def test_settings_load_worker_max_attempts_from_environment(
+def test_settings_load_worker_configuration_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(
+        "SUPPORTOPS_WORKER_EXECUTOR",
+        "deterministic-ticket-processing",
+    )
+    monkeypatch.setenv("SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS", "0.5")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "70")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS", "15")
     monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_BASE_SECONDS", "4")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_MAX_SECONDS", "120")
 
     settings_type = cast(Any, Settings)
     settings = cast(
@@ -88,7 +112,19 @@ def test_settings_load_worker_max_attempts_from_environment(
         ),
     )
 
+    assert settings.worker_executor == "deterministic-ticket-processing"
+    assert settings.worker_poll_interval_seconds == 0.5
+    assert settings.worker_lease_seconds == 70.0
+    assert settings.worker_execution_timeout_seconds == 60.0
+    assert settings.worker_shutdown_grace_seconds == 15.0
     assert settings.worker_max_attempts == 5
+    assert settings.worker_retry_base_seconds == 4.0
+    assert settings.worker_retry_max_seconds == 120.0
+
+
+def test_settings_reject_unsupported_worker_executor() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(worker_executor="unsupported-executor")
 
 
 def test_settings_normalize_trimmed_values() -> None:
@@ -134,8 +170,20 @@ def test_settings_reject_blank_required_strings(
         ("postgresql_pool_size", 0),
         ("postgresql_max_overflow", -1),
         ("postgresql_pool_timeout_seconds", 0),
+        ("worker_poll_interval_seconds", 0),
+        ("worker_poll_interval_seconds", 61),
+        ("worker_lease_seconds", 0),
+        ("worker_lease_seconds", 3601),
+        ("worker_execution_timeout_seconds", 0),
+        ("worker_execution_timeout_seconds", 1801),
+        ("worker_shutdown_grace_seconds", -1),
+        ("worker_shutdown_grace_seconds", 301),
         ("worker_max_attempts", 0),
         ("worker_max_attempts", 101),
+        ("worker_retry_base_seconds", 0),
+        ("worker_retry_base_seconds", 3601),
+        ("worker_retry_max_seconds", 0),
+        ("worker_retry_max_seconds", 86401),
         ("dependency_health_timeout_seconds", 0),
         ("dependency_health_timeout_seconds", 31),
     ],
@@ -146,6 +194,42 @@ def test_settings_reject_invalid_numeric_configuration(
 ) -> None:
     with pytest.raises(ValidationError):
         create_required_settings(**{field_name: field_value})
+
+
+def test_settings_reject_lease_shorter_than_execution_timeout_margin() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(
+            worker_lease_seconds=34,
+            worker_execution_timeout_seconds=30,
+        )
+
+
+def test_settings_accept_lease_equal_to_execution_timeout_margin() -> None:
+    settings = create_required_settings(
+        worker_lease_seconds=35,
+        worker_execution_timeout_seconds=30,
+    )
+
+    assert settings.worker_lease_seconds == 35.0
+    assert settings.worker_execution_timeout_seconds == 30.0
+
+
+def test_settings_reject_retry_max_smaller_than_retry_base() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(
+            worker_retry_base_seconds=2,
+            worker_retry_max_seconds=1,
+        )
+
+
+def test_settings_accept_retry_max_equal_to_retry_base() -> None:
+    settings = create_required_settings(
+        worker_retry_base_seconds=2,
+        worker_retry_max_seconds=2,
+    )
+
+    assert settings.worker_retry_base_seconds == 2.0
+    assert settings.worker_retry_max_seconds == 2.0
 
 
 def test_settings_require_postgresql_url() -> None:
