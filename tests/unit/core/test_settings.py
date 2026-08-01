@@ -24,7 +24,6 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW",
     "SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS",
     "SUPPORTOPS_WORKER_ID",
-    "SUPPORTOPS_WORKER_EXECUTOR",
     "SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS",
     "SUPPORTOPS_WORKER_LEASE_SECONDS",
     "SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS",
@@ -84,7 +83,6 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.postgresql_max_overflow == 10
     assert settings.postgresql_pool_timeout_seconds == 10.0
     assert settings.worker_id is None
-    assert settings.worker_executor == "deterministic-ticket-processing"
     assert settings.worker_poll_interval_seconds == 1.0
     assert settings.worker_lease_seconds == 45.0
     assert settings.worker_execution_timeout_seconds == 30.0
@@ -108,10 +106,6 @@ def test_settings_load_worker_configuration_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPPORTOPS_WORKER_ID", "worker-local-1")
-    monkeypatch.setenv(
-        "SUPPORTOPS_WORKER_EXECUTOR",
-        "deterministic-ticket-processing",
-    )
     monkeypatch.setenv("SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS", "0.5")
     monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "70")
     monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
@@ -133,7 +127,6 @@ def test_settings_load_worker_configuration_from_environment(
     )
 
     assert settings.worker_id == "worker-local-1"
-    assert settings.worker_executor == "deterministic-ticket-processing"
     assert settings.worker_poll_interval_seconds == 0.5
     assert settings.worker_lease_seconds == 70.0
     assert settings.worker_execution_timeout_seconds == 60.0
@@ -280,11 +273,6 @@ def test_settings_accept_worker_id_with_exactly_128_characters() -> None:
     settings = create_required_settings(worker_id=worker_id)
 
     assert settings.worker_id == worker_id
-
-
-def test_settings_reject_unsupported_worker_executor() -> None:
-    with pytest.raises(ValidationError):
-        create_required_settings(worker_executor="unsupported-executor")
 
 
 def test_settings_normalize_trimmed_values() -> None:

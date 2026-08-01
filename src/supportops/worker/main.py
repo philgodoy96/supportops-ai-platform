@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from supportops.core.settings import Settings
-from supportops.modules.agent_runs.application.deterministic_executor import (
-    DeterministicTicketProcessingExecutor,
+from supportops.core.transactions import TransactionManager
+from supportops.modules.agent_runs.application.execution import (
+    AgentRunExecutor,
 )
 from supportops.modules.agent_runs.application.retry_policy import (
     AgentRunRetryPolicy,
@@ -34,7 +35,13 @@ from supportops.modules.agent_runs.application.worker_loop import (
     WorkerCycleObserver,
 )
 from supportops.modules.agent_runs.infrastructure.worker_runtime import (
+    AgentRunExecutorFactory,
     PostgreSqlAgentWorkerCycleRunner,
+)
+from supportops.worker.composition import (
+    WorkerLLMRuntime,
+    create_session_scoped_executor_registry,
+    create_worker_llm_runtime,
 )
 
 _SignalHandler = Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
@@ -65,10 +72,36 @@ async def run_worker(
 
     configure_logging()
 
-    build_engine = engine_factory or create_worker_engine
-    engine = build_engine(
-        str(resolved_settings.postgresql_url),
+    provider_name = str(resolved_settings.llm_provider)
+    openai_api_key = (
+        resolved_settings.openai_api_key.get_secret_value()
+        if resolved_settings.openai_api_key is not None
+        else None
     )
+    openai_base_url = (
+        str(resolved_settings.openai_base_url)
+        if resolved_settings.openai_base_url is not None
+        else None
+    )
+    llm_runtime: WorkerLLMRuntime = create_worker_llm_runtime(
+        provider_name=provider_name,
+        openai_api_key=openai_api_key,
+        openai_model=resolved_settings.openai_model,
+        openai_base_url=openai_base_url,
+        request_timeout_seconds=(resolved_settings.llm_request_timeout_seconds),
+        transport_max_retries=(resolved_settings.llm_transport_max_retries),
+        max_repair_attempts=(resolved_settings.llm_max_repair_attempts),
+    )
+
+    build_engine = engine_factory or create_worker_engine
+    try:
+        engine = build_engine(
+            str(resolved_settings.postgresql_url),
+        )
+    except Exception:
+        await llm_runtime.close()
+        raise
+
     session_factory = async_sessionmaker(
         engine,
         class_=AsyncSession,
@@ -80,11 +113,25 @@ async def run_worker(
         base_delay_seconds=(resolved_settings.worker_retry_base_seconds),
         maximum_delay_seconds=(resolved_settings.worker_retry_max_seconds),
     )
-    executor = DeterministicTicketProcessingExecutor()
+
+    def executor_factory(
+        session: AsyncSession,
+        transaction_manager: TransactionManager,
+    ) -> AgentRunExecutor:
+        return create_session_scoped_executor_registry(
+            session=session,
+            transaction_manager=transaction_manager,
+            gateway=llm_runtime.gateway,
+            model=llm_runtime.model,
+            request_timeout_seconds=(resolved_settings.llm_request_timeout_seconds),
+        )
+
+    session_scoped_executor_factory: AgentRunExecutorFactory = executor_factory
+
     cycle_runner = PostgreSqlAgentWorkerCycleRunner(
         session_factory=session_factory,
         worker_id=worker_id,
-        executor=executor,
+        executor_factory=session_scoped_executor_factory,
         retry_policy=retry_policy,
         lease_seconds=resolved_settings.worker_lease_seconds,
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
@@ -108,7 +155,10 @@ async def run_worker(
         logging.INFO,
         "worker_started",
         worker_id=worker_id,
-        executor=resolved_settings.worker_executor,
+        executor_registry="versioned-workflow-registry",
+        llm_provider=llm_runtime.provider.provider_name,
+        llm_model=llm_runtime.model,
+        ticket_processing_workflow_version=(resolved_settings.ticket_processing_workflow_version),
         poll_interval_seconds=(resolved_settings.worker_poll_interval_seconds),
         lease_seconds=resolved_settings.worker_lease_seconds,
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
@@ -147,14 +197,18 @@ async def run_worker(
             with suppress(asyncio.CancelledError):
                 await loop_task
 
-        await engine.dispose()
-
-        log_event(
-            logging.INFO,
-            "worker_stopped",
-            worker_id=worker_id,
-            exit_code=exit_code,
-        )
+        try:
+            try:
+                await llm_runtime.close()
+            finally:
+                await engine.dispose()
+        finally:
+            log_event(
+                logging.INFO,
+                "worker_stopped",
+                worker_id=worker_id,
+                exit_code=exit_code,
+            )
 
     return exit_code
 

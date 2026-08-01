@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from supportops.core.transactions import TransactionManager
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
 )
@@ -31,6 +32,10 @@ from supportops.modules.tickets.infrastructure.repository import (
 
 UtcNowProvider = Callable[[], datetime]
 UuidProvider = Callable[[], UUID]
+AgentRunExecutorFactory = Callable[
+    [AsyncSession, TransactionManager],
+    AgentRunExecutor,
+]
 
 
 class PostgreSqlAgentWorkerCycleRunner:
@@ -41,7 +46,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         worker_id: str,
-        executor: AgentRunExecutor,
+        executor_factory: AgentRunExecutorFactory,
         retry_policy: AgentRunRetryPolicy,
         lease_seconds: float,
         execution_timeout_seconds: float,
@@ -50,7 +55,7 @@ class PostgreSqlAgentWorkerCycleRunner:
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
-        self._executor = executor
+        self._executor_factory = executor_factory
         self._retry_policy = retry_policy
         self._lease_seconds = lease_seconds
         self._execution_timeout_seconds = execution_timeout_seconds
@@ -71,12 +76,16 @@ class PostgreSqlAgentWorkerCycleRunner:
         agent_run_repository = SqlAlchemyAgentRunRepository(session)
         ticket_repository = SqlAlchemyTicketRepository(session)
         transaction_manager = SqlAlchemyTransactionManager(session)
+        executor = self._executor_factory(
+            session,
+            transaction_manager,
+        )
 
         processor = ProcessClaimedAgentRun(
             ticket_repository=ticket_repository,
             agent_run_repository=agent_run_repository,
             transaction_manager=transaction_manager,
-            executor=self._executor,
+            executor=executor,
             retry_policy=self._retry_policy,
             execution_timeout_seconds=self._execution_timeout_seconds,
             utc_now=self._utc_now,
