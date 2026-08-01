@@ -6,12 +6,20 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportops.api.dependencies import get_postgresql_session
+from supportops.application.agent_run_inspection import (
+    GetAgentRunInspection,
+)
 from supportops.modules.agent_runs.application.services import (
-    GetAgentRun,
     ListAgentRunAttempts,
 )
 from supportops.modules.agent_runs.infrastructure.repository import (
     SqlAlchemyAgentRunRepository,
+)
+from supportops.modules.ticket_classifications.application.services import (
+    ListAgentRunLLMInvocations,
+)
+from supportops.modules.ticket_classifications.infrastructure.repository import (
+    SqlAlchemyTicketClassificationQueryRepository,
 )
 
 PostgresqlSessionDependency = Annotated[
@@ -20,13 +28,20 @@ PostgresqlSessionDependency = Annotated[
 ]
 
 
-def get_get_agent_run(
+def get_get_agent_run_inspection(
     session: PostgresqlSessionDependency,
-) -> GetAgentRun:
-    """Construct the get-AgentRun use case."""
+) -> GetAgentRunInspection:
+    """Construct the cross-module AgentRun inspection use case."""
 
-    return GetAgentRun(
-        repository=SqlAlchemyAgentRunRepository(session),
+    return GetAgentRunInspection(
+        agent_run_repository=SqlAlchemyAgentRunRepository(
+            session,
+        ),
+        classification_repository=(
+            SqlAlchemyTicketClassificationQueryRepository(
+                session,
+            )
+        ),
     )
 
 
@@ -40,12 +55,34 @@ def get_list_agent_run_attempts(
     )
 
 
-GetAgentRunDependency = Annotated[
-    GetAgentRun,
-    Depends(get_get_agent_run),
+def get_list_agent_run_llm_invocations(
+    session: PostgresqlSessionDependency,
+) -> ListAgentRunLLMInvocations:
+    """Construct the scoped AgentRun invocation-history use case."""
+
+    return ListAgentRunLLMInvocations(
+        agent_run_repository=SqlAlchemyAgentRunRepository(
+            session,
+        ),
+        classification_repository=(
+            SqlAlchemyTicketClassificationQueryRepository(
+                session,
+            )
+        ),
+    )
+
+
+GetAgentRunInspectionDependency = Annotated[
+    GetAgentRunInspection,
+    Depends(get_get_agent_run_inspection),
 ]
 
 ListAgentRunAttemptsDependency = Annotated[
     ListAgentRunAttempts,
     Depends(get_list_agent_run_attempts),
+]
+
+ListAgentRunLLMInvocationsDependency = Annotated[
+    ListAgentRunLLMInvocations,
+    Depends(get_list_agent_run_llm_invocations),
 ]
