@@ -18,6 +18,11 @@ from supportops.infrastructure.postgresql import (
     dispose_postgresql_engine,
 )
 
+# Session-level advisory lock shared by every integration test that mutates the
+# local PostgreSQL database. Concurrent pytest processes otherwise race on
+# cleanup and flake with foreign-key / unique violations.
+_INTEGRATION_DATABASE_LOCK_KEY = 742_891_305
+
 
 @pytest.fixture
 def integration_settings() -> Settings:
@@ -106,24 +111,55 @@ async def postgresql_session(
 
 
 @pytest.fixture
-async def clean_business_tables(
-    postgresql_engine: AsyncEngine,
+async def exclusive_integration_database(
+    integration_settings: Settings,
 ) -> AsyncIterator[None]:
-    """Delete business rows before and after repository integration tests."""
+    """Hold the shared integration DB lock for schema-mutating tests."""
 
-    async def cleanup() -> None:
-        async with postgresql_engine.connect() as connection:
-            await connection.execute(text("DELETE FROM ticket_classifications"))
-            await connection.execute(text("DELETE FROM llm_invocations"))
-            await connection.execute(text("DELETE FROM agent_run_attempts"))
-            await connection.execute(text("DELETE FROM agent_runs"))
-            await connection.execute(text("DELETE FROM tickets"))
-            await connection.execute(text("DELETE FROM workspaces"))
-            await connection.commit()
-
-    await cleanup()
+    engine = create_postgresql_engine(integration_settings)
+    connection = await engine.connect()
+    await connection.execute(
+        text(f"SELECT pg_advisory_lock({_INTEGRATION_DATABASE_LOCK_KEY})"),
+    )
 
     try:
         yield None
     finally:
+        await connection.execute(
+            text(f"SELECT pg_advisory_unlock({_INTEGRATION_DATABASE_LOCK_KEY})"),
+        )
+        await connection.commit()
+        await connection.close()
+        await dispose_postgresql_engine(engine)
+
+
+@pytest.fixture
+async def clean_business_tables(
+    postgresql_engine: AsyncEngine,
+) -> AsyncIterator[None]:
+    """Serialize and reset business rows around one integration test."""
+
+    lock_connection = await postgresql_engine.connect()
+    await lock_connection.execute(
+        text(f"SELECT pg_advisory_lock({_INTEGRATION_DATABASE_LOCK_KEY})"),
+    )
+
+    async def cleanup() -> None:
+        await lock_connection.execute(text("DELETE FROM ticket_classifications"))
+        await lock_connection.execute(text("DELETE FROM llm_invocations"))
+        await lock_connection.execute(text("DELETE FROM agent_run_attempts"))
+        await lock_connection.execute(text("DELETE FROM agent_runs"))
+        await lock_connection.execute(text("DELETE FROM tickets"))
+        await lock_connection.execute(text("DELETE FROM workspaces"))
+        await lock_connection.commit()
+
+    try:
         await cleanup()
+        yield None
+        await cleanup()
+    finally:
+        await lock_connection.execute(
+            text(f"SELECT pg_advisory_unlock({_INTEGRATION_DATABASE_LOCK_KEY})"),
+        )
+        await lock_connection.commit()
+        await lock_connection.close()
