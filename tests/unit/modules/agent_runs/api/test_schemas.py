@@ -207,10 +207,7 @@ def test_agent_run_response_projects_safe_fields() -> None:
     assert response.workflow.trigger_key == "initial-ticket-processing"
     assert response.classification is not None
     assert response.classification.id == _CLASSIFICATION_ID
-    assert (
-        response.classification.schema_version
-        == TICKET_CLASSIFICATION_SCHEMA_VERSION
-    )
+    assert response.classification.schema_version == TICKET_CLASSIFICATION_SCHEMA_VERSION
     assert response.classification.created_at == _NOW
     assert response.attempt_count == 1
     assert response.max_attempts == 3
@@ -365,6 +362,6 @@ def test_llm_invocation_response_rejects_partial_token_usage() -> None:
 
     with pytest.raises(
         RuntimeError,
-        match=("LLM invocation inspection contains partial token usage."),
+        match=r"LLM invocation inspection contains partial token usage\.",
     ):
         AgentRunLLMInvocationResponse.from_domain(invocation)
