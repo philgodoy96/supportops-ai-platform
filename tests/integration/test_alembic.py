@@ -52,7 +52,9 @@ def test_alembic_current_connects_to_postgresql() -> None:
     assert result.returncode == 0, result.stderr
 
 
-async def test_alembic_upgrade_creates_business_tables() -> None:
+async def test_alembic_upgrade_creates_business_tables(
+    exclusive_integration_database: None,
+) -> None:
     settings = Settings()
     engine = create_async_engine(str(settings.postgresql_url))
 
@@ -67,7 +69,9 @@ async def test_alembic_upgrade_creates_business_tables() -> None:
         await engine.dispose()
 
 
-async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade() -> None:
+async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
+    exclusive_integration_database: None,
+) -> None:
     settings = Settings()
     engine = create_async_engine(str(settings.postgresql_url))
 
