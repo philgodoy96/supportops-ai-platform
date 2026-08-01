@@ -14,6 +14,7 @@ from supportops.modules.agent_runs.application.services import (
     ListAgentRunAttempts,
 )
 from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     AgentRun,
     AgentRunAttempt,
 )
@@ -122,6 +123,7 @@ def create_agent_run() -> AgentRun:
         ticket_id=_TICKET_ID,
         ingestion_request_id=_INGESTION_REQUEST_ID,
         correlation_id=_CORRELATION_ID,
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         agent_run_id=_AGENT_RUN_ID,
         now=_NOW,

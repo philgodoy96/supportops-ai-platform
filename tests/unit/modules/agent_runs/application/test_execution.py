@@ -13,6 +13,7 @@ from supportops.modules.agent_runs.application.execution import (
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     AgentRun,
     AgentRunAttempt,
     AgentRunAttemptOutcome,
@@ -78,6 +79,7 @@ def create_running_run() -> AgentRun:
         correlation_id=UUID(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         now=_NOW - timedelta(minutes=1),
     )
@@ -137,6 +139,7 @@ def test_execution_context_requires_running_run() -> None:
         correlation_id=UUID(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         now=_NOW,
     )

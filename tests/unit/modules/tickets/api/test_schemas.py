@@ -65,6 +65,7 @@ def _create_initial_agent_run(ticket: Ticket) -> AgentRun:
         ticket_id=ticket.id,
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         now=_TIMESTAMP,
     )

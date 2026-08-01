@@ -39,6 +39,7 @@ from supportops.modules.agent_runs.application.execution import (
 from supportops.modules.agent_runs.domain.models import (
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
 )
 from supportops.modules.ticket_classifications.application.persistence import (
     ClassificationExecutionRepository,
@@ -52,8 +53,6 @@ from supportops.modules.ticket_classifications.domain.models import (
 from supportops.modules.ticket_classifications.domain.repositories import (
     TicketClassificationRepository,
 )
-
-TICKET_CLASSIFICATION_WORKFLOW_VERSION = "ticket-classification-v1"
 
 UtcNowProvider = Callable[[], datetime]
 UuidFactory = Callable[[], UUID]

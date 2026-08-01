@@ -18,6 +18,7 @@ from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     AgentRun,
     AgentRunStatus,
 )
@@ -97,6 +98,7 @@ def create_ticket_intake_service(
     session: AsyncSession,
     *,
     agent_run_repository: SqlAlchemyAgentRunRepository | None = None,
+    workflow_version: str = TICKET_CLASSIFICATION_WORKFLOW_VERSION,
 ) -> CreateTicketWithInitialRun:
     """Compose ticket intake with one shared PostgreSQL session."""
 
@@ -105,6 +107,7 @@ def create_ticket_intake_service(
         ticket_repository=SqlAlchemyTicketRepository(session),
         agent_run_repository=(agent_run_repository or SqlAlchemyAgentRunRepository(session)),
         transaction_manager=SqlAlchemyTransactionManager(session),
+        workflow_version=workflow_version,
         max_attempts=3,
         utc_now=lambda: _BASE_TIMESTAMP,
     )
@@ -207,7 +210,7 @@ async def test_initial_agent_run_persists_approved_contract(
 
     assert persisted_run.status == AgentRunStatus.QUEUED.value
     assert persisted_run.workflow_name == INITIAL_TICKET_PROCESSING_WORKFLOW_NAME
-    assert persisted_run.workflow_version == DETERMINISTIC_BASELINE_WORKFLOW_VERSION
+    assert persisted_run.workflow_version == TICKET_CLASSIFICATION_WORKFLOW_VERSION
     assert persisted_run.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert persisted_run.available_at == _BASE_TIMESTAMP
     assert persisted_run.attempt_count == 0
@@ -215,6 +218,26 @@ async def test_initial_agent_run_persists_approved_contract(
     assert persisted_run.lease_owner is None
     assert persisted_run.lease_token is None
     assert persisted_run.lease_expires_at is None
+
+
+async def test_initial_agent_run_persists_explicit_deterministic_baseline(
+    postgresql_session: AsyncSession,
+    clean_business_tables: None,
+) -> None:
+    await persist_workspace(postgresql_session)
+    service = create_ticket_intake_service(
+        postgresql_session,
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+    )
+
+    result = await execute_ticket_intake(service)
+
+    persisted_run = await load_agent_run(
+        postgresql_session,
+        agent_run_id=result.processing_run.id,
+    )
+
+    assert persisted_run.workflow_version == DETERMINISTIC_BASELINE_WORKFLOW_VERSION
 
 
 async def test_ticket_and_run_persist_matching_trace_identifiers(

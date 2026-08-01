@@ -6,7 +6,10 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from supportops.modules.agent_runs.domain.models import AgentRun
+from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+    AgentRun,
+)
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunRecord,
 )
@@ -32,6 +35,7 @@ def create_agent_run() -> AgentRun:
         correlation_id=UUID(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
     )

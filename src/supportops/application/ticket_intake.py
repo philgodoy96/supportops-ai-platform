@@ -46,6 +46,7 @@ class CreateTicketWithInitialRun:
         ticket_repository: TicketRepository,
         agent_run_repository: AgentRunRepository,
         transaction_manager: TransactionManager,
+        workflow_version: str,
         max_attempts: int,
         utc_now: UtcNowProvider | None = None,
     ) -> None:
@@ -56,6 +57,7 @@ class CreateTicketWithInitialRun:
         self._ticket_repository = ticket_repository
         self._agent_run_repository = agent_run_repository
         self._transaction_manager = transaction_manager
+        self._workflow_version = workflow_version
         self._max_attempts = max_attempts
         self._utc_now = utc_now or _utc_now
 
@@ -87,6 +89,7 @@ class CreateTicketWithInitialRun:
             ticket_id=ticket.id,
             ingestion_request_id=ingestion_request_id,
             correlation_id=correlation_id,
+            workflow_version=self._workflow_version,
             max_attempts=self._max_attempts,
             now=now,
         )
