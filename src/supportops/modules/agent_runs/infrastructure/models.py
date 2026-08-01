@@ -131,6 +131,12 @@ class AgentRunRecord(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
+            "workspace_id",
+            "ticket_id",
+            "id",
+            name="uq_agent_runs_workspace_ticket_id",
+        ),
+        UniqueConstraint(
             "ticket_id",
             "trigger_key",
             name="uq_agent_runs_ticket_trigger",
@@ -429,6 +435,11 @@ class AgentRunAttemptRecord(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "agent_run_id",
+            "id",
+            name="uq_agent_run_attempts_run_id",
+        ),
         UniqueConstraint(
             "agent_run_id",
             "attempt_number",
