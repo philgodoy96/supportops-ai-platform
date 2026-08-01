@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -44,8 +44,11 @@ They validate:
 - readiness failure responses;
 - response sanitization;
 - workspace and ticket domain invariants;
+- Document, DocumentVersion, and DocumentChunk invariants;
+- deterministic source normalization, hashing, and chunk identity;
 - AgentRun and AgentRunAttempt domain invariant tests;
 - application service command and query behavior;
+- transactional document creation, immutable version creation, and ready-version activation;
 - transactional ticket-intake orchestration;
 - retry policy calculation and attempt-budget gates;
 - claim contracts and transition fencing contracts;
@@ -55,11 +58,12 @@ They validate:
 - polling-loop idle waits and interruptible shutdown behavior;
 - scoped-session worker runtime composition;
 - worker process identity resolution and graceful shutdown;
-- SQLAlchemy mapping and metadata tests for AgentRun persistence;
+- SQLAlchemy mapping and metadata tests for AgentRun and knowledge-document persistence;
 - named PostgreSQL constraints declared on persistence records;
 - persistence model registration;
 - PostgreSQL constraint-name inspection helpers;
 - workspace API schemas;
+- knowledge-document API schemas and separate document/version cursor contracts;
 - ticket API schemas, including the nested processing-run response;
 - AgentRun inspection schema projections;
 - opaque ticket cursor encoding and invalid-cursor rejection;
@@ -105,12 +109,16 @@ Targeted domain, application, persistence, API, and worker unit coverage:
 
 ```powershell
 uv run pytest tests/unit/modules/workspaces/domain tests/unit/modules/tickets/domain
+uv run pytest tests/unit/modules/knowledge_documents/domain
 uv run pytest tests/unit/modules/agent_runs/domain
 uv run pytest tests/unit/modules/workspaces/application tests/unit/modules/tickets/application
+uv run pytest tests/unit/modules/knowledge_documents/application
 uv run pytest tests/unit/application/test_ticket_intake.py
 uv run pytest tests/unit/modules/workspaces/infrastructure tests/unit/modules/tickets/infrastructure
+uv run pytest tests/unit/modules/knowledge_documents/infrastructure
 uv run pytest tests/unit/modules/agent_runs/infrastructure
 uv run pytest tests/unit/modules/workspaces/api
+uv run pytest tests/unit/modules/knowledge_documents/api
 uv run pytest tests/unit/modules/tickets/api
 uv run pytest tests/unit/modules/agent_runs/api
 uv run pytest tests/unit/infrastructure/postgresql
@@ -198,6 +206,52 @@ Evaluation unit coverage verifies:
 - CLI provider safety gates, including the external-provider permission flag;
 - artifact reload and report reproducibility.
 
+## Knowledge-document tests
+
+Focused unit coverage:
+
+```powershell
+uv run pytest tests/unit/modules/knowledge_documents
+```
+
+Focused PostgreSQL integration coverage:
+
+```powershell
+uv run pytest -m integration tests/integration/modules/knowledge_documents
+```
+
+Focused HTTP integration coverage:
+
+```powershell
+uv run pytest -m integration tests/integration/api/test_knowledge_documents.py
+```
+
+The knowledge-document suite verifies:
+
+- title, external-reference, media-type, timestamp, and ownership invariants;
+- canonical line-ending normalization and deterministic SHA-256 hashing;
+- immutable source content and deterministic chunk UUIDs;
+- complete-or-empty indexing-profile state;
+- `pending`, `failed`, and `ready` lifecycle validation;
+- SQLAlchemy domain round trips and named relational constraints;
+- composite document, version, and chunk-profile ownership;
+- migration upgrade, single-step downgrade, base downgrade, re-upgrade, and metadata parity;
+- ready-only activation and ready-version rewrite protection;
+- workspace-scoped repository reads and deterministic keyset ordering;
+- normalized persistence conflict translation;
+- idempotent deterministic chunk persistence;
+- application-owned transaction boundaries;
+- document-row locking before next-version allocation;
+- concurrent distinct-content version creation producing unique numbers;
+- concurrent equivalent-content creation producing one version and one stable conflict;
+- separate opaque cursor kinds for documents and versions;
+- source content omission from create and list responses;
+- source content exposure only from the version detail endpoint;
+- pending activation conflict and idempotent ready activation;
+- cross-workspace document and version access returning `404`.
+
+These tests do not initialize embedding providers, create Qdrant collections, or perform semantic retrieval.
+
 ## Integration tests
 
 Integration tests require live PostgreSQL and Qdrant services.
@@ -212,8 +266,10 @@ They validate:
 - Alembic import and configuration;
 - Alembic connectivity to PostgreSQL;
 - migration upgrade, downgrade, and parity checks;
-- creation of `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables;
+- creation of `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`, `knowledge_documents`, `knowledge_document_versions`, and `knowledge_document_chunks` tables;
 - workspace persistence;
+- knowledge-document, immutable-version, and authoritative-chunk persistence;
+- ready-only activation and ready-version immutability triggers;
 - duplicate workspace slug translation;
 - transaction rollback;
 - ticket foreign-key behavior;
@@ -223,6 +279,8 @@ They validate:
 - deterministic ticket listing;
 - keyset repository navigation;
 - concurrent duplicate external-reference insertion;
+- concurrent document-version allocation for distinct content;
+- concurrent duplicate normalized-content rejection;
 - atomic ticket and run commit;
 - run insertion failure rolling back the ticket;
 - duplicate ticket conflict creating no additional run;
@@ -235,6 +293,8 @@ They validate:
 - workspace API creation and retrieval;
 - duplicate slug conflict responses;
 - ticket API intake, retrieval, and listing;
+- knowledge-document creation, listing, version detail, version creation, and activation APIs;
+- cross-workspace document and version access returning stable `404` responses;
 - API response and persistence verification for the processing-run reference;
 - request and correlation identifier persistence;
 - duplicate external-reference conflict responses;
@@ -774,7 +834,9 @@ docker compose ps
 ## Alembic validation
 
 The current migration head creates the `workspaces`, `tickets`, `agent_runs`,
-`agent_run_attempts`, `llm_invocations`, and `ticket_classifications` tables.
+`agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
+`knowledge_documents`, `knowledge_document_versions`, and
+`knowledge_document_chunks` tables.
 
 Migration lifecycle commands:
 
@@ -792,7 +854,8 @@ Expected behavior:
 - commands complete successfully;
 - the expected revision is reported as head;
 - upgrade creates `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`,
-  `llm_invocations`, and `ticket_classifications`;
+  `llm_invocations`, `ticket_classifications`, `knowledge_documents`,
+  `knowledge_document_versions`, and `knowledge_document_chunks`;
 - downgrade removes those business tables;
 - re-upgrade restores them;
 - migration metadata remains aligned with SQLAlchemy model metadata.
@@ -814,7 +877,9 @@ docker compose exec postgresql `
 ```
 
 After upgrade, the schema includes `workspaces`, `tickets`, `agent_runs`,
-`agent_run_attempts`, `llm_invocations`, and `ticket_classifications`.
+`agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
+`knowledge_documents`, `knowledge_document_versions`, and
+`knowledge_document_chunks`.
 
 Downgrade commands must only run against the local development or test database.
 
@@ -970,7 +1035,7 @@ Later implementation phases are expected to add tests for:
 - authenticated tenant isolation;
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
-- retrieval quality and Qdrant indexing;
+- token-aware chunking, embedding providers, retrieval quality, and Qdrant indexing;
 - LangGraph orchestration;
 - tool authorization;
 - approval enforcement;
@@ -983,5 +1048,5 @@ Later implementation phases are expected to add tests for:
 Authentication remains an intentional scope boundary for the current suite.
 Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery,
 deterministic execution, worker process coverage, workspace-scoped AgentRun and
-classification inspection, and offline classification evaluation are part of
-the current suite.
+classification inspection, immutable knowledge-document versioning, and offline
+classification evaluation are part of the current suite.

@@ -3,8 +3,8 @@
 ## Purpose
 
 This document provides reproducible examples for the implemented workspace,
-support ticket, AgentRun, classification, and logical invocation inspection
-HTTP API.
+support ticket, AgentRun, classification, logical invocation inspection, and
+versioned knowledge-document HTTP API.
 
 The examples use placeholder values suitable for local development and public
 documentation.
@@ -16,6 +16,9 @@ The API currently supports:
 - a minimal processing-run reference on ticket creation;
 - workspace-scoped ticket retrieval;
 - workspace-scoped ticket listing;
+- workspace-scoped knowledge-document creation, retrieval, and listing;
+- immutable document-version creation, retrieval, and listing;
+- explicit ready-version activation;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
 - AgentRun classification reference;
@@ -38,6 +41,9 @@ AgentRun, classification, and logical invocation inspection endpoints are
 strictly read-only. They report current persisted state and do not guarantee
 future completion. They do not perform mutation, retry, cancellation, or lease
 revocation.
+
+Knowledge-document registration and version creation persist source content only
+in PostgreSQL and do not call an embedding provider or Qdrant.
 
 ## Prerequisites
 
@@ -97,6 +103,188 @@ $workspaceBResponse = Invoke-RestMethod `
 $workspaceBResponse
 $workspaceBId = $workspaceBResponse.id
 ```
+
+## Create a knowledge document in workspace A
+
+Document creation atomically creates the document identity and immutable version
+`1`. The version begins in `pending` state. No embedding or Qdrant operation is
+performed by this HTTP request.
+
+```powershell
+$documentResponse = Invoke-WebRequest `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents" `
+  -ContentType "application/json" `
+  -Body (@{
+    title = "Database Incident Runbook"
+    external_reference = "runbook-database-incidents"
+    media_type = "text/markdown"
+    content = @"
+# Database incidents
+
+Restart the connection pool before increasing connection limits.
+"@
+  } | ConvertTo-Json)
+
+$documentPayload = $documentResponse.Content | ConvertFrom-Json
+$document = $documentPayload.document
+$documentVersion1 = $documentPayload.version
+$documentId = $document.id
+$documentVersion1Id = $documentVersion1.id
+
+$documentPayload
+```
+
+Expected status:
+
+```text
+201 Created
+```
+
+The creation response contains document and version metadata but does not return
+the source `content`.
+
+## Retrieve document metadata
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId"
+```
+
+The document response contains the active-version pointer. It is `null` until a
+ready version is activated explicitly.
+
+## Retrieve version source content
+
+The version detail endpoint is the only knowledge-document endpoint that returns
+the authoritative normalized source content.
+
+```powershell
+$version1Detail = Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions/$documentVersion1Id"
+
+$version1Detail.content
+$version1Detail.content_sha256
+$version1Detail.status
+```
+
+Expected initial status:
+
+```text
+pending
+```
+
+## Create document version 2
+
+```powershell
+$documentVersion2 = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions" `
+  -ContentType "application/json" `
+  -Body (@{
+    media_type = "text/markdown"
+    content = @"
+# Database incidents
+
+Restart the connection pool.
+
+Escalate after two failed recovery attempts.
+"@
+  } | ConvertTo-Json)
+
+$documentVersion2Id = $documentVersion2.id
+$documentVersion2
+```
+
+Expected behavior:
+
+- version `1` remains unchanged;
+- version `2` is created with status `pending`;
+- the active-version pointer remains unchanged;
+- no embedding or vector indexing occurs in the request.
+
+## List knowledge documents
+
+```powershell
+$documentPage = Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents?page_size=20"
+
+$documentPage.items
+$documentPage.next_cursor
+```
+
+List responses do not contain source content.
+
+## List document versions
+
+```powershell
+$versionPage = Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions?page_size=20"
+
+$versionPage.items
+$versionPage.next_cursor
+```
+
+Versions are ordered by descending version number. List responses contain
+metadata and hashes but do not contain source content.
+
+## Attempt to activate a pending version
+
+```powershell
+try {
+  Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions/$documentVersion2Id/activate"
+} catch {
+  $_.ErrorDetails.Message
+}
+```
+
+Expected status:
+
+```text
+409 Conflict
+```
+
+Expected error code:
+
+```text
+document_version_not_ready
+```
+
+Successful activation is demonstrated after the explicit indexing command is
+introduced. Indexing and activation remain separate operations.
+
+## Attempt cross-workspace document access
+
+```powershell
+try {
+  Invoke-RestMethod `
+    -Method Get `
+    -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceBId/documents/$documentId"
+} catch {
+  $_.ErrorDetails.Message
+}
+```
+
+Expected status:
+
+```text
+404 Not Found
+```
+
+Expected error code:
+
+```text
+document_not_found
+```
+
+The same behavior applies to cross-workspace version detail and activation
+requests.
 
 ## Create a ticket in workspace A
 
@@ -894,6 +1082,8 @@ Completion logs do not include:
 
 - ticket subject;
 - ticket description;
+- document source content;
+- version source content;
 - request bodies;
 - authorization headers;
 - raw invalid external identifiers;
@@ -918,10 +1108,16 @@ Implemented expected error codes:
 
 ```text
 workspace_not_found
+document_not_found
+document_version_not_found
 ticket_not_found
 agent_run_not_found
 ticket_classification_not_found
 workspace_slug_conflict
+document_external_reference_conflict
+document_version_content_conflict
+document_version_number_conflict
+document_version_not_ready
 ticket_external_reference_conflict
 invalid_pagination_cursor
 ```
