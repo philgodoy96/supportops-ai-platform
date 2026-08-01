@@ -8,6 +8,10 @@ def register_persistence_models() -> None:
         AgentRunAttemptRecord,
         AgentRunRecord,
     )
+    from supportops.modules.ticket_classifications.infrastructure.models import (
+        LLMInvocationRecord,
+        TicketClassificationRecord,
+    )
     from supportops.modules.tickets.infrastructure.models import (
         TicketRecord,
     )
@@ -20,4 +24,6 @@ def register_persistence_models() -> None:
         TicketRecord,
         AgentRunRecord,
         AgentRunAttemptRecord,
+        LLMInvocationRecord,
+        TicketClassificationRecord,
     )

@@ -14,4 +14,6 @@ def test_register_persistence_models_populates_shared_metadata() -> None:
         "tickets",
         "agent_runs",
         "agent_run_attempts",
+        "llm_invocations",
+        "ticket_classifications",
     }

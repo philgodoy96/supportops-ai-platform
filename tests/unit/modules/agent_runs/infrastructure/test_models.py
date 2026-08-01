@@ -190,6 +190,7 @@ def test_agent_run_metadata_declares_expected_constraints() -> None:
     }
 
     assert {
+        "uq_agent_runs_workspace_ticket_id",
         "uq_agent_runs_ticket_trigger",
         "ck_agent_runs_agent_run_status",
         "ck_agent_runs_agent_run_attempt_count_non_negative",
@@ -234,6 +235,7 @@ def test_attempt_metadata_declares_expected_constraints() -> None:
     }
 
     assert {
+        "uq_agent_run_attempts_run_id",
         "uq_agent_run_attempts_run_number",
         "ck_agent_run_attempts_agent_run_attempt_number_positive",
         "ck_agent_run_attempts_agent_run_attempt_worker_id_format",
