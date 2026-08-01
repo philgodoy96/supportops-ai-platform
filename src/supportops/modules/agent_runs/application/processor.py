@@ -87,6 +87,7 @@ class ProcessClaimedAgentRun:
 
         context = AgentRunExecutionContext(
             agent_run=run,
+            attempt=claim.attempt,
             ticket=ticket,
         )
 

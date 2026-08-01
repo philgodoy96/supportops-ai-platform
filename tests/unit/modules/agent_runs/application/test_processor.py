@@ -246,6 +246,7 @@ async def test_success_executes_outside_transaction_and_completes() -> None:
     assert transaction_manager.entries == 2
     assert len(executor.contexts) == 1
     assert executor.contexts[0].agent_run == claim.agent_run
+    assert executor.contexts[0].attempt == claim.attempt
     assert executor.contexts[0].ticket == create_ticket()
 
     command = agent_run_repository.mark_succeeded.await_args.args[0]

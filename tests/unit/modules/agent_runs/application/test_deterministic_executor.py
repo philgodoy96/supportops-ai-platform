@@ -15,6 +15,7 @@ from supportops.modules.agent_runs.application.execution import (
 )
 from supportops.modules.agent_runs.domain.models import (
     AgentRun,
+    AgentRunAttempt,
     AgentRunStatus,
 )
 from supportops.modules.tickets.domain.models import Ticket
@@ -32,6 +33,15 @@ _WORKSPACE_ID = UUID(
 )
 _TICKET_ID = UUID(
     "38bb60fe-d2ea-4615-b499-91aa45069019",
+)
+_LEASE_TOKEN = UUID(
+    "dd0ae456-3467-41db-93d1-a908f40e8365",
+)
+_ATTEMPT_ID = UUID(
+    "2b39f5b7-b2a4-48d0-b079-fdad286d5315",
+)
+_EXECUTION_REQUEST_ID = UUID(
+    "d1fa068f-2278-47a8-b3c9-39ccf91f0a5e",
 )
 
 
@@ -67,16 +77,24 @@ def create_context() -> AgentRunExecutionContext:
         status=AgentRunStatus.RUNNING,
         attempt_count=1,
         lease_owner="worker-a",
-        lease_token=UUID(
-            "dd0ae456-3467-41db-93d1-a908f40e8365",
-        ),
+        lease_token=_LEASE_TOKEN,
         lease_expires_at=_NOW + timedelta(seconds=45),
         first_started_at=_NOW,
         updated_at=_NOW,
     )
+    attempt = AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=running_run.id,
+        attempt_number=1,
+        worker_id="worker-a",
+        lease_token=_LEASE_TOKEN,
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
 
     return AgentRunExecutionContext(
         agent_run=running_run,
+        attempt=attempt,
         ticket=ticket,
     )
 
@@ -133,6 +151,7 @@ async def test_deterministic_executor_rejects_unsupported_contract(
 
     context = AgentRunExecutionContext(
         agent_run=agent_run,
+        attempt=context.attempt,
         ticket=context.ticket,
     )
     executor = DeterministicTicketProcessingExecutor()
