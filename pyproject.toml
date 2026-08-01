@@ -37,6 +37,7 @@ dependencies = [
     "qdrant-client==1.18.0",
     "sqlalchemy[asyncio]==2.0.51",
     "uvicorn==0.50.2",
+    "tiktoken==0.13.0",
 ]
 
 [project.scripts]
