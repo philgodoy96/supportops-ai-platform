@@ -164,6 +164,8 @@ async def clean_business_tables(
         yield None
         await cleanup()
     finally:
+        if lock_connection.in_transaction():
+            await lock_connection.rollback()
         await lock_connection.execute(
             text(f"SELECT pg_advisory_unlock({_INTEGRATION_DATABASE_LOCK_KEY})"),
         )
