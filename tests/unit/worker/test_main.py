@@ -3,15 +3,117 @@
 import asyncio
 import json
 import logging
-from unittest.mock import patch
+from collections.abc import Callable
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from supportops.core.settings import Settings
 from supportops.worker.main import (
     _wait_for_loop_or_shutdown,
     log_event,
     resolve_worker_id,
+    run_worker,
 )
+
+
+def _create_settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "postgresql_url": (
+            "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+        ),
+        "qdrant_url": "http://localhost:6333",
+        "worker_id": "worker-test-1",
+        "worker_shutdown_grace_seconds": 0,
+        "worker_poll_interval_seconds": 0.01,
+    }
+    values.update(overrides)
+    settings_type = cast(Any, Settings)
+    return cast(Settings, settings_type(_env_file=None, **values))
+
+
+class FakeProvider:
+    """Minimal provider exposing a stable process-scoped name."""
+
+    def __init__(self, provider_name: str = "mock") -> None:
+        self.provider_name = provider_name
+
+
+class FakeLLMRuntime:
+    """Process-scoped LLM runtime stand-in for composition tests."""
+
+    def __init__(
+        self,
+        *,
+        provider_name: str = "mock",
+        model: str = "mock-ticket-classifier-v1",
+    ) -> None:
+        self.provider = FakeProvider(provider_name)
+        self.gateway = object()
+        self.model = model
+        self.close_calls = 0
+        self.close_error: Exception | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class FakeEngine:
+    """Async engine stand-in that records disposal."""
+
+    def __init__(self) -> None:
+        self.dispose_calls = 0
+
+    async def dispose(self) -> None:
+        self.dispose_calls += 1
+
+
+def _as_engine_factory(
+    engine: FakeEngine,
+) -> Callable[[str], AsyncEngine]:
+    return cast(
+        Callable[[str], AsyncEngine],
+        lambda database_url: engine,
+    )
+
+
+def _reset_capturing_cycle_runner() -> None:
+    CapturingCycleRunner.last_kwargs = cast(
+        dict[str, object] | None,
+        None,
+    )
+
+
+def _captured_cycle_runner_kwargs() -> dict[str, object]:
+    last_kwargs = CapturingCycleRunner.last_kwargs
+    assert last_kwargs is not None
+    return last_kwargs
+
+
+class CapturingCycleRunner:
+    """Capture constructor kwargs without running database work."""
+
+    last_kwargs: dict[str, object] | None = None
+
+    def __init__(self, **kwargs: object) -> None:
+        CapturingCycleRunner.last_kwargs = kwargs
+
+    async def execute(self) -> object:
+        return None
+
+
+class ImmediateWorkerLoop:
+    """Worker loop that returns immediately after construction."""
+
+    def __init__(self, **kwargs: object) -> None:
+        del kwargs
+
+    async def execute(self) -> None:
+        return None
 
 
 def test_resolve_worker_id_preserves_configured_value() -> None:
@@ -193,3 +295,205 @@ def test_log_event_can_include_exception_context(
 
     assert record.exc_info is not None
     assert json.loads(record.message)["event"] == "worker_failed"
+
+
+async def test_run_worker_composes_llm_runtime_and_closes_resources(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _create_settings(
+        llm_provider="openai",
+        openai_api_key="secret-openai-key",
+        openai_model="gpt-5-nano",
+        openai_base_url="https://api.example.com/v1",
+        llm_request_timeout_seconds=15,
+        llm_transport_max_retries=2,
+        llm_max_repair_attempts=0,
+        worker_execution_timeout_seconds=50,
+        worker_lease_seconds=55,
+    )
+    llm_runtime = FakeLLMRuntime(
+        provider_name="openai",
+        model="gpt-5-nano",
+    )
+    engine = FakeEngine()
+    _reset_capturing_cycle_runner()
+    create_runtime = MagicMock(return_value=llm_runtime)
+
+    caplog.set_level(logging.INFO, logger="supportops.worker")
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            create_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        exit_code = await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+        )
+
+    assert exit_code == 0
+    create_runtime.assert_called_once_with(
+        provider_name="openai",
+        openai_api_key="secret-openai-key",
+        openai_model="gpt-5-nano",
+        openai_base_url="https://api.example.com/v1",
+        request_timeout_seconds=15.0,
+        transport_max_retries=2,
+        max_repair_attempts=0,
+    )
+    assert callable(_captured_cycle_runner_kwargs()["executor_factory"])
+    assert llm_runtime.close_calls == 1
+    assert engine.dispose_calls == 1
+
+    started_payloads = [
+        json.loads(record.message)
+        for record in caplog.records
+        if '"event": "worker_started"' in record.message
+        or '"event":"worker_started"' in record.message
+    ]
+    assert len(started_payloads) == 1
+    started = started_payloads[0]
+    assert started["executor_registry"] == "versioned-workflow-registry"
+    assert started["llm_provider"] == "openai"
+    assert started["llm_model"] == "gpt-5-nano"
+    assert "secret-openai-key" not in json.dumps(started)
+    assert "openai_api_key" not in started
+
+
+async def test_run_worker_executor_factory_builds_session_scoped_registry() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+    engine = FakeEngine()
+    _reset_capturing_cycle_runner()
+    registry = object()
+    create_registry = MagicMock(return_value=registry)
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.create_session_scoped_executor_registry",
+            create_registry,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+        )
+
+        executor_factory = _captured_cycle_runner_kwargs()["executor_factory"]
+        assert callable(executor_factory)
+
+        session = object()
+        transaction_manager = object()
+        result = executor_factory(session, transaction_manager)
+
+        assert result is registry
+        create_registry.assert_called_once_with(
+            session=session,
+            transaction_manager=transaction_manager,
+            gateway=llm_runtime.gateway,
+            model=llm_runtime.model,
+            request_timeout_seconds=settings.llm_request_timeout_seconds,
+        )
+
+
+async def test_run_worker_closes_llm_runtime_when_engine_construction_fails() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+        pytest.raises(RuntimeError, match="engine unavailable"),
+    ):
+
+        def failing_engine_factory(database_url: str) -> AsyncEngine:
+            del database_url
+            raise RuntimeError("engine unavailable")
+
+        await run_worker(
+            settings=settings,
+            engine_factory=failing_engine_factory,
+        )
+
+    assert llm_runtime.close_calls == 1
+
+
+async def test_run_worker_disposes_engine_when_provider_close_fails() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+    llm_runtime.close_error = RuntimeError("provider close failed")
+    engine = FakeEngine()
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+        pytest.raises(RuntimeError, match="provider close failed"),
+    ):
+        await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+        )
+
+    assert llm_runtime.close_calls == 1
+    assert engine.dispose_calls == 1

@@ -76,7 +76,6 @@ class Settings(BaseSettings):
     postgresql_pool_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
     worker_id: str | None = Field(default=None, max_length=128)
-    worker_executor: Literal["deterministic-ticket-processing"] = "deterministic-ticket-processing"
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
     worker_lease_seconds: float = Field(default=45.0, gt=0, le=3600)
     worker_execution_timeout_seconds: float = Field(default=30.0, gt=0, le=1800)

@@ -10,6 +10,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from supportops.infrastructure.postgresql.transaction import (
+    SqlAlchemyTransactionManager,
+)
+from supportops.modules.agent_runs.application.retry_policy import (
+    AgentRunRetryPolicy,
+)
 from supportops.modules.agent_runs.application.worker import (
     RunAgentWorkerCycle,
     WorkerCycleOutcome,
@@ -83,7 +89,7 @@ class TestablePostgreSqlAgentWorkerCycleRunner(PostgreSqlAgentWorkerCycleRunner)
         super().__init__(
             session_factory=session_factory,  # type: ignore[arg-type]
             worker_id="worker-a",
-            executor=AsyncMock(),
+            executor_factory=lambda session, transaction_manager: AsyncMock(),
             retry_policy=AsyncMock(),
             lease_seconds=45.0,
             execution_timeout_seconds=30.0,
@@ -176,7 +182,7 @@ async def test_runner_closes_session_when_cycle_raises() -> None:
     runner = FailingRunner(
         session_factory=session_factory,  # type: ignore[arg-type]
         worker_id="worker-a",
-        executor=AsyncMock(),
+        executor_factory=lambda session, transaction_manager: AsyncMock(),
         retry_policy=AsyncMock(),
         lease_seconds=45.0,
         execution_timeout_seconds=30.0,
@@ -192,3 +198,39 @@ async def test_runner_closes_session_when_cycle_raises() -> None:
     assert session_factory.sessions_created == 1
     assert session_factory.sessions_entered == 1
     assert session_factory.sessions_exited == 1
+
+
+def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager() -> None:
+    session = AsyncMock(spec=AsyncSession)
+    created_executor = AsyncMock()
+    factory_calls: list[tuple[AsyncSession, object]] = []
+
+    def executor_factory(
+        received_session: AsyncSession,
+        transaction_manager: object,
+    ) -> AsyncMock:
+        factory_calls.append((received_session, transaction_manager))
+        return created_executor
+
+    runner = PostgreSqlAgentWorkerCycleRunner(
+        session_factory=AsyncMock(),
+        worker_id="worker-a",
+        executor_factory=executor_factory,
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        lease_seconds=45.0,
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _NOW,
+        uuid_provider=lambda: UUID(
+            "dd0ae456-3467-41db-93d1-a908f40e8365",
+        ),
+    )
+
+    cycle = runner._build_cycle(session)
+
+    assert len(factory_calls) == 1
+    assert factory_calls[0][0] is session
+    assert isinstance(factory_calls[0][1], SqlAlchemyTransactionManager)
+    assert cycle._processor._executor is created_executor
