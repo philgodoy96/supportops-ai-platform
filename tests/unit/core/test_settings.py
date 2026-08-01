@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from supportops.core.settings import (
     ApplicationEnvironment,
+    LLMProviderName,
     LogLevel,
     Settings,
 )
@@ -31,6 +32,14 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_WORKER_MAX_ATTEMPTS",
     "SUPPORTOPS_WORKER_RETRY_BASE_SECONDS",
     "SUPPORTOPS_WORKER_RETRY_MAX_SECONDS",
+    "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
+    "SUPPORTOPS_LLM_PROVIDER",
+    "SUPPORTOPS_OPENAI_API_KEY",
+    "SUPPORTOPS_OPENAI_MODEL",
+    "SUPPORTOPS_OPENAI_BASE_URL",
+    "SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS",
+    "SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES",
+    "SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS",
     "SUPPORTOPS_QDRANT_URL",
     "SUPPORTOPS_QDRANT_API_KEY",
     "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
@@ -83,6 +92,14 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.worker_max_attempts == 3
     assert settings.worker_retry_base_seconds == 2.0
     assert settings.worker_retry_max_seconds == 60.0
+    assert settings.ticket_processing_workflow_version == "ticket-classification-v1"
+    assert settings.llm_provider is LLMProviderName.MOCK
+    assert settings.openai_api_key is None
+    assert settings.openai_model == "gpt-5-nano"
+    assert settings.openai_base_url is None
+    assert settings.llm_request_timeout_seconds == 12.0
+    assert settings.llm_transport_max_retries == 1
+    assert settings.llm_max_repair_attempts == 1
     assert settings.qdrant_api_key is None
     assert settings.dependency_health_timeout_seconds == 2.0
 
@@ -124,6 +141,123 @@ def test_settings_load_worker_configuration_from_environment(
     assert settings.worker_max_attempts == 5
     assert settings.worker_retry_base_seconds == 4.0
     assert settings.worker_retry_max_seconds == 120.0
+
+
+def test_settings_load_llm_configuration_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
+        "deterministic-baseline-v1",
+    )
+    monkeypatch.setenv("SUPPORTOPS_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("SUPPORTOPS_OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("SUPPORTOPS_OPENAI_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("SUPPORTOPS_OPENAI_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS", "15")
+    monkeypatch.setenv("SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES", "2")
+    monkeypatch.setenv("SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS", "0")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "50")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "55")
+
+    settings_type = cast(Any, Settings)
+    settings = cast(
+        Settings,
+        settings_type(
+            _env_file=None,
+            postgresql_url=(
+                "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+            ),
+            qdrant_url="http://localhost:6333",
+        ),
+    )
+
+    assert settings.llm_provider is LLMProviderName.OPENAI
+    assert settings.openai_api_key is not None
+    assert settings.openai_api_key.get_secret_value() == "test-openai-key"
+    assert settings.openai_model == "gpt-4.1-mini"
+    assert settings.openai_base_url == "https://api.example.com/v1"
+    assert settings.llm_request_timeout_seconds == 15.0
+    assert settings.llm_transport_max_retries == 2
+    assert settings.llm_max_repair_attempts == 0
+    assert settings.ticket_processing_workflow_version == "deterministic-baseline-v1"
+    assert settings.worker_execution_timeout_seconds == 50.0
+
+
+def test_settings_mock_provider_does_not_require_openai_api_key() -> None:
+    settings = create_required_settings(llm_provider=LLMProviderName.MOCK)
+
+    assert settings.llm_provider is LLMProviderName.MOCK
+    assert settings.openai_api_key is None
+
+
+def test_settings_reject_openai_provider_without_api_key() -> None:
+    with pytest.raises(ValidationError, match="openai_api_key is required"):
+        create_required_settings(
+            llm_provider=LLMProviderName.OPENAI,
+            openai_api_key=None,
+            worker_execution_timeout_seconds=50,
+            worker_lease_seconds=55,
+        )
+
+
+def test_settings_blank_openai_api_key_becomes_none_and_is_rejected_for_openai() -> None:
+    with pytest.raises(ValidationError, match="openai_api_key is required"):
+        create_required_settings(
+            llm_provider=LLMProviderName.OPENAI,
+            openai_api_key="   ",
+            worker_execution_timeout_seconds=50,
+            worker_lease_seconds=55,
+        )
+
+
+def test_settings_strip_surrounding_whitespace_from_openai_api_key() -> None:
+    settings = create_required_settings(
+        llm_provider=LLMProviderName.OPENAI,
+        openai_api_key="  test-openai-key  ",
+        worker_execution_timeout_seconds=50,
+        worker_lease_seconds=55,
+    )
+
+    assert settings.openai_api_key is not None
+    assert settings.openai_api_key.get_secret_value() == "test-openai-key"
+
+
+def test_settings_openai_api_key_absent_from_repr() -> None:
+    settings = create_required_settings(
+        llm_provider=LLMProviderName.OPENAI,
+        openai_api_key="super-secret-key",
+        worker_execution_timeout_seconds=50,
+        worker_lease_seconds=55,
+    )
+
+    assert "super-secret-key" not in repr(settings)
+
+
+def test_settings_strip_openai_base_url() -> None:
+    settings = create_required_settings(
+        openai_base_url="  https://api.example.com/v1  ",
+    )
+
+    assert settings.openai_base_url == "https://api.example.com/v1"
+
+
+def test_settings_blank_openai_base_url_becomes_none() -> None:
+    settings = create_required_settings(openai_base_url="   ")
+
+    assert settings.openai_base_url is None
+
+
+def test_settings_reject_unsupported_llm_provider() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(llm_provider="unsupported-provider")
+
+
+def test_settings_reject_unsupported_ticket_processing_workflow_version() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(
+            ticket_processing_workflow_version="unsupported-workflow",
+        )
 
 
 def test_settings_reject_empty_worker_id() -> None:
@@ -210,6 +344,12 @@ def test_settings_reject_blank_required_strings(
         ("worker_retry_base_seconds", 3601),
         ("worker_retry_max_seconds", 0),
         ("worker_retry_max_seconds", 86401),
+        ("llm_request_timeout_seconds", 0),
+        ("llm_request_timeout_seconds", 301),
+        ("llm_transport_max_retries", -1),
+        ("llm_transport_max_retries", 3),
+        ("llm_max_repair_attempts", -1),
+        ("llm_max_repair_attempts", 2),
         ("dependency_health_timeout_seconds", 0),
         ("dependency_health_timeout_seconds", 31),
     ],
@@ -238,6 +378,44 @@ def test_settings_accept_lease_equal_to_execution_timeout_margin() -> None:
 
     assert settings.worker_lease_seconds == 35.0
     assert settings.worker_execution_timeout_seconds == 30.0
+
+
+def test_settings_reject_execution_timeout_shorter_than_llm_budget() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(
+            worker_execution_timeout_seconds=28,
+            worker_lease_seconds=34,
+            llm_request_timeout_seconds=12,
+            llm_max_repair_attempts=1,
+        )
+
+
+def test_settings_accept_execution_timeout_equal_to_llm_budget_margin() -> None:
+    settings = create_required_settings(
+        worker_execution_timeout_seconds=29,
+        worker_lease_seconds=34,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=1,
+    )
+
+    assert settings.worker_execution_timeout_seconds == 29.0
+    assert settings.worker_lease_seconds == 34.0
+    assert settings.llm_request_timeout_seconds == 12.0
+    assert settings.llm_max_repair_attempts == 1
+
+
+def test_settings_accept_zero_repair_attempts_reduced_llm_budget() -> None:
+    settings = create_required_settings(
+        worker_execution_timeout_seconds=17,
+        worker_lease_seconds=22,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=0,
+    )
+
+    assert settings.worker_execution_timeout_seconds == 17.0
+    assert settings.worker_lease_seconds == 22.0
+    assert settings.llm_request_timeout_seconds == 12.0
+    assert settings.llm_max_repair_attempts == 0
 
 
 def test_settings_reject_retry_max_smaller_than_retry_base() -> None:

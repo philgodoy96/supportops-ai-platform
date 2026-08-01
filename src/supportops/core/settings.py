@@ -4,7 +4,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, PostgresDsn, field_validator, model_validator
+from pydantic import Field, PostgresDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,21 @@ class LogLevel(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
+
+
+class LLMProviderName(StrEnum):
+    """Supported LLM provider adapters."""
+
+    MOCK = "mock"
+    OPENAI = "openai"
+
+
+TicketProcessingWorkflowVersion = Literal[
+    "deterministic-baseline-v1",
+    "ticket-classification-v1",
+]
+
+_WORKER_EXECUTION_SAFETY_MARGIN_SECONDS = 5.0
 
 
 class Settings(BaseSettings):
@@ -70,12 +85,27 @@ class Settings(BaseSettings):
     worker_retry_base_seconds: float = Field(default=2.0, gt=0, le=3600)
     worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 
+    ticket_processing_workflow_version: TicketProcessingWorkflowVersion = "ticket-classification-v1"
+    llm_provider: LLMProviderName = LLMProviderName.MOCK
+    openai_api_key: SecretStr | None = None
+    openai_model: str = Field(default="gpt-5-nano", min_length=1, max_length=128)
+    openai_base_url: str | None = Field(default=None, max_length=2048)
+    llm_request_timeout_seconds: float = Field(default=12.0, gt=0, le=300)
+    llm_transport_max_retries: int = Field(default=1, ge=0, le=2)
+    llm_max_repair_attempts: int = Field(default=1, ge=0, le=1)
+
     qdrant_url: str = Field(min_length=1)
     qdrant_api_key: str | None = None
 
     dependency_health_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
 
-    @field_validator("application_name", "application_version", "api_host", "qdrant_url")
+    @field_validator(
+        "application_name",
+        "application_version",
+        "api_host",
+        "openai_model",
+        "qdrant_url",
+    )
     @classmethod
     def reject_blank_values(cls, value: str) -> str:
         """Reject strings that contain only whitespace."""
@@ -86,6 +116,34 @@ class Settings(BaseSettings):
             raise ValueError("value must not be blank")
 
         return normalized_value
+
+    @field_validator("openai_api_key", mode="before")
+    @classmethod
+    def normalize_openai_api_key(cls, value: object) -> object:
+        """Normalize optional OpenAI API keys without exposing secret values."""
+
+        if value is None:
+            return None
+
+        if isinstance(value, SecretStr):
+            return value
+
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            return normalized_value or None
+
+        return value
+
+    @field_validator("openai_base_url")
+    @classmethod
+    def normalize_openai_base_url(cls, value: str | None) -> str | None:
+        """Normalize empty optional OpenAI base URLs to an absent value."""
+
+        if value is None:
+            return None
+
+        normalized_value = value.strip()
+        return normalized_value or None
 
     @field_validator("qdrant_api_key")
     @classmethod
@@ -118,7 +176,10 @@ class Settings(BaseSettings):
     def validate_worker_timing_relationships(self) -> Self:
         """Reject worker timing relationships that cannot safely coexist."""
 
-        if self.worker_lease_seconds < self.worker_execution_timeout_seconds + 5:
+        if (
+            self.worker_lease_seconds
+            < self.worker_execution_timeout_seconds + _WORKER_EXECUTION_SAFETY_MARGIN_SECONDS
+        ):
             raise ValueError(
                 "worker_lease_seconds must exceed "
                 "worker_execution_timeout_seconds by at least 5 seconds."
@@ -127,6 +188,22 @@ class Settings(BaseSettings):
         if self.worker_retry_max_seconds < self.worker_retry_base_seconds:
             raise ValueError(
                 "worker_retry_max_seconds must not be smaller than worker_retry_base_seconds."
+            )
+
+        if self.llm_provider is LLMProviderName.OPENAI and self.openai_api_key is None:
+            raise ValueError("openai_api_key is required when llm_provider is openai.")
+
+        maximum_logical_invocation_count = 1 + self.llm_max_repair_attempts
+        logical_llm_budget_seconds = (
+            self.llm_request_timeout_seconds * maximum_logical_invocation_count
+        )
+        if (
+            self.worker_execution_timeout_seconds
+            < logical_llm_budget_seconds + _WORKER_EXECUTION_SAFETY_MARGIN_SECONDS
+        ):
+            raise ValueError(
+                "worker_execution_timeout_seconds must cover all configured LLM "
+                "invocations plus the safety margin."
             )
 
         return self
