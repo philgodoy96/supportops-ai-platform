@@ -19,9 +19,9 @@ from supportops.modules.agent_runs.application.deterministic_executor import (
 from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
 )
 from supportops.modules.ticket_classifications.application.executor import (
-    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     TicketClassificationExecutor,
 )
 from supportops.worker.composition import (

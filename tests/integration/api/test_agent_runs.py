@@ -6,11 +6,13 @@ from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportops.modules.agent_runs.domain.models import AgentRunAttempt
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
+    AgentRunRecord,
 )
 
 pytestmark = pytest.mark.integration
@@ -66,10 +68,11 @@ async def create_workspace(
 
 async def create_ticket(
     client: AsyncClient,
+    session: AsyncSession,
     *,
     workspace_id: str,
 ) -> dict[str, object]:
-    """Create a ticket and its initial AgentRun through the HTTP API."""
+    """Create a ticket and resolve its initial AgentRun from persistence."""
 
     response = await client.post(
         f"/api/v1/workspaces/{workspace_id}/tickets",
@@ -81,15 +84,22 @@ async def create_ticket(
 
     assert response.status_code == 201
 
-    payload = cast(dict[str, object], response.json())
-    ticket = cast(dict[str, object], payload["ticket"])
-    ticket["processing_run"] = payload["processing_run"]
+    ticket = cast(dict[str, object], response.json())
+    query_result = await session.execute(
+        select(AgentRunRecord).where(
+            AgentRunRecord.ticket_id == UUID(cast(str, ticket["id"])),
+        ),
+    )
+    record = query_result.scalar_one()
+    ticket["processing_run"] = {
+        "id": str(record.id),
+    }
 
     return ticket
 
 
 def processing_run_id(ticket: dict[str, object]) -> str:
-    """Extract the scheduled AgentRun identifier from a ticket response."""
+    """Extract the scheduled AgentRun identifier from ticket setup state."""
 
     processing_run = cast(
         dict[str, object],
@@ -124,6 +134,7 @@ def create_attempt(
 
 async def test_get_agent_run_returns_scheduled_processing_state(
     integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
     clean_business_tables: None,
 ) -> None:
     workspace = await create_workspace(
@@ -133,6 +144,7 @@ async def test_get_agent_run_returns_scheduled_processing_state(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace["id"],
     )
     agent_run_id = processing_run_id(ticket)
@@ -151,7 +163,7 @@ async def test_get_agent_run_returns_scheduled_processing_state(
     assert payload["status"] == "queued"
     assert payload["workflow"] == {
         "name": "ticket-processing",
-        "version": "deterministic-baseline-v1",
+        "version": "ticket-classification-v1",
         "trigger_key": "initial-ticket-processing",
     }
     assert payload["attempt_count"] == 0
@@ -163,6 +175,7 @@ async def test_get_agent_run_returns_scheduled_processing_state(
 
 async def test_get_agent_run_omits_internal_runtime_fields(
     integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
     clean_business_tables: None,
 ) -> None:
     workspace = await create_workspace(
@@ -172,6 +185,7 @@ async def test_get_agent_run_omits_internal_runtime_fields(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace["id"],
     )
     agent_run_id = processing_run_id(ticket)
@@ -216,6 +230,7 @@ async def test_get_agent_run_returns_404_for_missing_run(
 
 async def test_get_agent_run_hides_cross_workspace_resource(
     integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
     clean_business_tables: None,
 ) -> None:
     workspace_a = await create_workspace(
@@ -230,6 +245,7 @@ async def test_get_agent_run_hides_cross_workspace_resource(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace_a["id"],
     )
     agent_run_id = processing_run_id(ticket)
@@ -244,6 +260,7 @@ async def test_get_agent_run_hides_cross_workspace_resource(
 
 async def test_list_agent_run_attempts_returns_empty_history(
     integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
     clean_business_tables: None,
 ) -> None:
     workspace = await create_workspace(
@@ -253,6 +270,7 @@ async def test_list_agent_run_attempts_returns_empty_history(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace["id"],
     )
     agent_run_id = processing_run_id(ticket)
@@ -279,6 +297,7 @@ async def test_list_agent_run_attempts_returns_ordered_history(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace["id"],
     )
     agent_run_id = UUID(processing_run_id(ticket))
@@ -344,6 +363,7 @@ async def test_attempt_history_omits_fencing_identifiers(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace["id"],
     )
     agent_run_id = UUID(processing_run_id(ticket))
@@ -385,6 +405,7 @@ async def test_attempt_history_omits_fencing_identifiers(
 
 async def test_attempt_history_returns_404_for_cross_workspace_run(
     integration_client: AsyncClient,
+    postgresql_session: AsyncSession,
     clean_business_tables: None,
 ) -> None:
     workspace_a = await create_workspace(
@@ -399,6 +420,7 @@ async def test_attempt_history_returns_404_for_cross_workspace_run(
     )
     ticket = await create_ticket(
         integration_client,
+        postgresql_session,
         workspace_id=workspace_a["id"],
     )
     agent_run_id = processing_run_id(ticket)

@@ -19,6 +19,7 @@ from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     AgentRun,
     AgentRunStatus,
 )
@@ -194,6 +195,7 @@ def create_service(
     ticket_repository: FakeTicketRepository | None = None,
     agent_run_repository: FakeAgentRunRepository | None = None,
     transaction_manager: FakeTransactionManager | None = None,
+    workflow_version: str = TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     max_attempts: int = 3,
 ) -> tuple[
     CreateTicketWithInitialRun,
@@ -212,6 +214,7 @@ def create_service(
         ticket_repository=ticket_repository,
         agent_run_repository=agent_run_repository,
         transaction_manager=transaction_manager,
+        workflow_version=workflow_version,
         max_attempts=max_attempts,
         utc_now=lambda: _TIMESTAMP,
     )
@@ -268,12 +271,22 @@ async def test_ticket_intake_creates_expected_initial_run() -> None:
     assert processing_run.workspace_id == ticket.workspace_id
     assert processing_run.ticket_id == ticket.id
     assert processing_run.workflow_name == INITIAL_TICKET_PROCESSING_WORKFLOW_NAME
-    assert processing_run.workflow_version == DETERMINISTIC_BASELINE_WORKFLOW_VERSION
+    assert processing_run.workflow_version == TICKET_CLASSIFICATION_WORKFLOW_VERSION
     assert processing_run.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert processing_run.status is AgentRunStatus.QUEUED
     assert processing_run.available_at == _TIMESTAMP
     assert processing_run.attempt_count == 0
     assert processing_run.max_attempts == 4
+
+
+async def test_ticket_intake_schedules_deterministic_baseline_when_configured() -> None:
+    service, _, _, _, _ = create_service(
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+    )
+
+    result = await execute_ticket_intake(service)
+
+    assert result.processing_run.workflow_version == (DETERMINISTIC_BASELINE_WORKFLOW_VERSION)
 
 
 async def test_ticket_and_run_share_trace_identifiers_and_timestamp() -> None:
@@ -384,6 +397,7 @@ def test_ticket_intake_rejects_invalid_max_attempts() -> None:
             ticket_repository=FakeTicketRepository(),
             agent_run_repository=FakeAgentRunRepository(),
             transaction_manager=FakeTransactionManager(),
+            workflow_version=TICKET_CLASSIFICATION_WORKFLOW_VERSION,
             max_attempts=0,
             utc_now=lambda: _TIMESTAMP,
         )

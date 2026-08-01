@@ -41,7 +41,7 @@ ApplicationStateDependency = Annotated[
 
 def get_create_ticket(
     session: PostgresqlSessionDependency,
-    application_state: ApplicationStateDependency,
+    state: ApplicationStateDependency,
 ) -> CreateTicketWithInitialRun:
     """Construct the create-ticket use case."""
 
@@ -50,7 +50,8 @@ def get_create_ticket(
         ticket_repository=SqlAlchemyTicketRepository(session),
         agent_run_repository=SqlAlchemyAgentRunRepository(session),
         transaction_manager=SqlAlchemyTransactionManager(session),
-        max_attempts=application_state.settings.worker_max_attempts,
+        workflow_version=(state.settings.ticket_processing_workflow_version),
+        max_attempts=state.settings.worker_max_attempts,
     )
 
 

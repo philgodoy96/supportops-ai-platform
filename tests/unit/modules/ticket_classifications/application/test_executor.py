@@ -45,12 +45,12 @@ from supportops.modules.agent_runs.application.execution import (
 from supportops.modules.agent_runs.domain.models import (
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     AgentRun,
     AgentRunAttempt,
     AgentRunStatus,
 )
 from supportops.modules.ticket_classifications.application.executor import (
-    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     TicketClassificationExecutor,
 )
 from supportops.modules.ticket_classifications.application.persistence import (
@@ -239,6 +239,7 @@ def _context() -> AgentRunExecutionContext:
         ticket_id=_TICKET_ID,
         ingestion_request_id=(ticket.ingestion_request_id),
         correlation_id=ticket.correlation_id,
+        workflow_version=(TICKET_CLASSIFICATION_WORKFLOW_VERSION),
         max_attempts=3,
         now=_NOW - timedelta(minutes=1),
     )

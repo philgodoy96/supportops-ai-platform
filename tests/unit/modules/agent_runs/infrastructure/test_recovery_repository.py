@@ -10,6 +10,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     AgentRun,
     AgentRunAttempt,
     AgentRunAttemptOutcome,
@@ -83,6 +84,7 @@ def create_expired_run_record(
         correlation_id=UUID(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=max_attempts,
         now=_STARTED_AT - timedelta(minutes=1),
     )

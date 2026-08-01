@@ -17,6 +17,7 @@ from supportops.modules.agent_runs.domain.claiming import (
     ClaimAgentRunCommand,
 )
 from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     AgentRun,
     AgentRunAttemptOutcome,
     AgentRunStatus,
@@ -120,6 +121,7 @@ async def persist_ticket_and_run(
         ticket_id=ticket.id,
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
         max_attempts=3,
         now=created_at,
     )

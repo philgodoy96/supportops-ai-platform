@@ -8,9 +8,11 @@ from uuid import UUID
 import pytest
 
 from supportops.modules.agent_runs.domain.models import (
+    AGENT_RUN_WORKFLOW_VERSION_MAX_LENGTH,
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
+    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     AgentRun,
     AgentRunStatus,
 )
@@ -19,6 +21,7 @@ from supportops.modules.agent_runs.domain.models import (
 def create_agent_run(
     *,
     now: datetime | None = None,
+    workflow_version: str = TICKET_CLASSIFICATION_WORKFLOW_VERSION,
     max_attempts: int = 3,
 ) -> AgentRun:
     return AgentRun.create_initial(
@@ -34,19 +37,20 @@ def create_agent_run(
         correlation_id=UUID(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
+        workflow_version=workflow_version,
         max_attempts=max_attempts,
         now=now,
     )
 
 
-def test_create_initial_agent_run_assigns_durable_workflow_contract() -> None:
+def test_create_initial_agent_run_assigns_supplied_workflow_contract() -> None:
     now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 
     run = create_agent_run(now=now)
 
     assert run.id.version == 4
     assert run.workflow_name == INITIAL_TICKET_PROCESSING_WORKFLOW_NAME
-    assert run.workflow_version == DETERMINISTIC_BASELINE_WORKFLOW_VERSION
+    assert run.workflow_version == TICKET_CLASSIFICATION_WORKFLOW_VERSION
     assert run.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert run.status is AgentRunStatus.QUEUED
     assert run.available_at == now
@@ -63,6 +67,43 @@ def test_create_initial_agent_run_assigns_durable_workflow_contract() -> None:
     assert run.updated_at == now
     assert not run.is_terminal
     assert run.attempts_remaining == 3
+
+
+def test_create_initial_accepts_deterministic_baseline_workflow_version() -> None:
+    run = create_agent_run(
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+    )
+
+    assert run.workflow_version == DETERMINISTIC_BASELINE_WORKFLOW_VERSION
+
+
+@pytest.mark.parametrize(
+    ("workflow_version", "expected_message"),
+    [
+        ("", "workflow_version is required."),
+        (
+            " ticket-classification-v1",
+            "workflow_version must not contain surrounding whitespace.",
+        ),
+        (
+            "ticket-classification-v1 ",
+            "workflow_version must not contain surrounding whitespace.",
+        ),
+        (
+            "w" * (AGENT_RUN_WORKFLOW_VERSION_MAX_LENGTH + 1),
+            "workflow_version exceeds the maximum length.",
+        ),
+    ],
+)
+def test_create_initial_rejects_invalid_workflow_version(
+    workflow_version: str,
+    expected_message: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(expected_message),
+    ):
+        create_agent_run(workflow_version=workflow_version)
 
 
 def test_agent_run_ownership_is_immutable() -> None:

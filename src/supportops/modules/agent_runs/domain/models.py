@@ -15,6 +15,7 @@ AGENT_RUN_ATTEMPT_WORKER_ID_MAX_LENGTH = 128
 
 INITIAL_TICKET_PROCESSING_WORKFLOW_NAME = "ticket-processing"
 DETERMINISTIC_BASELINE_WORKFLOW_VERSION = "deterministic-baseline-v1"
+TICKET_CLASSIFICATION_WORKFLOW_VERSION = "ticket-classification-v1"
 INITIAL_TICKET_PROCESSING_TRIGGER_KEY = "initial-ticket-processing"
 
 
@@ -138,6 +139,7 @@ class AgentRun:
         ticket_id: UUID,
         ingestion_request_id: UUID,
         correlation_id: UUID,
+        workflow_version: str,
         max_attempts: int,
         agent_run_id: UUID | None = None,
         now: datetime | None = None,
@@ -150,7 +152,7 @@ class AgentRun:
             workspace_id=workspace_id,
             ticket_id=ticket_id,
             workflow_name=INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
-            workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+            workflow_version=workflow_version,
             trigger_key=INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
             status=AgentRunStatus.QUEUED,
             available_at=created_at,
