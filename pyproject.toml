@@ -41,6 +41,7 @@ dependencies = [
 
 [project.scripts]
 supportops-worker = "supportops.worker.main:main"
+supportops-evaluate-classification = "supportops.evaluation.ticket_classification.cli:main"
 
 [dependency-groups]
 dev = [
