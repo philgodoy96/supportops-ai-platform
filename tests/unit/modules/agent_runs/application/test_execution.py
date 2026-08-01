@@ -14,6 +14,8 @@ from supportops.modules.agent_runs.application.execution import (
 )
 from supportops.modules.agent_runs.domain.models import (
     AgentRun,
+    AgentRunAttempt,
+    AgentRunAttemptOutcome,
     AgentRunStatus,
 )
 from supportops.modules.tickets.domain.models import Ticket
@@ -34,6 +36,12 @@ _TICKET_ID = UUID(
 )
 _LEASE_TOKEN = UUID(
     "dd0ae456-3467-41db-93d1-a908f40e8365",
+)
+_ATTEMPT_ID = UUID(
+    "2b39f5b7-b2a4-48d0-b079-fdad286d5315",
+)
+_EXECUTION_REQUEST_ID = UUID(
+    "d1fa068f-2278-47a8-b3c9-39ccf91f0a5e",
 )
 
 
@@ -86,16 +94,33 @@ def create_running_run() -> AgentRun:
     )
 
 
+def create_active_attempt() -> AgentRunAttempt:
+    """Create an active attempt matching create_running_run()."""
+
+    return AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=create_running_run().id,
+        attempt_number=1,
+        worker_id="worker-a",
+        lease_token=_LEASE_TOKEN,
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
+
+
 def test_execution_context_accepts_matching_claimed_run() -> None:
     run = create_running_run()
+    attempt = create_active_attempt()
     ticket = create_ticket()
 
     context = AgentRunExecutionContext(
         agent_run=run,
+        attempt=attempt,
         ticket=ticket,
     )
 
     assert context.agent_run == run
+    assert context.attempt == attempt
     assert context.ticket == ticket
 
 
@@ -124,6 +149,7 @@ def test_execution_context_requires_running_run() -> None:
     ):
         AgentRunExecutionContext(
             agent_run=run,
+            attempt=create_active_attempt(),
             ticket=create_ticket(),
         )
 
@@ -144,6 +170,7 @@ def test_execution_context_requires_matching_ticket() -> None:
     ):
         AgentRunExecutionContext(
             agent_run=create_running_run(),
+            attempt=create_active_attempt(),
             ticket=ticket,
         )
 
@@ -164,7 +191,128 @@ def test_execution_context_requires_matching_workspace() -> None:
     ):
         AgentRunExecutionContext(
             agent_run=create_running_run(),
+            attempt=create_active_attempt(),
             ticket=ticket,
+        )
+
+
+def test_execution_context_requires_attempt_for_same_run() -> None:
+    attempt = AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=UUID(
+            "43499fc4-3638-4097-aaf2-3c5300cf6cd6",
+        ),
+        attempt_number=1,
+        worker_id="worker-a",
+        lease_token=_LEASE_TOKEN,
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "AgentRun execution attempt must reference the same AgentRun.",
+        ),
+    ):
+        AgentRunExecutionContext(
+            agent_run=create_running_run(),
+            attempt=attempt,
+            ticket=create_ticket(),
+        )
+
+
+def test_execution_context_requires_matching_attempt_number() -> None:
+    attempt = AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=create_running_run().id,
+        attempt_number=2,
+        worker_id="worker-a",
+        lease_token=_LEASE_TOKEN,
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "AgentRun execution attempt number must match the AgentRun.",
+        ),
+    ):
+        AgentRunExecutionContext(
+            agent_run=create_running_run(),
+            attempt=attempt,
+            ticket=create_ticket(),
+        )
+
+
+def test_execution_context_requires_matching_lease_token() -> None:
+    attempt = AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=create_running_run().id,
+        attempt_number=1,
+        worker_id="worker-a",
+        lease_token=UUID(
+            "43499fc4-3638-4097-aaf2-3c5300cf6cd6",
+        ),
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "AgentRun execution attempt must share the AgentRun lease token.",
+        ),
+    ):
+        AgentRunExecutionContext(
+            agent_run=create_running_run(),
+            attempt=attempt,
+            ticket=create_ticket(),
+        )
+
+
+def test_execution_context_requires_matching_worker() -> None:
+    attempt = AgentRunAttempt.start(
+        attempt_id=_ATTEMPT_ID,
+        agent_run_id=create_running_run().id,
+        attempt_number=1,
+        worker_id="worker-b",
+        lease_token=_LEASE_TOKEN,
+        execution_request_id=_EXECUTION_REQUEST_ID,
+        now=_NOW,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "AgentRun execution attempt must share the AgentRun worker.",
+        ),
+    ):
+        AgentRunExecutionContext(
+            agent_run=create_running_run(),
+            attempt=attempt,
+            ticket=create_ticket(),
+        )
+
+
+def test_execution_context_requires_active_attempt() -> None:
+    attempt = replace(
+        create_active_attempt(),
+        finished_at=_NOW + timedelta(seconds=1),
+        outcome=AgentRunAttemptOutcome.SUCCEEDED,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "AgentRun execution requires an active attempt.",
+        ),
+    ):
+        AgentRunExecutionContext(
+            agent_run=create_running_run(),
+            attempt=attempt,
+            ticket=create_ticket(),
         )
 
 

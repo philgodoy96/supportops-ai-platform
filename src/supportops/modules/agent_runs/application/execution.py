@@ -7,6 +7,7 @@ from supportops.modules.agent_runs.domain.models import (
     AGENT_RUN_ERROR_CODE_MAX_LENGTH,
     AGENT_RUN_ERROR_SUMMARY_MAX_LENGTH,
     AgentRun,
+    AgentRunAttempt,
     AgentRunStatus,
 )
 from supportops.modules.tickets.domain.models import Ticket
@@ -14,9 +15,10 @@ from supportops.modules.tickets.domain.models import Ticket
 
 @dataclass(frozen=True, slots=True)
 class AgentRunExecutionContext:
-    """Claimed AgentRun and ticket supplied to one executor invocation."""
+    """Claimed AgentRun, active attempt, and ticket for one executor invocation."""
 
     agent_run: AgentRun
+    attempt: AgentRunAttempt
     ticket: Ticket
 
     def __post_init__(self) -> None:
@@ -38,6 +40,31 @@ class AgentRunExecutionContext:
         if self.agent_run.workspace_id != self.ticket.workspace_id:
             raise ValueError(
                 "AgentRun and ticket must belong to the same workspace.",
+            )
+
+        if self.attempt.agent_run_id != self.agent_run.id:
+            raise ValueError(
+                "AgentRun execution attempt must reference the same AgentRun.",
+            )
+
+        if self.attempt.attempt_number != self.agent_run.attempt_count:
+            raise ValueError(
+                "AgentRun execution attempt number must match the AgentRun.",
+            )
+
+        if self.attempt.lease_token != self.agent_run.lease_token:
+            raise ValueError(
+                "AgentRun execution attempt must share the AgentRun lease token.",
+            )
+
+        if self.attempt.worker_id != self.agent_run.lease_owner:
+            raise ValueError(
+                "AgentRun execution attempt must share the AgentRun worker.",
+            )
+
+        if self.attempt.is_finished:
+            raise ValueError(
+                "AgentRun execution requires an active attempt.",
             )
 
 
