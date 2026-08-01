@@ -333,7 +333,15 @@ Cross-field invariants:
 - `SUPPORTOPS_WORKER_LEASE_SECONDS` must exceed
   `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` by at least five seconds;
 - `SUPPORTOPS_WORKER_RETRY_MAX_SECONDS` must not be smaller than
-  `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`.
+  `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`;
+- the complete logical LLM invocation budget must fit inside
+  `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` with a five-second safety
+  margin;
+- logical invocation count is `1 + SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS`;
+- logical LLM budget is
+  `SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS × logical invocation count`;
+- provider transport retries are internal SDK behavior and are not separate
+  application logical invocations.
 
 The supported executor value is exactly:
 
@@ -757,6 +765,445 @@ Example safe value:
 60.0
 ```
 
+## AI runtime configuration
+
+Provider choice is explicit. Local development defaults to `mock`, which does
+not require a network connection or an OpenAI API key. OpenAI credentials are
+required only when `openai` is selected.
+
+Provider, model, workflow version, prompt version, and schema version remain
+independent configuration and provenance dimensions. This pull request
+introduces the provider adapters. Worker composition and durable classification
+execution are introduced by the classification workflow and are not claimed as
+complete here. No provider fallback exists.
+
+### `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION`
+
+Configured workflow version assigned to newly scheduled ticket-processing runs
+when workflow-version-aware ticket intake is composed.
+
+Settings field:
+
+```text
+ticket_processing_workflow_version
+```
+
+Type:
+
+```text
+literal string
+```
+
+Default:
+
+```text
+ticket-classification-v1
+```
+
+Accepted values:
+
+```text
+deterministic-baseline-v1
+ticket-classification-v1
+```
+
+Applies to:
+
+```text
+API and worker configuration
+```
+
+Purpose:
+
+- keeps workflow version independent from provider, model, prompt version, and
+  schema version;
+- allows deterministic historical runs to remain supported;
+- controls only new scheduling after workflow-aware ticket intake is composed.
+
+This setting is validated now. The actual scheduling change belongs to the
+classification workflow integration and must not be treated as already complete
+in this pull request.
+
+Example safe value:
+
+```text
+ticket-classification-v1
+```
+
+### `SUPPORTOPS_LLM_PROVIDER`
+
+Explicit LLM provider adapter selection.
+
+Settings field:
+
+```text
+llm_provider
+```
+
+Type:
+
+```text
+enum string
+```
+
+Default:
+
+```text
+mock
+```
+
+Accepted values:
+
+```text
+mock
+openai
+```
+
+Applies to:
+
+```text
+worker configuration
+```
+
+Purpose:
+
+- selects one configured provider;
+- keeps local development network-free by default;
+- prevents implicit provider fallback.
+
+OpenAI failure never selects `mock` automatically.
+
+Example safe value:
+
+```text
+mock
+```
+
+### `SUPPORTOPS_OPENAI_API_KEY`
+
+Optional OpenAI API credential required only when
+`SUPPORTOPS_LLM_PROVIDER=openai`.
+
+Settings field:
+
+```text
+openai_api_key
+```
+
+Type:
+
+```text
+secret string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+Constraints:
+
+- blank values normalize to omitted;
+- OpenAI provider selection requires a nonblank value;
+- mock provider selection does not require a value.
+
+Applies to:
+
+```text
+worker configuration when OpenAI is selected
+```
+
+Security requirements:
+
+- never commit a real value;
+- never include it in logs;
+- never include complete settings in logs;
+- use managed secret storage before production deployment.
+
+Local `.env.example` leaves the value empty:
+
+```text
+SUPPORTOPS_OPENAI_API_KEY=
+```
+
+### `SUPPORTOPS_OPENAI_MODEL`
+
+Deployment-configured OpenAI model identifier.
+
+Settings field:
+
+```text
+openai_model
+```
+
+Type:
+
+```text
+string
+```
+
+Default:
+
+```text
+gpt-5-nano
+```
+
+Constraints:
+
+- 1 through 128 characters after trimming;
+- must not contain surrounding whitespace.
+
+Applies to:
+
+```text
+worker configuration when OpenAI is selected
+```
+
+Purpose:
+
+- centralizes model selection;
+- prevents model identifiers from being distributed through business modules;
+- preserves provider/model provenance for future invocation persistence.
+
+Aliases may receive provider updates. The application does not switch models
+automatically.
+
+Example safe value:
+
+```text
+gpt-5-nano
+```
+
+### `SUPPORTOPS_OPENAI_BASE_URL`
+
+Optional OpenAI-compatible base URL override.
+
+Settings field:
+
+```text
+openai_base_url
+```
+
+Type:
+
+```text
+string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+Constraints:
+
+- blank values normalize to omitted;
+- maximum 2048 characters;
+- surrounding whitespace is removed.
+
+Applies to:
+
+```text
+worker configuration when OpenAI is selected
+```
+
+Purpose:
+
+- supports controlled compatible endpoints and test environments;
+- keeps endpoint configuration out of business code.
+
+Setting a base URL does not create a provider client during settings
+validation.
+
+### `SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS`
+
+Maximum duration of one logical provider invocation.
+
+Settings field:
+
+```text
+llm_request_timeout_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+12.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 300
+```
+
+Applies to:
+
+```text
+worker configuration
+```
+
+Purpose:
+
+- bounds one initial or repair provider invocation;
+- contributes to the validated logical LLM execution budget.
+
+This value is not the AgentRun execution timeout and does not include the
+entire outer retry lifecycle.
+
+Example safe value:
+
+```text
+12.0
+```
+
+### `SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES`
+
+Maximum SDK-managed transport retries within one logical provider invocation.
+
+Settings field:
+
+```text
+llm_transport_max_retries
+```
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+1
+```
+
+Accepted range:
+
+```text
+0 through 2
+```
+
+Applies to:
+
+```text
+OpenAI provider configuration
+```
+
+Purpose:
+
+- makes SDK transport retry behavior explicit;
+- handles eligible transient provider transport failures;
+- avoids relying on the SDK default.
+
+The application does not add another manual transport retry loop. This value is
+separate from gateway repair and AgentRun retry. It is not used to multiply the
+application logical invocation count.
+
+Example safe value:
+
+```text
+1
+```
+
+### `SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS`
+
+Maximum application-owned structured-output repair invocations after the
+initial provider invocation.
+
+Settings field:
+
+```text
+llm_max_repair_attempts
+```
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+1
+```
+
+Accepted range:
+
+```text
+0 through 1
+```
+
+Applies to:
+
+```text
+LLM Gateway
+```
+
+Purpose:
+
+- bounds replacement requests after repair-eligible structured-output failure;
+- prevents indefinite repair;
+- contributes to the worker execution-time budget.
+
+Repair is a new logical provider invocation. Refusal is not repaired.
+Authentication, quota, invalid request, timeout, and provider-unavailable
+failures are not repaired. AgentRun retry is a separate outer layer.
+
+Example safe value:
+
+```text
+1
+```
+
+### LLM timing relationship
+
+Logical LLM timing relates to the worker execution timeout as follows:
+
+```text
+logical_invocation_count = 1 + llm_max_repair_attempts
+
+logical_llm_budget_seconds =
+    llm_request_timeout_seconds × logical_invocation_count
+
+worker_execution_timeout_seconds
+    >= logical_llm_budget_seconds + 5
+```
+
+Defaults:
+
+```text
+logical_invocation_count = 2
+logical_llm_budget_seconds = 24
+minimum worker execution timeout = 29
+configured worker execution timeout = 30
+configured worker lease = 45
+```
+
+The lease must independently exceed the worker execution timeout by at least
+five seconds.
+
+### Provider and retry semantics
+
+- `mock` is explicit and deterministic;
+- `mock` is not a fallback;
+- OpenAI uses the configured model;
+- transport retry is SDK-managed;
+- repair is gateway-managed;
+- AgentRun retry is processor-managed;
+- no automatic model switching exists;
+- no cross-provider fallback exists.
+
 ## Docker Compose variables
 
 These variables configure local infrastructure containers.
@@ -859,6 +1306,16 @@ SUPPORTOPS_POSTGRESQL_POOL_SIZE=5
 SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW=10
 SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS=10
 
+# AI runtime
+SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION=ticket-classification-v1
+SUPPORTOPS_LLM_PROVIDER=mock
+SUPPORTOPS_OPENAI_API_KEY=
+SUPPORTOPS_OPENAI_MODEL=gpt-5-nano
+SUPPORTOPS_OPENAI_BASE_URL=
+SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS=12
+SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES=1
+SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS=1
+
 # Qdrant
 QDRANT_HTTP_PORT=6333
 QDRANT_GRPC_PORT=6334
@@ -873,6 +1330,8 @@ SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS=2
 `SUPPORTOPS_WORKER_*` values use validated defaults when unset and do not need
 to appear in the local example file for basic local development. Set
 `SUPPORTOPS_WORKER_ID` explicitly when distinguishing concurrent local workers.
+The AI runtime section above matches `.env.example`, including the empty
+`SUPPORTOPS_OPENAI_API_KEY=` placeholder.
 
 ## Validation behavior
 
@@ -901,7 +1360,15 @@ Examples of invalid configuration include:
 - non-positive pool timeout;
 - non-positive dependency health timeout;
 - unsupported environment value;
-- unsupported log level.
+- unsupported log level;
+- unsupported LLM provider;
+- unsupported ticket-processing workflow version;
+- OpenAI selected without an API key;
+- request timeout outside its accepted range;
+- transport retry count outside 0 through 2;
+- repair attempt count outside 0 through 1;
+- logical LLM budget exceeding the worker execution timeout after the required
+  five-second safety margin.
 
 Validate application settings through the test suite:
 
@@ -924,6 +1391,10 @@ The repository foundation follows these rules:
 - settings are not logged as a complete object;
 - PostgreSQL credentials are not returned by health endpoints;
 - Qdrant API keys are not returned by health endpoints;
+- OpenAI API keys use a secret settings type;
+- OpenAI API keys are not logged;
+- `.env.example` leaves the OpenAI key empty;
+- real OpenAI credentials require environment-appropriate secret management;
 - CI uses non-production service credentials;
 - no external secret management system is introduced in the local foundation.
 
