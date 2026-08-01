@@ -9,6 +9,17 @@ from pydantic import BaseModel
 
 from supportops.core.request_context import get_request_context
 from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
+from supportops.modules.knowledge_documents.api.pagination import (
+    InvalidKnowledgePaginationCursorError,
+)
+from supportops.modules.knowledge_documents.application.errors import (
+    DocumentExternalReferenceConflictApplicationError,
+    DocumentNotFoundError,
+    DocumentVersionContentConflictApplicationError,
+    DocumentVersionNotFoundError,
+    DocumentVersionNotReadyError,
+    DocumentVersionNumberConflictApplicationError,
+)
 from supportops.modules.ticket_classifications.application.errors import (
     TicketClassificationNotFoundError,
 )
@@ -80,6 +91,34 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         InvalidClassificationPaginationCursorError,
         _invalid_classification_pagination_cursor_handler,
+    )
+    app.add_exception_handler(
+        DocumentNotFoundError,
+        _document_not_found_handler,
+    )
+    app.add_exception_handler(
+        DocumentVersionNotFoundError,
+        _document_version_not_found_handler,
+    )
+    app.add_exception_handler(
+        DocumentExternalReferenceConflictApplicationError,
+        _document_external_reference_conflict_handler,
+    )
+    app.add_exception_handler(
+        DocumentVersionContentConflictApplicationError,
+        _document_version_content_conflict_handler,
+    )
+    app.add_exception_handler(
+        DocumentVersionNumberConflictApplicationError,
+        _document_version_number_conflict_handler,
+    )
+    app.add_exception_handler(
+        DocumentVersionNotReadyError,
+        _document_version_not_ready_handler,
+    )
+    app.add_exception_handler(
+        InvalidKnowledgePaginationCursorError,
+        _invalid_knowledge_pagination_cursor_handler,
     )
 
 
@@ -182,6 +221,104 @@ async def _ticket_classification_not_found_handler(
 
 
 async def _invalid_classification_pagination_cursor_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=400,
+        code="invalid_pagination_cursor",
+        message="Pagination cursor is invalid.",
+    )
+
+
+async def _document_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="document_not_found",
+        message="Document was not found.",
+    )
+
+
+async def _document_version_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="document_version_not_found",
+        message="Document version was not found.",
+    )
+
+
+async def _document_external_reference_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="document_external_reference_conflict",
+        message="Document external reference already exists in the workspace.",
+    )
+
+
+async def _document_version_content_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="document_version_content_conflict",
+        message="Document content already exists for this document.",
+    )
+
+
+async def _document_version_number_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="document_version_number_conflict",
+        message="Document version number already exists.",
+    )
+
+
+async def _document_version_not_ready_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="document_version_not_ready",
+        message="Document version is not ready for activation.",
+    )
+
+
+async def _invalid_knowledge_pagination_cursor_handler(
     request: Request,
     error: Exception,
 ) -> JSONResponse:
