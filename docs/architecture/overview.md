@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, and durable structured ticket classification with invocation and accepted classification persistence. Retrieval, LangGraph orchestration, tools, approvals, AI observability integrations, and evaluation execution remain later phases.
+The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification with invocation and accepted classification persistence, classification inspection, logical invocation inspection, offline deterministic evaluation, and opt-in provider evaluation. Retrieval, LangGraph orchestration, tools, approvals, AI observability integrations, and RAGAS remain later phases.
 
 ## Architectural principles
 
@@ -42,10 +42,24 @@ The processes have distinct runtime responsibilities while remaining part of one
 
 Current ownership:
 
-- the API owns HTTP acceptance, transactional Ticket plus configured initial AgentRun scheduling, and read-only AgentRun inspection;
+- the API owns HTTP acceptance, transactional Ticket plus configured initial AgentRun scheduling, and read-only AgentRun, classification, and logical invocation inspection;
 - the worker owns process-scoped provider and Gateway composition, expired lease recovery, claim, versioned executor dispatch, classification execution, and fenced outcome persistence;
 - PostgreSQL owns tickets, AgentRuns, attempts, leases, retry scheduling, execution history, logical invocations, and accepted classifications;
+- offline evaluation owns versioned synthetic datasets, prediction artifacts, deterministic metrics, and reproducible reports outside the API and worker processes;
 - Qdrant remains outside the worker flow and is used by the API only for its current connectivity lifecycle.
+
+The platform separates three planes:
+
+```text
+runtime plane
+→ worker execution and durable persistence
+
+inspection plane
+→ workspace-scoped read-only API
+
+evaluation plane
+→ offline datasets, predictions, metrics, and reports
+```
 
 Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Classification recovery is idempotent after an accepted classification commits. Future executors and tools must make side effects idempotent or otherwise safely fenced.
 
@@ -59,6 +73,7 @@ src/supportops/
 ├── api/
 ├── application/
 ├── core/
+├── evaluation/
 ├── infrastructure/
 ├── modules/
 │   ├── agent_runs/
@@ -89,7 +104,7 @@ The API boundary may depend on `supportops.core`, `supportops.infrastructure`, `
 
 Infrastructure and core packages must not depend on the API package.
 
-Operational health routes remain unversioned. Workspace, ticket, and AgentRun business routes are versioned under `/api/v1`.
+Operational health routes remain unversioned. Workspace, ticket, AgentRun, and classification business routes are versioned under `/api/v1`.
 
 ### Worker boundary
 
@@ -116,6 +131,8 @@ The API process does not initialize the LLM provider.
 `supportops.application` owns cross-module application use cases that coordinate more than one business module.
 
 Ticket intake is implemented as `CreateTicketWithInitialRun`. That use case coordinates Workspace, Ticket, and AgentRun repositories through one SQLAlchemy session and one application-owned transaction. The HTTP request returns after that transaction commits and does not execute the workflow.
+
+AgentRun inspection composition is implemented as `GetAgentRunInspection`. That query coordinates AgentRun ownership lookup with an optional accepted-classification reference from the classification query boundary.
 
 Module-local command and query use cases remain inside each module's application package. Cross-module orchestration belongs in `supportops.application` only when the use case spans multiple module boundaries.
 
@@ -190,11 +207,13 @@ infrastructure/
 api/
 ```
 
-The `agent_runs` module follows the same layout. It provides domain, application, infrastructure, and API layers for durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection.
+The `agent_runs` module follows the same layout. It provides domain, application, infrastructure, and API layers for durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection, including optional accepted-classification references and logical invocation history routes.
 
-The `ticket_classifications` module provides domain, application, and infrastructure layers for durable classification execution, `LLMInvocation` and `TicketClassification` persistence, lease-fenced writes, and Gateway failure translation. Classification HTTP routes are not yet exposed.
+The `ticket_classifications` module provides domain, application, infrastructure, and API layers for durable classification execution, `LLMInvocation` and `TicketClassification` persistence, lease-fenced writes, Gateway failure translation, and workspace-scoped classification inspection.
 
 The cross-cutting `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
+
+The `supportops.evaluation.ticket_classification` package owns the versioned synthetic dataset loader, prediction artifacts, deterministic evaluator, Gateway predictor, sequential runner, and evaluation CLI.
 
 ### Domain
 
@@ -228,7 +247,7 @@ lease_expired
 
 Application packages own use cases and transaction orchestration.
 
-Command use cases such as workspace creation own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, ticket listing, AgentRun retrieval, and AgentRunAttempt listing execute reads without opening a write transaction.
+Command use cases such as workspace creation own the transaction boundary through the application-facing transaction contract. Query use cases such as workspace retrieval, ticket retrieval, ticket listing, AgentRun retrieval, AgentRunAttempt listing, classification detail, ticket classification history, and AgentRun logical invocation history execute reads without opening a write transaction.
 
 `CreateTicketWithInitialRun` is the cross-module ticket intake command. It validates the workspace, persists the ticket, and persists the initial AgentRun in one shared SQLAlchemy session and one application-owned transaction. Repositories flush without committing independently.
 
@@ -244,15 +263,15 @@ The `agent_runs` application layer owns:
 
 The `ticket_classifications` application layer owns the classification executor that calls the Gateway outside database transactions, materializes durable invocations, persists accepted classifications under lease fencing, and translates Gateway failures into retryable or terminal AgentRun execution errors.
 
-`GetAgentRun` performs workspace-scoped lookup through `AgentRunQueryRepository`. `ListAgentRunAttempts` first validates AgentRun ownership through the same workspace-scoped lookup, then lists attempts. Attempts do not carry `workspace_id` and therefore cannot establish ownership independently.
+`GetAgentRun` performs workspace-scoped lookup through `AgentRunQueryRepository`. Cross-module `GetAgentRunInspection` composes that lookup with an optional accepted-classification reference from the classification query boundary. `ListAgentRunAttempts` first validates AgentRun ownership through the same workspace-scoped lookup, then lists attempts. Attempts do not carry `workspace_id` and therefore cannot establish ownership independently. Logical invocation history is available through a separate AgentRun-scoped endpoint after the same ownership validation.
 
 `AgentRunQueryRepository` is a dedicated read-only contract. `AgentRunRepository` remains the mutation-oriented scheduling and worker contract. This separation applies interface segregation: inspection depends only on read operations, while claiming, transitions, and recovery remain on the mutation protocol.
 
-Read inspection services use the request-scoped `AsyncSession` without an explicit `TransactionManager`. They do not flush, commit, or mutate state. PostgreSQL orders attempts by `attempt_number` ascending in SQL.
+Read inspection services use the request-scoped `AsyncSession` without an explicit `TransactionManager`. They do not flush, commit, or mutate state. PostgreSQL orders attempts by `attempt_number` ascending in SQL. Invocation history is ordered by attempt number ascending, then invocation sequence ascending. Classification history is ordered newest first and uses opaque keyset pagination.
 
 Application services depend on domain repository protocols. They do not depend on FastAPI or SQLAlchemy session APIs directly.
 
-Transactional AgentRun scheduling is documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime process topology is documented in [`runtime-topology.md`](runtime-topology.md). LLM Gateway behavior is documented in [`llm-gateway.md`](llm-gateway.md). Durable classification is documented in [`ticket-classification.md`](ticket-classification.md).
+Transactional AgentRun scheduling is documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime process topology is documented in [`runtime-topology.md`](runtime-topology.md). LLM Gateway behavior is documented in [`llm-gateway.md`](llm-gateway.md). Durable classification is documented in [`ticket-classification.md`](ticket-classification.md). Classification inspection and evaluation are documented in [`classification-evaluation.md`](classification-evaluation.md).
 
 ### Infrastructure
 
@@ -278,17 +297,20 @@ GET  /api/v1/workspaces/{workspace_id}
 POST /api/v1/workspaces/{workspace_id}/tickets
 GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
 GET  /api/v1/workspaces/{workspace_id}/tickets
+GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/classifications
+GET  /api/v1/workspaces/{workspace_id}/ticket-classifications/{classification_id}
 GET  /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}
 GET  /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/attempts
+GET  /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
 ```
 
-Ticket creation returns the existing Ticket response shape. AgentRun records are persisted atomically and can be inspected through the workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. The creation response does not expose a processing-run projection or classification result.
+Ticket creation returns the existing Ticket response shape. AgentRun records are persisted atomically and can be inspected through the workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. AgentRun detail includes an optional minimal accepted-classification reference. The creation response does not expose a full classification result.
 
-HTTP schemas project safe operational fields only. Internal lease ownership, lease tokens, lease expiry, ingestion request IDs, and execution request IDs remain private. Attempt responses exclude `agent_run_id`, lease tokens, and execution request IDs.
+HTTP schemas project safe operational fields only. Internal lease ownership, lease tokens, lease expiry, ingestion request IDs, execution request IDs, provider request IDs, raw prompts, and raw provider responses remain private. Attempt responses exclude `agent_run_id`, lease tokens, and execution request IDs.
 
 Inspection endpoints are observational only. They do not perform mutation, retry, cancellation, or lease revocation.
 
-Missing and cross-workspace AgentRun lookups both return `404` with `agent_run_not_found`. This prevents resource ownership disclosure across workspaces.
+Missing and cross-workspace AgentRun lookups both return `404` with `agent_run_not_found`. Missing and cross-workspace classification lookups both return `404` with `ticket_classification_not_found`. This prevents resource ownership disclosure across workspaces.
 
 Expected application errors use a stable envelope with `code`, `message`, and `request_id`. Malformed identifiers and invalid request schemas use FastAPI validation responses.
 
@@ -347,7 +369,10 @@ Read queries do not open write transactions:
 - get ticket;
 - list tickets;
 - get AgentRun;
-- list AgentRunAttempts.
+- list AgentRunAttempts;
+- get TicketClassification;
+- list ticket classifications;
+- list AgentRun logical invocations.
 
 Ticket listing verifies that the workspace exists before returning an empty page. A missing workspace returns `workspace_not_found`. An empty workspace returns an empty `items` collection with a null `next_cursor`.
 
@@ -381,11 +406,12 @@ Implemented expected error codes include:
 - `workspace_not_found`;
 - `ticket_not_found`;
 - `agent_run_not_found`;
+- `ticket_classification_not_found`;
 - `workspace_slug_conflict`;
 - `ticket_external_reference_conflict`;
 - `invalid_pagination_cursor`.
 
-Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as a missing ticket. Cross-workspace AgentRun retrieval returns the same `agent_run_not_found` contract as a missing AgentRun.
+Cross-workspace ticket retrieval returns the same `ticket_not_found` contract as a missing ticket. Cross-workspace AgentRun retrieval returns the same `agent_run_not_found` contract as a missing AgentRun. Cross-workspace classification retrieval returns the same `ticket_classification_not_found` contract as a missing classification.
 
 ## Data ownership
 
@@ -485,9 +511,9 @@ The local default configured value is `ticket-classification-v1`. The determinis
 
 The architecture intentionally avoids Redis, Celery, Kafka, and SQS in this phase because PostgreSQL provides transactional durability and adequate local and portfolio scope. An external queue or outbox is not required for the current worker model.
 
-After scheduling, clients inspect persisted lifecycle state through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Inspection reports current durable status, retry budget, safe error metadata, and ordered attempt history. It does not alter retries, leases, or state transitions, and it does not guarantee future completion. Classification inspection APIs remain planned.
+After scheduling, clients inspect persisted lifecycle state through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Inspection reports current durable status, retry budget, safe error metadata, ordered attempt history, optional accepted-classification reference, and logical invocation history. It does not alter retries, leases, or state transitions, and it does not guarantee future completion. Inspection remains read-only.
 
-Scheduling details are documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime topology details are documented in [`runtime-topology.md`](runtime-topology.md). Classification details are documented in [`ticket-classification.md`](ticket-classification.md).
+Scheduling details are documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime topology details are documented in [`runtime-topology.md`](runtime-topology.md). Classification details are documented in [`ticket-classification.md`](ticket-classification.md). Inspection and evaluation details are documented in [`classification-evaluation.md`](classification-evaluation.md).
 
 ## AI system boundaries
 
@@ -502,9 +528,13 @@ The implemented classification boundary covers:
 - durable `LLMInvocation` and `TicketClassification` persistence;
 - token usage and estimated-cost provenance;
 - retryable and terminal failure translation;
-- idempotent recovery after classification commit.
+- idempotent recovery after classification commit;
+- durable classification inspection projections;
+- a versioned synthetic classification dataset;
+- a deterministic classification evaluator;
+- an offline evaluation CLI with mock or opt-in OpenAI provider selection.
 
-Classification does not mutate Ticket status, cannot execute tools or actions, and is not exposed through classification HTTP endpoints yet.
+Classification does not mutate Ticket status and cannot execute tools or actions. Inspection exposes accepted classifications and logical invocation provenance through workspace-scoped read-only HTTP routes. Evaluation measures the same prompt and schema boundary offline without writing to PostgreSQL or Qdrant.
 
 Future AI behavior is expected to remain behind application-owned boundaries for:
 
@@ -513,7 +543,8 @@ Future AI behavior is expected to remain behind application-owned boundaries for
 - tool execution;
 - approvals;
 - AI observability integrations;
-- evaluation execution.
+- RAGAS;
+- retrieval and generation evaluation beyond structured classification.
 
 External AI frameworks and providers must not become the source of business rules or workflow ownership.
 
@@ -647,7 +678,9 @@ They validate behavior such as:
 - persistence model registration;
 - PostgreSQL constraint-name inspection;
 - API schemas and opaque cursor encoding;
-- AgentRun inspection schema projections that omit internal fencing identifiers.
+- AgentRun inspection schema projections that omit internal fencing identifiers;
+- classification inspection projections, cursors, and query services;
+- evaluation dataset, prediction, metrics, predictor, runner, and CLI safety coverage.
 
 ### Integration tests
 
@@ -671,6 +704,8 @@ They validate:
 - retry and recovery idempotency after classification commit;
 - workspace and ticket HTTP API behavior;
 - workspace-scoped AgentRun inspection HTTP behavior;
+- classification detail and ticket classification history inspection;
+- AgentRun classification reference and logical invocation ordering;
 - stable expected-error responses;
 - opaque cursor pagination;
 - workspace-scoped SQL predicates and attempt ordering.
@@ -720,7 +755,7 @@ Service extraction is not a default objective. It should be driven by clear owne
 
 ## Repository foundation scope
 
-The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL worker, AgentRun inspection, the LLM Gateway, and durable ticket classification establish:
+The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL worker, AgentRun inspection, the LLM Gateway, durable ticket classification, classification inspection, and offline evaluation establish:
 
 - project and dependency management;
 - local PostgreSQL and Qdrant infrastructure;
@@ -741,6 +776,9 @@ The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL 
 - durable `LLMInvocation` and `TicketClassification` persistence;
 - a separate worker process with cooperative shutdown;
 - workspace-scoped AgentRun inspection;
+- workspace-scoped classification and logical invocation inspection;
+- offline deterministic classification evaluation;
+- opt-in external-provider evaluation;
 - application services and versioned business APIs;
 - stable expected-error contracts;
 - opaque cursor pagination;
@@ -761,9 +799,10 @@ The current phase does not implement:
 - WebSockets or Server-Sent Events;
 - frontend monitoring applications;
 - Redis, Celery, Kafka, or SQS;
-- classification inspection APIs;
-- evaluation execution;
 - evidence-driven prompt version 2;
+- prompt regression comparison across versions;
+- scheduled evaluation;
+- evaluation history persistence;
 - cross-provider fallback and automatic model routing;
 - Anthropic provider;
 - operational cost reporting and invoice reconciliation;
@@ -777,10 +816,11 @@ The current phase does not implement:
 - AI observability integrations;
 - Langfuse;
 - RAGAS;
+- retrieval and generation evaluation beyond structured classification;
 - frontend applications;
 - public cloud deployment;
 - infrastructure as code.
 
-Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, and workspace-scoped AgentRun inspection are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
+Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, workspace-scoped AgentRun and classification inspection, and offline evaluation are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

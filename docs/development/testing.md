@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -62,7 +62,22 @@ They validate:
 - workspace API schemas;
 - ticket API schemas, including the nested processing-run response;
 - AgentRun inspection schema projections;
-- opaque ticket cursor encoding and invalid-cursor rejection.
+- opaque ticket cursor encoding and invalid-cursor rejection;
+- classification inspection projections;
+- classification cursor encoding;
+- classification query services;
+- classification query repository SQL shape;
+- classification API schemas and routes;
+- cross-module AgentRun inspection composition;
+- evaluation dataset models and loader;
+- pinned dataset hash;
+- prediction artifact validation;
+- deterministic evaluation metrics;
+- Gateway predictor behavior;
+- sequential evaluation runner;
+- evaluation settings and composition;
+- CLI provider safety gates;
+- evaluation artifact reproducibility.
 
 Unit tests use mocks only at external boundaries.
 
@@ -136,6 +151,13 @@ uv run pytest tests/unit/modules/workspaces/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_schemas.py
 uv run pytest tests/unit/modules/tickets/api/test_pagination.py
 uv run pytest tests/unit/modules/agent_runs/api/test_schemas.py
+uv run pytest tests/unit/modules/ticket_classifications/api/test_schemas.py
+```
+
+Classification evaluation unit coverage:
+
+```powershell
+uv run pytest tests/unit/evaluation
 ```
 
 AgentRun inspection application coverage verifies:
@@ -153,6 +175,28 @@ AgentRun inspection schema coverage verifies:
 - safe public field projection for attempt responses;
 - omission of `lease_owner`, `lease_token`, `lease_expires_at`, and `ingestion_request_id`;
 - omission of attempt `agent_run_id`, `lease_token`, and `execution_request_id`.
+
+Classification inspection unit coverage verifies:
+
+- safe public field projection for classification responses;
+- opaque classification history cursor behavior;
+- query-service ownership validation;
+- query-repository SQL shape for detail, history, and invocation reads;
+- classification API schema and route composition;
+- cross-module AgentRun inspection that attaches an optional classification
+  reference and lists logical invocations.
+
+Evaluation unit coverage verifies:
+
+- dataset model validation and loader behavior;
+- pinned dataset content hash;
+- prediction artifact validation and hashing;
+- deterministic full-label exact match and field accuracies;
+- human-review precision, recall, and F1;
+- Gateway predictor and sequential runner behavior;
+- evaluation settings and composition;
+- CLI provider safety gates, including the external-provider permission flag;
+- artifact reload and report reproducibility.
 
 ## Integration tests
 
@@ -205,6 +249,13 @@ They validate:
 - empty and ordered AgentRunAttempt history responses;
 - AgentRun HTTP `404` for missing and cross-workspace resources;
 - invalid AgentRun UUID validation;
+- classification detail inspection;
+- ticket classification keyset pagination;
+- AgentRun classification reference;
+- invocation ordering across retries and repairs;
+- safe usage and estimated-cost projection;
+- empty classification and invocation histories;
+- missing and cross-workspace classification and invocation behavior;
 - absence of request bodies from completion logs, including ticket subject and description content.
 
 Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
@@ -257,6 +308,8 @@ uv run pytest tests/integration/modules/agent_runs
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
 uv run pytest tests/integration/api/test_agent_runs.py
+uv run pytest `
+  tests/integration/api/test_ticket_classifications.py
 ```
 
 The concurrency-sensitive duplicate external-reference repository test remains part of the ticket infrastructure integration suite and should continue to run against real PostgreSQL.
@@ -317,7 +370,19 @@ AgentRun API integration coverage verifies:
 - invalid UUID validation responses;
 - tenant isolation behavior that does not disclose cross-workspace ownership.
 
-Integration tests are necessary for AgentRun inspection because unit tests cannot fully prove:
+Classification inspection API integration coverage verifies:
+
+- classification detail responses;
+- ticket classification history with opaque keyset pagination;
+- optional AgentRun classification reference;
+- invocation ordering across retries and repairs;
+- safe usage and estimated-cost projection;
+- empty histories for queued or unclassified runs;
+- missing and cross-workspace `404` contracts for classifications and
+  invocation histories;
+- omission of provider request IDs and raw provider content.
+
+Integration tests are necessary for AgentRun and classification inspection because unit tests cannot fully prove:
 
 - workspace-scoped SQL predicates against PostgreSQL;
 - actual SQL ordering of attempts;
@@ -496,6 +561,38 @@ Run the focused request-traceability suite:
 uv run pytest tests/unit/core/test_request_context.py tests/unit/core/test_logging.py tests/unit/api/test_application.py tests/unit/api/test_request_context_middleware.py
 ```
 
+## Classification evaluation smoke commands
+
+Mock evaluation validates pipeline wiring and does not measure model quality:
+
+```powershell
+uv run supportops-evaluate-classification run `
+  --provider mock `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions-output `
+    artifacts/classification-mock-predictions.jsonl `
+  --output `
+    artifacts/classification-mock-report.json
+```
+
+Offline re-score initializes no provider and makes no network request:
+
+```powershell
+uv run supportops-evaluate-classification score `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions `
+    artifacts/classification-mock-predictions.jsonl `
+  --output `
+    artifacts/classification-mock-rescored-report.json
+```
+
+Unit and integration tests do not call OpenAI. OpenAI evaluation is an explicit
+manual operation and requires `--allow-external-provider` plus a configured API
+key. Generated evaluation artifacts are ignored by Git. Versioned datasets
+remain committed under `evals/`.
+
 ## Workspace, ticket, and AgentRun API tests
 
 Workspace API integration coverage verifies:
@@ -511,7 +608,7 @@ Ticket API integration coverage verifies:
 
 - request and correlation identifier persistence on intake;
 - nested ticket and processing-run response shape;
-- queued `ticket-processing` / `deterministic-baseline-v1` processing reference;
+- queued `ticket-processing` / `ticket-classification-v1` processing reference;
 - persistence of the referenced AgentRun after successful creation;
 - missing workspace behavior for ticket creation and listing;
 - duplicate external-reference conflicts within one workspace;
@@ -544,6 +641,8 @@ Run the focused API and intake suites:
 uv run pytest tests/integration/api/test_workspaces.py
 uv run pytest tests/integration/api/test_tickets.py
 uv run pytest tests/integration/api/test_agent_runs.py
+uv run pytest `
+  tests/integration/api/test_ticket_classifications.py
 uv run pytest tests/integration/application/test_ticket_intake.py
 ```
 
@@ -554,6 +653,15 @@ uv run pytest tests/unit/modules/agent_runs/application/test_services.py
 uv run pytest tests/unit/modules/agent_runs/api/test_schemas.py
 uv run pytest tests/integration/modules/agent_runs/infrastructure/test_query_repository.py
 uv run pytest tests/integration/api/test_agent_runs.py
+```
+
+Focused classification inspection and evaluation coverage:
+
+```powershell
+uv run pytest tests/unit/modules/ticket_classifications
+uv run pytest tests/unit/evaluation
+uv run pytest `
+  tests/integration/api/test_ticket_classifications.py
 ```
 
 Full API integration tests require PostgreSQL and applied migrations.
@@ -665,7 +773,8 @@ docker compose ps
 
 ## Alembic validation
 
-The current migration head creates the `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables.
+The current migration head creates the `workspaces`, `tickets`, `agent_runs`,
+`agent_run_attempts`, `llm_invocations`, and `ticket_classifications` tables.
 
 Migration lifecycle commands:
 
@@ -682,7 +791,8 @@ Expected behavior:
 
 - commands complete successfully;
 - the expected revision is reported as head;
-- upgrade creates `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`;
+- upgrade creates `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`,
+  `llm_invocations`, and `ticket_classifications`;
 - downgrade removes those business tables;
 - re-upgrade restores them;
 - migration metadata remains aligned with SQLAlchemy model metadata.
@@ -703,7 +813,8 @@ docker compose exec postgresql `
   -c "\dt"
 ```
 
-After upgrade, the schema includes `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`.
+After upgrade, the schema includes `workspaces`, `tickets`, `agent_runs`,
+`agent_run_attempts`, `llm_invocations`, and `ticket_classifications`.
 
 Downgrade commands must only run against the local development or test database.
 
@@ -859,15 +970,18 @@ Later implementation phases are expected to add tests for:
 - authenticated tenant isolation;
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
-- structured LLM outputs;
 - retrieval quality and Qdrant indexing;
 - LangGraph orchestration;
 - tool authorization;
 - approval enforcement;
-- token and cost accounting;
-- prompt versioning;
-- prompt regression;
-- evaluation thresholds;
+- prompt version 2 regression comparison;
+- scheduled evaluation and evaluation history persistence;
+- retrieval and generation evaluation beyond structured classification;
+- RAGAS;
 - idempotent side effects for future executors and tools.
 
-Authentication and AI classification remain intentional scope boundaries for the current suite. Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery, deterministic execution, worker process coverage, and workspace-scoped AgentRun inspection are part of the current suite.
+Authentication remains an intentional scope boundary for the current suite.
+Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery,
+deterministic execution, worker process coverage, workspace-scoped AgentRun and
+classification inspection, and offline classification evaluation are part of
+the current suite.

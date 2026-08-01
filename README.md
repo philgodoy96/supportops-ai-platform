@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, and durable logical invocation and accepted classification persistence are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, and offline deterministic classification evaluation are implemented.
 
 The current platform includes:
 
@@ -51,8 +51,11 @@ The current platform includes:
 - duplicate initial scheduling prevention;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
-- safe operational AgentRun metadata without lease or execution fencing identifiers;
-- tenant-safe `404` behavior for missing and cross-workspace AgentRuns;
+- workspace-scoped classification detail and ticket classification history inspection;
+- optional minimal accepted-classification reference on AgentRun detail;
+- AgentRun-scoped logical invocation inspection;
+- safe operational AgentRun, classification, and invocation metadata without lease or execution fencing identifiers;
+- tenant-safe `404` behavior for missing and cross-workspace AgentRuns, classifications, and invocation histories;
 - workspace-scoped ticket retrieval and listing;
 - versioned `/api/v1` business routes;
 - stable expected-error responses;
@@ -67,7 +70,13 @@ The current platform includes:
 - normalized provider failures and bounded repair;
 - token usage mapping and versioned estimated-cost calculation;
 - validated LLM runtime settings;
-- repository, application, worker, AI, and API tests;
+- a versioned synthetic classification dataset;
+- a deterministic classification evaluator;
+- offline scoring of prediction artifacts;
+- an opt-in external-provider evaluation CLI;
+- canonical dataset, prediction, and report provenance;
+- classification inspection integration coverage;
+- repository, application, worker, AI, evaluation, and API tests;
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
@@ -77,7 +86,7 @@ Workspace scoping is a data ownership boundary. It is not authentication or auth
 
 Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `ticket-classification-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status or execute tools. The deterministic baseline remains registered for historical or explicitly scheduled runs and performs no LLM call.
 
-Inspection endpoints report current persisted AgentRun state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Classification inspection APIs and evaluation execution remain planned.
+Inspection endpoints report current persisted AgentRun, classification, and logical invocation state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant.
 
 ## Engineering goals
 
@@ -247,20 +256,31 @@ The repository provides an application-owned LLM Gateway under `supportops.ai` a
 - retryable and terminal Gateway failure translation;
 - explicit provider selection with no cross-provider fallback;
 - no LLM provider initialization in the API process;
-- no classification inspection API yet.
+- workspace-scoped classification detail and ticket classification history;
+- optional minimal accepted-classification reference on AgentRun detail;
+- AgentRun-scoped logical invocation history;
+- offline deterministic evaluation against a versioned synthetic dataset.
 
 Current classification flow:
 
 ```text
 configured AgentRun scheduled
-→ worker claims run
-→ registry dispatches ticket-classification-v1
-→ Gateway structured classification
-→ fenced invocation and classification persistence
-→ fenced AgentRun completion
+→ worker classifies and persists provenance
+→ client inspects classification and logical invocation state
+→ AI engineer evaluates the same prompt/schema boundary offline
 ```
 
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md).
+Implemented inspection routes:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/ticket-classifications/{classification_id}
+GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/classifications
+GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
+```
+
+AgentRun detail includes an optional minimal classification reference.
+
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md).
 
 ### Workspace, ticket, and AgentRun API
 
@@ -270,10 +290,12 @@ Slice 1 exposes versioned business routes under `/api/v1`:
 - workspace-scoped ticket creation, retrieval, and listing;
 - workspace-scoped AgentRun retrieval;
 - workspace-scoped AgentRunAttempt history listing;
-- opaque cursor pagination for ticket listing;
+- workspace-scoped classification detail and ticket classification history;
+- workspace-scoped AgentRun logical invocation history;
+- opaque cursor pagination for ticket listing and classification history;
 - stable expected-error responses for missing resources, conflicts, and invalid cursors;
 - persistence of request and correlation identifiers on accepted tickets;
-- cross-workspace retrieval that returns the same `404` contract as a missing ticket or AgentRun.
+- cross-workspace retrieval that returns the same `404` contract as a missing ticket, AgentRun, or classification.
 
 Current operational flow:
 
@@ -326,11 +348,14 @@ The repository includes:
 - Decimal pricing and unknown-pricing tests;
 - LLM settings and secret-handling tests;
 - classification domain and ORM tests;
+- classification inspection projection and API tests;
 - registry dispatch tests;
 - worker composition and lifecycle tests;
 - fenced classification repository tests;
 - PostgreSQL mock classification workflow integration;
 - retry and recovery idempotency coverage;
+- classification inspection integration coverage;
+- evaluation dataset, metrics, predictor, runner, and CLI unit coverage;
 - Alembic upgrade, downgrade, and metadata-parity coverage for classification tables;
 - settings validation tests;
 - lifecycle tests;
@@ -343,17 +368,17 @@ The repository includes:
 - Docker image build validation;
 - GitHub Actions quality gates.
 
-Normal unit and integration tests do not require an OpenAI API key or paid external requests.
+Normal unit and integration tests do not require an OpenAI API key or paid external requests. OpenAI evaluation remains an explicit manual operation.
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules, a `supportops.worker` process entry point, and the cross-cutting `supportops.ai` foundation. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution and persistence. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, and the offline `supportops.evaluation.ticket_classification` package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
 
 Future modules or extensions will introduce:
 
-- classification inspection APIs;
-- evaluation datasets and execution;
-- evidence-driven prompt iteration;
+- evidence-driven prompt version 2;
+- prompt regression comparison across versions;
+- scheduled evaluation and evaluation history persistence;
 - internal runbook ingestion;
 - semantic retrieval and Qdrant indexing;
 - LangGraph orchestration;
@@ -377,6 +402,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 ├── docs/
 │   ├── architecture/
 │   │   ├── agent-run-scheduling.md
+│   │   ├── classification-evaluation.md
 │   │   ├── llm-gateway.md
 │   │   ├── overview.md
 │   │   ├── runtime-topology.md
@@ -395,6 +421,11 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       ├── environment-variables.md
 │       ├── local-setup.md
 │       └── testing.md
+├── evals/
+│   └── ticket-classification/
+│       ├── README.md
+│       └── datasets/
+│           └── ticket-classification-eval-v1.jsonl
 ├── src/
 │   └── supportops/
 │       ├── ai/
@@ -411,12 +442,15 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   ├── router.py
 │       │   └── state.py
 │       ├── application/
+│       │   ├── agent_run_inspection.py
 │       │   └── ticket_intake.py
 │       ├── core/
 │       │   ├── logging.py
 │       │   ├── request_context.py
 │       │   ├── settings.py
 │       │   └── transactions.py
+│       ├── evaluation/
+│       │   └── ticket_classification/
 │       ├── infrastructure/
 │       │   ├── postgresql/
 │       │   └── qdrant/
@@ -427,6 +461,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
 │       │   ├── ticket_classifications/
+│       │   │   ├── api/
 │       │   │   ├── application/
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
@@ -450,7 +485,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules include domain, application, and infrastructure layers as required. The `agent_runs` module also includes read-only inspection routes. Cross-module ticket intake lives under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. Alembic migrations create workspace, ticket, AgentRun, invocation, and classification tables.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, and classification tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
 
 ## Local setup
 
@@ -511,6 +546,62 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready
 Workspace and ticket request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
 
 The complete setup procedure is documented in [`docs/development/local-setup.md`](docs/development/local-setup.md).
+
+## Classification evaluation
+
+Offline classification evaluation uses the versioned synthetic dataset and the
+`supportops-evaluate-classification` CLI. Evaluation accesses neither PostgreSQL
+nor Qdrant. Generated outputs belong under ignored `artifacts/`. Versioned
+datasets remain committed under `evals/`.
+
+Mock pipeline:
+
+```powershell
+uv run supportops-evaluate-classification run `
+  --provider mock `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions-output `
+    artifacts/classification-mock-predictions.jsonl `
+  --output `
+    artifacts/classification-mock-report.json
+```
+
+Mock evaluation validates pipeline wiring. It is not a model-quality benchmark.
+
+Offline scoring:
+
+```powershell
+uv run supportops-evaluate-classification score `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions `
+    artifacts/classification-mock-predictions.jsonl `
+  --output `
+    artifacts/classification-mock-rescored-report.json
+```
+
+`score` initializes no provider and makes no network request.
+
+OpenAI evaluation:
+
+```powershell
+uv run supportops-evaluate-classification run `
+  --provider openai `
+  --allow-external-provider `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions-output `
+    artifacts/classification-openai-predictions.jsonl `
+  --output `
+    artifacts/classification-openai-report.json
+```
+
+OpenAI evaluation requires `--allow-external-provider` and a configured API key.
+Evaluation results do not alter production prompt selection automatically.
+
+Classification inspection and evaluation architecture is documented in
+[`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md).
 
 ## Configuration
 
@@ -710,11 +801,12 @@ Implemented:
 - request and correlation identifier persistence;
 - atomic ticket intake with initial AgentRun scheduling;
 - durable structured classification;
-- durable invocation and accepted classification persistence.
+- durable invocation and accepted classification persistence;
+- workspace-scoped classification detail and history inspection;
+- AgentRun classification reference and logical invocation inspection.
 
 Planned:
 
-- classification inspection APIs;
 - operational auditability beyond request and correlation identifiers.
 
 ### Asynchronous processing
@@ -769,14 +861,16 @@ Implemented:
 - workflow executor registry;
 - durable ticket-classification execution;
 - `TicketClassification` persistence;
-- `LLMInvocation` persistence.
+- `LLMInvocation` persistence;
+- classification inspection API;
+- synthetic classification dataset;
+- deterministic classification evaluator;
+- opt-in real-model evaluation.
 
 Planned:
 
-- classification inspection API;
-- synthetic evaluation dataset and evaluator;
-- opt-in real-model evaluation;
 - evidence-driven prompt version 2;
+- prompt regression comparison across versions;
 - cross-provider fallback after baseline behavior is observable;
 - operational cost reporting and invoice reconciliation.
 
@@ -804,16 +898,24 @@ Planned:
 Implemented:
 
 - token usage and estimated-cost persistence with durable invocation provenance;
-- prompt `ticket-classification` version 1.
+- prompt `ticket-classification` version 1;
+- versioned synthetic classification dataset;
+- deterministic classification evaluator;
+- offline scoring;
+- opt-in external-provider evaluation CLI;
+- canonical dataset, prediction, and report provenance.
 
 Planned:
 
 - operational cost reporting and invoice reconciliation;
 - AI tracing;
-- evidence-driven prompt iteration;
+- evidence-driven prompt version 2;
+- prompt regression comparison across versions;
+- scheduled evaluation;
+- evaluation history persistence;
 - retrieval evaluation;
-- generation evaluation;
-- evaluation execution and prompt regression comparison.
+- generation evaluation beyond structured classification;
+- RAGAS.
 
 ## Intentionally deferred capabilities
 
@@ -827,9 +929,10 @@ The following capabilities remain deferred to preserve architectural focus and a
 - WebSockets and Server-Sent Events;
 - frontend monitoring applications;
 - Redis, Celery, Kafka, and SQS;
-- classification inspection APIs;
-- evaluation execution;
 - evidence-driven prompt version 2;
+- prompt regression comparison across versions;
+- scheduled evaluation;
+- evaluation history persistence;
 - cross-provider fallback and automatic model routing;
 - Anthropic provider;
 - operational cost reporting and invoice reconciliation;
@@ -841,7 +944,7 @@ The following capabilities remain deferred to preserve architectural focus and a
 - AI observability integrations;
 - Langfuse integration;
 - RAGAS evaluation;
-- evaluation and regression testing frameworks;
+- retrieval and generation evaluation beyond structured classification;
 - OpenTelemetry;
 - Prometheus and Grafana;
 - frontend applications;
@@ -853,7 +956,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway and durable ticket-classification workflow are implemented. Classification inspection APIs, evaluation execution, evidence-driven prompt version 2, cross-provider fallback, and operational cost reporting remain intentionally separated into later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, classification inspection, and offline evaluation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, and retrieval evaluation remain intentionally separated into later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
@@ -864,6 +967,7 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Transactional AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
 - [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
 - [Durable ticket classification](docs/architecture/ticket-classification.md)
+- [Classification inspection and evaluation](docs/architecture/classification-evaluation.md)
 - [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)
