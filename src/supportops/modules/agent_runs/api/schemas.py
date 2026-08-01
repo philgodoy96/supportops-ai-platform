@@ -255,44 +255,27 @@ class AgentRunLLMInvocationResponse(BaseModel):
 
         return cls(
             id=invocation.id,
-            agent_run_attempt_id=(
-                invocation.agent_run_attempt_id
-            ),
+            agent_run_attempt_id=(invocation.agent_run_attempt_id),
             attempt_number=invocation.attempt_number,
-            invocation_sequence=(
-                invocation.invocation_sequence
-            ),
+            invocation_sequence=(invocation.invocation_sequence),
             status=invocation.status,
             provider=invocation.provider,
             model=invocation.model,
             prompt=AgentRunLLMInvocationPromptResponse(
                 id=invocation.prompt_id,
                 version=invocation.prompt_version,
-                content_hash=(
-                    invocation.prompt_content_hash
-                ),
+                content_hash=(invocation.prompt_content_hash),
             ),
             schema_version=invocation.schema_version,
             usage=usage,
             estimated_cost=(
                 AgentRunLLMInvocationEstimatedCostResponse(
-                    pricing_catalog_version=(
-                        invocation.pricing_catalog_version
-                    ),
+                    pricing_catalog_version=(invocation.pricing_catalog_version),
                     pricing_found=invocation.pricing_found,
-                    input_cost_usd=(
-                        invocation.estimated_input_cost_usd
-                    ),
-                    cached_input_cost_usd=(
-                        invocation
-                        .estimated_cached_input_cost_usd
-                    ),
-                    output_cost_usd=(
-                        invocation.estimated_output_cost_usd
-                    ),
-                    total_cost_usd=(
-                        invocation.estimated_total_cost_usd
-                    ),
+                    input_cost_usd=(invocation.estimated_input_cost_usd),
+                    cached_input_cost_usd=(invocation.estimated_cached_input_cost_usd),
+                    output_cost_usd=(invocation.estimated_output_cost_usd),
+                    total_cost_usd=(invocation.estimated_total_cost_usd),
                 )
             ),
             latency_ms=invocation.latency_ms,
