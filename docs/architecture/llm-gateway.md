@@ -10,13 +10,16 @@ application behavior and probabilistic model execution. Business modules depend
 on platform-defined contracts, schemas, errors, prompt provenance, and cost
 estimates rather than importing provider SDK types directly.
 
-This document describes the gateway foundation implemented before durable ticket
-classification workflow integration. Persistence, worker composition, and
-classification APIs are introduced in subsequent delivery boundaries.
+This document describes the application-owned LLM Gateway and its use by the
+durable ticket-classification workflow. Classification inspection APIs and
+evaluation execution remain separate delivery boundaries.
+
+Durable classification behavior is documented in
+[`ticket-classification.md`](ticket-classification.md).
 
 ## Current implementation status
 
-The current gateway foundation provides:
+The current gateway and classification integration provide:
 
 - a provider-independent asynchronous request and response contract;
 - application-owned token usage metadata;
@@ -31,20 +34,18 @@ The current gateway foundation provides:
 - deterministic prompt content hashes;
 - a versioned pricing catalog;
 - Decimal-based estimated-cost calculation;
-- validated provider, model, timeout, retry, repair, and workflow settings.
+- validated provider, model, timeout, retry, repair, and workflow settings;
+- process-scoped provider and Gateway composition in the worker;
+- session-scoped classification executor dispatch;
+- durable `LLMInvocation` persistence;
+- durable accepted `TicketClassification` persistence.
 
-The current foundation does not yet:
+The current delivery does not yet:
 
-- compose the provider inside the worker process;
-- dispatch the ticket-classification workflow;
-- persist LLM invocation records;
-- persist accepted ticket classifications;
 - expose classification inspection APIs;
-- emit the final workflow-level structured log events;
-- execute real-model evaluation datasets.
-
-These capabilities depend on the gateway foundation but remain separate,
-reviewable changes.
+- execute real-model evaluation datasets;
+- introduce prompt version 2;
+- provide cross-provider fallback or automatic model routing.
 
 ## Architectural boundary
 
@@ -103,6 +104,11 @@ src/supportops/ai/
 
 This structure is intentionally narrow. It supports the ticket-classification
 workflow without introducing a generic AI framework.
+
+Durable classification execution and persistence live under
+`supportops.modules.ticket_classifications`. That module consumes gateway
+contracts and does not move provider, prompt, schema, or pricing
+responsibilities into the classification package.
 
 ## Request flow
 
@@ -389,28 +395,27 @@ gpt-5-nano
 The model identifier remains deployment-owned and is not distributed across
 business modules.
 
-Moving aliases may receive provider updates. Every invocation must persist the
-exact configured identifier when durable invocation persistence is introduced.
-A stable snapshot can be selected through configuration when reproducibility
-requirements justify it.
+Moving aliases may receive provider updates. Every durable invocation persists
+the exact configured identifier. A stable snapshot can be selected through
+configuration when reproducibility requirements justify it.
 
 ### Provider lifecycle
 
 The OpenAI adapter supports explicit asynchronous shutdown.
 
-The intended process lifecycle is:
+The process lifecycle is:
 
 ```text
 worker startup
 → create one configured provider client
-→ reuse the client across executions
-→ close the client during worker shutdown
+→ create one LLM Gateway
+→ reuse provider and Gateway across executions
+→ close the provider during worker shutdown
 ```
 
 The adapter does not create a new HTTP client for each ticket.
 
-Worker composition is introduced with the classification workflow. The API
-process does not initialize OpenAI merely because the worker can use it.
+The API process does not initialize OpenAI merely because the worker can use it.
 
 The mock provider owns no external network resource but implements the same
 asynchronous lifecycle contract.
@@ -435,7 +440,7 @@ Provider failures are converted to stable application-owned errors.
 Error strings contain only stable safe summaries.
 
 Raw SDK messages are not application contracts and are not carried into public
-responses or future persistence records.
+responses or durable persistence records.
 
 Provider request identifiers may be retained internally for operational
 traceability but are not part of the safe error summary.
@@ -519,8 +524,8 @@ It is responsible for:
 
 The gateway does not schedule AgentRun retries.
 
-Classification workflow integration translates final gateway failures into the
-existing retryable or terminal AgentRun execution contract.
+The classification executor translates final gateway failures into the existing
+retryable or terminal AgentRun execution contract.
 
 ### Retry multiplication
 
@@ -600,8 +605,10 @@ Gateway failures preserve both:
 This allows the classification workflow to persist initial and repair attempts
 without reconstructing provider behavior.
 
-Invocation traces are currently in-memory application results. Durable
-`LLMInvocation` persistence is introduced with the classification workflow.
+The Gateway returns in-memory traces. `TicketClassificationExecutor`
+materializes each trace as a durable `LLMInvocation`. Invocation sequence is
+scoped to an `AgentRunAttempt`. The accepted classification references the exact
+successful invocation UUID.
 
 ## Token usage and estimated cost
 
@@ -648,8 +655,9 @@ time.
 Estimated values use deterministic decimal rounding. Provider invoices remain
 the authoritative billing source.
 
-The pricing catalog version used for each estimate must be persisted with the
-future invocation record.
+The pricing catalog version used for each estimate is persisted with the
+durable invocation record. Mock cost is an explicit known zero. Unknown pricing
+persists null estimated costs while preserving token usage.
 
 ## Runtime configuration
 
@@ -678,6 +686,12 @@ SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES=1
 SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS=1
 SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION=ticket-classification-v1
 ```
+
+`SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls workflow version
+assignment for newly scheduled AgentRuns. Provider and model settings control
+worker runtime composition. The worker always composes the versioned executor
+registry; executor selection is not a worker-executor deployment variable. The
+API validates shared settings but does not initialize the LLM provider.
 
 The OpenAI API key:
 
@@ -763,9 +777,9 @@ The gateway owns:
 - repair exhaustion;
 - invocation trace construction.
 
-The future classification executor owns:
+The classification executor owns:
 
-- persistence of invocation traces;
+- persistence of invocation traces before failure translation;
 - translation into retryable or terminal AgentRun execution errors;
 - accepted classification persistence;
 - idempotent completion when a classification already exists.
@@ -783,11 +797,16 @@ The AgentRun processor continues to own:
 
 A model call is an external side effect.
 
-When durable workflow integration is introduced, the provider call will execute
-outside a database transaction.
+The provider call executes outside a database transaction.
 
-A process can fail after the provider completes but before invocation usage and
-classification data commit. Recovery may therefore repeat the provider call.
+Delivery semantics are:
+
+- at-least-once external model invocation;
+- at most one accepted classification per AgentRun;
+- a crash after the provider completes but before classification persistence may
+  repeat the provider call;
+- a crash after classification persistence is recovered without another provider
+  call when an accepted classification already exists.
 
 The platform does not claim:
 
@@ -795,7 +814,7 @@ The platform does not claim:
 - exactly-once provider cost;
 - distributed transaction atomicity across PostgreSQL and a provider.
 
-Database uniqueness can prevent duplicate accepted classifications for one
+Database uniqueness prevents duplicate accepted classifications for one
 AgentRun. It cannot eliminate every repeated external call across the crash
 gap.
 
@@ -834,3 +853,9 @@ a concrete regression or improvement opportunity.
 - [`0004-use-a-postgresql-backed-worker-model.md`](../decisions/0004-use-a-postgresql-backed-worker-model.md)
 - [`0005-keep-ai-observability-behind-an-adapter.md`](../decisions/0005-keep-ai-observability-behind-an-adapter.md)
 - [`0007-use-an-application-owned-llm-gateway.md`](../decisions/0007-use-an-application-owned-llm-gateway.md)
+
+## Related architecture
+
+- [`ticket-classification.md`](ticket-classification.md)
+- [`agent-run-scheduling.md`](agent-run-scheduling.md)
+- [`runtime-topology.md`](runtime-topology.md)

@@ -2,18 +2,19 @@
 
 ## Purpose
 
-This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, and PostgreSQL worker phase.
+This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, and durable ticket-classification phase.
 
 The topology is intentionally small. It provides the operational foundation required for reliable local development, testing, and controlled asynchronous processing without introducing premature distributed infrastructure.
 
 ## Current runtime components
 
-The current runtime is designed around four components:
+The current runtime is designed around these components:
 
 - the FastAPI application process;
 - the PostgreSQL AgentRun worker process;
 - PostgreSQL;
-- Qdrant.
+- Qdrant;
+- the configured LLM provider used only by the worker.
 
 ```mermaid
 flowchart LR
@@ -22,12 +23,16 @@ flowchart LR
     Worker[PostgreSQL Worker Process]
     PostgreSQL[(PostgreSQL)]
     Qdrant[(Qdrant)]
+    Provider[Configured LLM Provider]
 
     Client -->|HTTP| API
     API -->|Async SQLAlchemy / asyncpg| PostgreSQL
     Worker -->|Async SQLAlchemy / asyncpg| PostgreSQL
     API -->|Async Qdrant client| Qdrant
+    Worker -->|mock or OpenAI| Provider
 ```
+
+The worker may use the deterministic mock provider with no network, or the OpenAI provider over HTTPS. The API has no provider edge. Qdrant remains outside worker behavior.
 
 The API and worker processes start independently from Docker Compose during the default local development workflow.
 
@@ -62,7 +67,7 @@ The application may remain alive when PostgreSQL or Qdrant is unavailable. Depen
 
 Invalid required configuration remains a startup error.
 
-Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun in the same application-owned transaction. The API does not claim runs, acquire leases, execute workflows, or recover stale ownership. Business routes do not call Qdrant.
+Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun with the configured workflow version in the same application-owned transaction. The API does not claim runs, acquire leases, execute workflows, recover stale ownership, or call the model. Business routes do not call Qdrant.
 
 ## Worker process
 
@@ -72,14 +77,16 @@ The worker process owns:
 
 - loading and validating shared settings at process startup;
 - creating a process-owned PostgreSQL engine and session factory;
+- creating one process-scoped mock or OpenAI provider;
+- creating one process-scoped LLM Gateway;
 - resolving configured or generated worker identity;
-- composing the deterministic baseline executor and retry policy;
+- composing a session-scoped versioned executor registry and classification repositories per cycle;
 - running continuous recovery, claim, and processing cycles;
 - emitting structured operational cycle logs;
 - cooperative SIGINT and SIGTERM shutdown;
-- disposing the SQLAlchemy engine on exit.
+- closing the provider and disposing the SQLAlchemy engine on exit.
 
-The worker uses PostgreSQL as its durable work queue and source of truth. It does not initialize or depend on Qdrant.
+Provider and Gateway instances are reused across cycles. The worker uses PostgreSQL as its durable work queue and source of truth. It does not initialize or depend on Qdrant.
 
 Worker identity may be configured through `SUPPORTOPS_WORKER_ID` or generated from hostname, process ID, and a UUID suffix.
 
@@ -97,10 +104,14 @@ PostgreSQL currently owns:
 - Alembic migrations;
 - `workspaces` and `tickets` tables;
 - `agent_runs` and `agent_run_attempts` tables;
+- `llm_invocations` and `ticket_classifications` tables;
 - the workspace ownership foreign key on tickets;
-- composite workspace and ticket ownership for AgentRun records;
+- composite workspace and ticket ownership for AgentRun, invocation, and classification records;
 - uniqueness constraints for workspace slugs and workspace-scoped external references;
 - unique initial trigger enforcement for AgentRun scheduling;
+- one invocation sequence per AgentRunAttempt;
+- one accepted classification per AgentRun with accepted-invocation provenance;
+- token usage and estimated-cost provenance on invocation records;
 - the workspace-leading ticket listing index;
 - claim and recovery indexes and row-lock coordination;
 - lease ownership, retry scheduling, and attempt history.
@@ -115,7 +126,7 @@ Future phases may extend PostgreSQL ownership for:
 
 - approvals;
 - audit records;
-- usage events.
+- operational cost reporting.
 
 ## Session and transaction lifetimes
 
@@ -130,12 +141,15 @@ Future phases may extend PostgreSQL ownership for:
 ### Worker process
 
 - the SQLAlchemy engine and session factory are process-owned and independent from the API process;
+- the configured provider and LLM Gateway are process-owned and reused across cycles;
 - each polling cycle opens one new `AsyncSession` and closes it when the cycle completes;
 - recovery uses one short transaction;
 - claim uses one short transaction that commits before executor work begins;
 - ticket loading uses one short transaction;
-- fenced success or failure persistence uses one short transaction;
-- executor work runs outside database transactions;
+- existing-classification lookup uses one short transaction;
+- provider calls run outside database transactions;
+- fenced invocation and classification persistence uses one short transaction;
+- fenced AgentRun success or failure persistence uses a separate short transaction;
 - idle waits do not hold open transactions.
 
 ## Qdrant runtime role
@@ -167,12 +181,12 @@ sequenceDiagram
     API->>PostgreSQL: Begin transaction
     API->>PostgreSQL: Validate workspace
     API->>PostgreSQL: Insert Ticket
-    API->>PostgreSQL: Insert initial AgentRun
+    API->>PostgreSQL: Insert initial AgentRun with configured workflow version
     API->>PostgreSQL: Commit
-    API-->>Client: 201 Created with queued processing_run
+    API-->>Client: 201 Created with Ticket response
 ```
 
-Ticket acceptance and asynchronous processing success are separate outcomes. The API returns after the scheduling transaction commits. The HTTP request does not execute the workflow. The response includes a minimal `processing_run` projection with status `queued`.
+Ticket acceptance and asynchronous processing success are separate outcomes. The API returns the existing Ticket response after the scheduling transaction commits. The HTTP request does not execute the workflow or call the model. The response does not include a `processing_run` projection or classification result.
 
 ## Worker cycle flow
 
@@ -194,8 +208,8 @@ flowchart TD
     Recover[Recover one expired running lease]
     Claim[Claim one available AgentRun]
     Idle[Idle cycle]
-    Process[Execute claimed run outside transactions]
-    Persist[Persist fenced success or failure]
+    Process[Dispatch claimed run outside transactions]
+    Persist[Persist fenced classification and AgentRun outcome]
     Log[Emit structured cycle log]
     Close[Close session]
 
@@ -241,26 +255,38 @@ A successful claim:
 
 ## Executor outside transaction
 
-The current executor is `deterministic-ticket-processing`.
+The worker dispatches exact workflow name and version through the session-scoped executor registry. No version fallback and no provider fallback exist.
 
-The persisted workflow contract is:
+Registered versions include:
+
+```text
+ticket-processing / deterministic-baseline-v1
+ticket-processing / ticket-classification-v1
+```
+
+The persisted initial workflow contract is:
 
 ```text
 workflow_name = ticket-processing
-workflow_version = deterministic-baseline-v1
+workflow_version = configured value
 trigger_key = initial-ticket-processing
 ```
 
-The deterministic baseline validates that contract and performs no external I/O, LLM call, retrieval, or ticket classification. It exists to validate the durable execution architecture independently from future AI behavior.
+The local default configured value is `ticket-classification-v1`. The deterministic baseline remains supported for historical or explicitly scheduled runs and performs no external I/O, LLM call, retrieval, or ticket classification.
 
 After the claim transaction commits:
 
 1. the processor loads the ticket in a short transaction;
-2. the executor runs outside database transactions under a bounded timeout;
-3. typed retryable and terminal failures are handled explicitly;
-4. unexpected exceptions become sanitized retryable failures;
-5. raw exception text is not persisted;
-6. success or failure is persisted in a separate fenced transaction.
+2. the registry selects the executor for the stored workflow name and version;
+3. the classification executor checks for an existing accepted classification;
+4. when needed, the provider call runs outside database transactions under a bounded timeout;
+5. invocation and classification records persist in a separate fenced transaction;
+6. typed retryable and terminal failures are handled explicitly;
+7. unexpected exceptions become sanitized retryable failures;
+8. raw exception text is not persisted;
+9. AgentRun success or failure is persisted in a separate fenced transaction.
+
+Unknown workflow or version values are terminal.
 
 ## Fenced completion transaction
 
@@ -313,7 +339,9 @@ Shutdown behavior:
 - the idle wait is interruptible;
 - the active cycle may finish within the configured shutdown grace period;
 - the loop task is cancelled when the grace period is exceeded;
+- the LLM provider is closed during shutdown;
 - the SQLAlchemy engine is disposed during shutdown;
+- engine disposal is attempted even after provider cleanup failure;
 - structured logs record shutdown request, grace exceeded, and stop events.
 
 ## Application lifecycle
@@ -483,8 +511,8 @@ Expected execution model:
 4. apply the current Alembic migration head;
 5. start the FastAPI process with `uv run`;
 6. start the worker with `uv run supportops-worker`;
-7. create a ticket through the API and observe a queued `processing_run`;
-8. observe structured worker cycle logs;
+7. create a ticket through the API and observe the Ticket response;
+8. observe structured worker cycle logs for claim and classification execution;
 9. stop the worker with Ctrl+C and verify graceful shutdown logs;
 10. run local quality and test commands.
 
@@ -542,6 +570,9 @@ Unit tests validate:
 - transactional ticket-intake orchestration;
 - retry policy, claim contracts, fencing, recovery, processor, and worker cycles;
 - deterministic executor behavior;
+- versioned registry dispatch;
+- classification executor and Gateway failure translation;
+- worker composition and lifecycle;
 - worker identity and graceful shutdown;
 - workspace and ticket API schemas;
 - opaque cursor encoding.
@@ -571,7 +602,7 @@ Integration tests validate:
 - real Qdrant connectivity;
 - readiness success;
 - readiness failure;
-- Alembic upgrade, downgrade, re-upgrade, and metadata parity;
+- Alembic upgrade, downgrade, re-upgrade, and metadata parity for classification tables;
 - workspace repository persistence;
 - ticket repository persistence and workspace scoping;
 - concurrency-sensitive uniqueness enforcement;
@@ -579,6 +610,9 @@ Integration tests validate:
 - PostgreSQL claim ordering and `SKIP LOCKED` concurrency;
 - fenced transitions and expired lease recovery;
 - processor transaction separation;
+- mock classification workflow integration;
+- fenced invocation and classification persistence;
+- retry and recovery idempotency after classification commit;
 - workspace and ticket HTTP API behavior;
 - stable expected-error responses;
 - opaque cursor pagination.
@@ -643,7 +677,10 @@ The failure should be explicit and must not expose secret values.
 Worker construction also rejects invalid timing relationships:
 
 - lease duration must exceed execution timeout by at least five seconds;
-- retry maximum must not be smaller than retry base.
+- retry maximum must not be smaller than retry base;
+- the logical LLM invocation budget must fit inside the worker execution timeout with a five-second safety margin.
+
+Provider composition startup failures prevent worker construction when the selected provider cannot be created.
 
 ### PostgreSQL unavailable
 
@@ -657,7 +694,7 @@ Expected API behavior:
 
 Expected worker behavior:
 
-- the worker depends on PostgreSQL for recovery, claim, and outcome persistence;
+- the worker depends on PostgreSQL for recovery, claim, classification persistence, and outcome persistence;
 - unavailable PostgreSQL surfaces as a runtime failure through the worker process path.
 
 ### Qdrant unavailable
@@ -678,11 +715,21 @@ A slow API dependency check must terminate within the configured health-check ti
 
 The readiness response reports the dependency as unhealthy without waiting indefinitely.
 
+### Provider and classification failures
+
+Retryable provider failures translate into retryable AgentRun execution failures while attempt budget remains.
+
+Terminal provider failures translate into terminal AgentRun execution failures.
+
+If the lease is lost before classification persistence commits, the fenced write is rejected and does not become the accepted classification.
+
+A crash after the provider call but before classification persistence may repeat the provider call on recovery. A crash after classification persistence recovers without another provider call when an accepted classification already exists. Exactly-once provider cost is not claimed.
+
 ### Shutdown failure
 
 A resource cleanup failure must be logged with exception information.
 
-Shutdown handling should continue attempting to release other owned resources where safe.
+Shutdown handling closes the provider and continues attempting engine disposal even after provider cleanup failure.
 
 ## Network and security boundaries
 
@@ -726,6 +773,8 @@ The current topology excludes:
 - managed cloud databases;
 - a Docker Compose worker service;
 - ingestion workers;
-- AI provider calls.
+- Anthropic provider calls;
+- cross-provider fallback;
+- automatic model routing.
 
-These components are not introduced until a concrete capability and operational requirement justify them. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL provides transactional durability and adequate local and portfolio scope for this phase.
+These components are not introduced until a concrete capability and operational requirement justify them. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL provides transactional durability and adequate local and portfolio scope for this phase. Configured mock or OpenAI provider calls are part of the worker topology when classification runs execute.
