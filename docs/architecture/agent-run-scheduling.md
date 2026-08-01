@@ -32,7 +32,7 @@ sequenceDiagram
 
     alt Both inserts succeed
         Application->>PostgreSQL: Commit
-        Application-->>API: Ticket and processing reference
+        Application-->>API: Ticket
         API-->>Client: 201 Created
     else Any operation fails
         Application->>PostgreSQL: Roll back
@@ -71,19 +71,21 @@ Each newly created ticket receives one initial run with the following contract:
 
 ```text
 workflow_name = ticket-processing
-workflow_version = deterministic-baseline-v1
+workflow_version = configured value
 trigger_key = initial-ticket-processing
 status = queued
 attempt_count = 0
 ```
 
-The workflow version identifies the deterministic baseline executor used by the
-worker. That executor validates the workflow contract and performs no external
-I/O, LLM call, retrieval, or ticket classification. It exists to validate the
-durable execution architecture independently from future AI behavior.
+The configured value comes from:
 
-A queued run does not indicate that AI classification has occurred. It records
-only that durable processing has been scheduled.
+```text
+SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION
+```
+
+The local default is `ticket-classification-v1`. `AgentRun.create_initial()` requires the workflow version as an explicit factory input. The stored version is immutable for that run. Historical runs preserve their original versions, including `deterministic-baseline-v1`.
+
+The worker registry must contain the stored workflow version. Exact name and version dispatch selects the executor. Unknown workflow or version values are terminal. A queued classification run records that durable processing has been scheduled; classification completion remains asynchronous and is not reported by ticket creation.
 
 ## Queued state and availability
 
@@ -105,19 +107,21 @@ runs become claim-eligible only after their availability time is due.
 Once the API transaction commits:
 
 1. the ticket exists with status `open`;
-2. the initial `AgentRun` exists with status `queued`;
+2. the initial `AgentRun` exists with status `queued` and the configured workflow
+   version;
 3. no `AgentRunAttempt` has been created yet;
-4. the HTTP response returns a minimal `processing_run` projection;
+4. the HTTP response returns the existing Ticket response shape;
 5. the separate worker process becomes responsible for recovery, claim,
    execution, and fenced outcome persistence;
 6. clients may inspect the persisted `AgentRun` and attempt history through
-   workspace-scoped read-only endpoints.
+   workspace-scoped read-only endpoints when the AgentRun identifier is
+   otherwise known.
 
-The API does not claim runs, acquire leases, execute the workflow, or report
-final processing success in the ticket creation response.
+The API does not claim runs, acquire leases, execute the workflow, call the
+model, or report final processing success in the ticket creation response.
 
 Inspection endpoints report current persisted state. They do not guarantee
-future completion.
+future completion. Classification inspection APIs remain planned.
 
 ## Worker claim eligibility
 
@@ -162,13 +166,31 @@ that commit.
 After claim commit, the worker:
 
 1. loads the ticket in a short transaction;
-2. runs the configured executor outside database transactions;
+2. dispatches the exact workflow name and version through the executor registry
+   outside database transactions;
 3. bounds execution with a timeout;
 4. persists success or failure in a separate fenced transaction.
 
-The current executor is `deterministic-ticket-processing`. Typed retryable and
-terminal failures are handled explicitly. Unexpected exceptions become
-sanitized retryable failures. Raw exception text is not persisted.
+Registered versions include:
+
+```text
+ticket-processing / deterministic-baseline-v1
+ticket-processing / ticket-classification-v1
+```
+
+The deterministic baseline validates the durable execution contract and performs
+no external I/O, LLM call, retrieval, or ticket classification.
+
+The classification workflow calls the configured provider outside database
+transactions, persists durable invocations and the accepted classification under
+lease fencing, and then returns to the processor for fenced AgentRun completion.
+Classification behavior is documented in
+[`ticket-classification.md`](ticket-classification.md).
+
+Typed retryable and terminal failures are handled explicitly. Unexpected
+exceptions become sanitized retryable failures. Raw exception text is not
+persisted. Unknown workflow or version values are terminal. No version fallback
+and no provider fallback exist.
 
 ## Success, failure, and retry transitions
 
@@ -300,43 +322,28 @@ attempt while preserving the run correlation identifier.
 
 ## Ticket creation response
 
-The ticket creation endpoint returns:
+The ticket creation endpoint returns the existing Ticket response:
 
 ```json
 {
-  "ticket": {
-    "id": "6e688ded-cf71-4c01-b87f-591cc014af03",
-    "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
-    "subject": "Unable to access billing",
-    "description": "The dashboard returns an access error.",
-    "status": "open",
-    "external_reference": "SUP-1042",
-    "ingestion_request_id": "dfe63a63-031c-4ea9-89dd-d556bd51766a",
-    "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
-    "created_at": "2026-07-31T12:00:00Z",
-    "updated_at": "2026-07-31T12:00:00Z"
-  },
-  "processing_run": {
-    "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
-    "status": "queued",
-    "workflow_name": "ticket-processing",
-    "workflow_version": "deterministic-baseline-v1"
-  }
+  "id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+  "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+  "subject": "Unable to access billing",
+  "description": "The dashboard returns an access error.",
+  "status": "open",
+  "external_reference": "SUP-1042",
+  "ingestion_request_id": "dfe63a63-031c-4ea9-89dd-d556bd51766a",
+  "correlation_id": "db320c15-e7de-4b36-8b22-11b96b3c68de",
+  "created_at": "2026-07-31T12:00:00Z",
+  "updated_at": "2026-07-31T12:00:00Z"
 }
 ```
 
 The endpoint returns `201 Created` because the ticket itself has been created
-successfully. Processing remains asynchronous. The response does not report
-final processing success.
-
-The minimal processing reference intentionally excludes:
-
-- lease ownership;
-- lease tokens;
-- retry counters;
-- error summaries;
-- attempt history;
-- internal persistence state.
+successfully. The AgentRun is persisted atomically in the same transaction and
+can be inspected through existing AgentRun endpoints when its identifier is
+otherwise known. The response does not expose a `processing_run` projection,
+classification result, or final processing success.
 
 Detailed run inspection is available through workspace-scoped read-only
 endpoints:
@@ -348,9 +355,9 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/attempts
 
 ## Inspection after scheduling
 
-After ticket creation returns `processing_run`, the client can:
+After ticket creation, the client can:
 
-1. read the `AgentRun`;
+1. read the `AgentRun` when its identifier is otherwise known;
 2. inspect status and retry budget;
 3. inspect ordered attempt history;
 4. distinguish `queued`, `running`, `retry_scheduled`, `succeeded`, and
@@ -360,6 +367,7 @@ After ticket creation returns `processing_run`, the client can:
 The worker updates durable state through claim, execution, and fenced outcome
 persistence. Inspection endpoints expose that persisted lifecycle. They are
 observational only and cannot alter retries, leases, or state transitions.
+Classification inspection APIs remain planned.
 
 Public `AgentRun` fields include ownership, workflow identity, status, retry
 budget, availability and completion timestamps, safe `last_error` metadata,
@@ -423,18 +431,22 @@ The current implementation provides:
 
 - durable initial work creation;
 - transactional ticket and run persistence;
+- configured classification scheduling with local default
+  `ticket-classification-v1`;
 - database-enforced workspace ownership;
 - duplicate initial scheduling protection;
-- stable initial workflow identity;
-- minimal processing references in the ticket creation response;
+- stable workflow identity with immutable stored versions;
+- exact versioned registry dispatch;
+- durable classification worker execution;
+- durable invocation and accepted classification persistence;
 - handoff to PostgreSQL worker claim, execution, fencing, retry, and recovery;
 - workspace-scoped AgentRun and attempt-history inspection;
 - safe operational metadata projections that omit fencing identifiers;
 - integration coverage for commit and rollback behavior.
 
-Manual retry, cancellation, lease revocation, worker administration, global
-AgentRun listing, status filtering, pagination across runs, WebSockets,
-Server-Sent Events, and frontend monitoring remain intentionally deferred.
-Redis, Celery, Kafka, SQS, and an outbox remain intentionally deferred because
-PostgreSQL already provides transactional durability and adequate local and
-portfolio scope for this phase.
+Classification inspection APIs remain planned. Manual retry, cancellation,
+lease revocation, worker administration, global AgentRun listing, status
+filtering, pagination across runs, WebSockets, Server-Sent Events, and
+frontend monitoring remain intentionally deferred. Redis, Celery, Kafka, SQS,
+and an outbox remain intentionally deferred because PostgreSQL already provides
+transactional durability and adequate local and portfolio scope for this phase.

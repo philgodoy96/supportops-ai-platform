@@ -328,6 +328,11 @@ these values for identity, polling, claiming, execution timeout, retry
 scheduling, and cooperative shutdown. Ticket intake copies
 `SUPPORTOPS_WORKER_MAX_ATTEMPTS` into newly scheduled `AgentRun` records.
 
+The worker always composes a versioned executor registry containing both the
+deterministic baseline and classification workflows. Executor selection is not
+deployment configuration. Each AgentRun's stored workflow version controls
+dispatch.
+
 Cross-field invariants:
 
 - `SUPPORTOPS_WORKER_LEASE_SECONDS` must exceed
@@ -342,13 +347,6 @@ Cross-field invariants:
   `SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS × logical invocation count`;
 - provider transport retries are internal SDK behavior and are not separate
   application logical invocations.
-
-The supported executor value is exactly:
-
-```text
-deterministic-ticket-processing
-```
-
 ### `SUPPORTOPS_WORKER_ID`
 
 Optional worker identity.
@@ -395,51 +393,6 @@ Example safe value:
 
 ```text
 worker-local-1
-```
-
-### `SUPPORTOPS_WORKER_EXECUTOR`
-
-Configured executor name.
-
-Settings field:
-
-```text
-worker_executor
-```
-
-Type:
-
-```text
-literal string
-```
-
-Default:
-
-```text
-deterministic-ticket-processing
-```
-
-Accepted value:
-
-```text
-deterministic-ticket-processing
-```
-
-Applies to:
-
-```text
-worker
-```
-
-Purpose:
-
-- selects the deterministic baseline executor;
-- records the configured executor in worker startup logs.
-
-Example safe value:
-
-```text
-deterministic-ticket-processing
 ```
 
 ### `SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS`
@@ -772,15 +725,14 @@ not require a network connection or an OpenAI API key. OpenAI credentials are
 required only when `openai` is selected.
 
 Provider, model, workflow version, prompt version, and schema version remain
-independent configuration and provenance dimensions. This pull request
-introduces the provider adapters. Worker composition and durable classification
-execution are introduced by the classification workflow and are not claimed as
-complete here. No provider fallback exists.
+independent configuration and provenance dimensions. The worker composes the
+selected provider once per process. No provider fallback exists. The API
+process validates shared settings but does not create the provider.
 
 ### `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION`
 
 Configured workflow version assigned to newly scheduled ticket-processing runs
-when workflow-version-aware ticket intake is composed.
+during ticket intake.
 
 Settings field:
 
@@ -810,19 +762,19 @@ ticket-classification-v1
 Applies to:
 
 ```text
-API and worker configuration
+API scheduling of newly accepted tickets
 ```
 
 Purpose:
 
+- assigns the workflow version persisted on newly created AgentRuns;
 - keeps workflow version independent from provider, model, prompt version, and
   schema version;
 - allows deterministic historical runs to remain supported;
-- controls only new scheduling after workflow-aware ticket intake is composed.
+- requires the worker registry to contain the stored version for dispatch.
 
-This setting is validated now. The actual scheduling change belongs to the
-classification workflow integration and must not be treated as already complete
-in this pull request.
+This setting does not select provider or model. Historical runs retain their
+stored versions after configuration changes.
 
 Example safe value:
 
@@ -832,7 +784,7 @@ ticket-classification-v1
 
 ### `SUPPORTOPS_LLM_PROVIDER`
 
-Explicit LLM provider adapter selection.
+Explicit LLM provider adapter selection for worker composition.
 
 Settings field:
 
@@ -862,16 +814,17 @@ openai
 Applies to:
 
 ```text
-worker configuration
+worker provider composition
 ```
 
 Purpose:
 
-- selects one configured provider;
+- selects one configured provider created once per worker process;
 - keeps local development network-free by default;
 - prevents implicit provider fallback.
 
-OpenAI failure never selects `mock` automatically.
+OpenAI failure never selects `mock` automatically. The API process does not
+create the provider.
 
 Example safe value:
 
@@ -964,7 +917,7 @@ Purpose:
 
 - centralizes model selection;
 - prevents model identifiers from being distributed through business modules;
-- preserves provider/model provenance for future invocation persistence.
+- preserves provider/model provenance on durable invocation records.
 
 Aliases may receive provider updates. The application does not switch models
 automatically.
@@ -1356,7 +1309,6 @@ Examples of invalid configuration include:
 - worker maximum attempts outside the accepted range;
 - worker lease duration that does not exceed execution timeout by at least five seconds;
 - worker retry maximum smaller than retry base;
-- unsupported worker executor value;
 - non-positive pool timeout;
 - non-positive dependency health timeout;
 - unsupported environment value;

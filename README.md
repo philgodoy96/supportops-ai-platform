@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, and workspace-scoped AgentRun inspection are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, and durable logical invocation and accepted classification persistence are implemented.
 
 The current platform includes:
 
@@ -27,20 +27,28 @@ The current platform includes:
 - workspace-scoped ticket external-reference uniqueness;
 - workspace-scoped ticket repository contracts;
 - async PostgreSQL repository implementations;
-- reversible Alembic migrations for workspace, ticket, and AgentRun tables;
+- reversible Alembic migrations for workspace, ticket, AgentRun, invocation, and classification tables;
 - an application-owned transaction adapter;
 - workspace creation and retrieval API;
 - workspace-scoped ticket intake;
 - atomic Ticket and initial AgentRun persistence;
+- configured `ticket-classification-v1` scheduling for newly accepted tickets;
 - durable AgentRun and AgentRunAttempt persistence;
 - PostgreSQL claiming with `FOR UPDATE SKIP LOCKED`;
 - attempt history, leases, and lease-token fencing;
 - bounded retries and expired lease recovery;
-- deterministic baseline execution outside database transactions;
+- exact versioned workflow executor registry;
+- deterministic baseline and classification workflow execution outside database transactions;
+- process-scoped mock or OpenAI worker provider;
+- Structured Outputs classification through the LLM Gateway;
+- durable `LLMInvocation` history;
+- durable `TicketClassification` records;
+- lease-fenced classification persistence;
+- token usage and estimated-cost provenance;
+- idempotent recovery without another provider call after classification commit;
 - cooperative worker shutdown with structured operational logs;
 - database-enforced workspace and ticket ownership for AgentRun records;
 - duplicate initial scheduling prevention;
-- a minimal processing-run reference returned by ticket creation;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
 - safe operational AgentRun metadata without lease or execution fencing identifiers;
@@ -52,7 +60,14 @@ The current platform includes:
 - request and correlation identifier persistence;
 - cross-workspace isolation behavior;
 - application services with command and query use cases;
-- repository, application, worker, and API tests;
+- application-owned provider-independent LLM Gateway contracts;
+- a deterministic mock LLM provider;
+- an OpenAI Responses API provider;
+- prompt `ticket-classification` version 1 and deterministic prompt hashes;
+- normalized provider failures and bounded repair;
+- token usage mapping and versioned estimated-cost calculation;
+- validated LLM runtime settings;
+- repository, application, worker, AI, and API tests;
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
@@ -60,11 +75,9 @@ The current platform includes:
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
-Ticket acceptance and asynchronous processing success are separate outcomes. A queued `deterministic-baseline-v1` processing run records that durable work has been scheduled. It does not represent AI classification. The deterministic baseline validates the durable execution architecture and performs no LLM call, retrieval, or ticket classification.
+Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `ticket-classification-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status or execute tools. The deterministic baseline remains registered for historical or explicitly scheduled runs and performs no LLM call.
 
-Inspection endpoints report current persisted AgentRun state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions.
-
-LLM classification, retrieval and Qdrant indexing, LangGraph orchestration, registered tools, human approvals, cost tracking, AI observability, prompt versioning, and evaluation and regression testing remain planned and are not represented as complete.
+Inspection endpoints report current persisted AgentRun state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Classification inspection APIs and evaluation execution remain planned.
 
 ## Engineering goals
 
@@ -111,6 +124,7 @@ The current runtime foundation uses:
 - Alembic;
 - PostgreSQL;
 - Qdrant;
+- OpenAI Python SDK;
 - Docker Compose;
 - pytest;
 - pytest-asyncio;
@@ -169,8 +183,9 @@ The PostgreSQL integration includes:
 - shared declarative metadata;
 - deterministic constraint naming;
 - Alembic async migration configuration;
-- registered workspace, ticket, and AgentRun persistence models;
-- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts`.
+- registered workspace, ticket, AgentRun, invocation, and classification persistence models;
+- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, and `ticket_classifications`;
+- composite ownership constraints and accepted-invocation provenance for classification records.
 
 ### Workspace and ticket persistence
 
@@ -186,7 +201,7 @@ The first business modules provide:
 
 ### Durable AgentRun scheduling and PostgreSQL worker
 
-Ticket intake schedules durable processing in the same application-owned transaction that creates the ticket. The HTTP request returns after that transaction commits and does not execute the workflow.
+Ticket intake schedules the configured workflow version in the same application-owned transaction that creates the ticket. The local default is `ticket-classification-v1`. The HTTP request returns the existing Ticket response after that transaction commits and does not execute the workflow or call the model.
 
 Implemented behavior includes:
 
@@ -196,21 +211,56 @@ Implemented behavior includes:
 - unique initial trigger enforcement for duplicate initial scheduling prevention;
 - atomic Ticket and initial AgentRun creation;
 - a persisted initial retry budget copied from configuration;
-- a minimal processing-run reference in the ticket creation response;
 - a separate `supportops-worker` process using PostgreSQL as its durable work queue;
 - claim eligibility for `queued` and `retry_scheduled` runs with due `available_at`;
 - PostgreSQL `FOR UPDATE SKIP LOCKED` claiming across multiple worker processes;
 - attempt history, leases, and lease-token fencing;
 - bounded exponential backoff retries;
 - expired lease recovery before each claim cycle;
-- deterministic baseline execution (`deterministic-ticket-processing`) outside transactions;
-- cooperative SIGINT and SIGTERM shutdown with engine disposal.
+- a versioned executor registry with exact workflow name and version dispatch;
+- deterministic baseline support for historical or explicitly scheduled runs;
+- classification provider calls outside database transactions;
+- separate fenced transactions for invocation and classification persistence and AgentRun completion;
+- cooperative SIGINT and SIGTERM shutdown with provider cleanup and engine disposal.
 
-A queued deterministic-baseline run does not represent AI classification.
+The ticket creation response remains the Ticket response shape and does not report classification completion.
 
-After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints. Inspection exposes status, retry budget, workflow identity, safe error metadata, and ordered attempt outcomes. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, or execution request IDs.
+After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Inspection exposes status, retry budget, workflow identity, safe error metadata, and ordered attempt outcomes. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, or execution request IDs.
 
 Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md).
+
+### Application-owned LLM Gateway and durable classification
+
+The repository provides an application-owned LLM Gateway under `supportops.ai` and durable classification under `supportops.modules.ticket_classifications`:
+
+- process-scoped mock or OpenAI provider and one Gateway per worker process;
+- session-scoped classification executor and repositories;
+- provider-independent asynchronous LLM contracts;
+- OpenAI Responses API with Structured Outputs;
+- application-side Pydantic validation of structured classification results;
+- immutable prompt definitions with explicit ID, version, and SHA-256 content hashes;
+- prompt `ticket-classification` version 1 with trusted instructions separated from untrusted ticket content;
+- an application-owned provider failure taxonomy;
+- bounded validation repair with at most one repair invocation;
+- durable `LLMInvocation` and `TicketClassification` provenance;
+- token usage mapping and versioned Decimal estimated-cost persistence;
+- retryable and terminal Gateway failure translation;
+- explicit provider selection with no cross-provider fallback;
+- no LLM provider initialization in the API process;
+- no classification inspection API yet.
+
+Current classification flow:
+
+```text
+configured AgentRun scheduled
+→ worker claims run
+→ registry dispatches ticket-classification-v1
+→ Gateway structured classification
+→ fenced invocation and classification persistence
+→ fenced AgentRun completion
+```
+
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md).
 
 ### Workspace, ticket, and AgentRun API
 
@@ -266,7 +316,22 @@ The repository includes:
 - workspace-scoped AgentRun query repository coverage;
 - workspace, ticket, and AgentRun API integration coverage;
 - atomic ticket and AgentRun commit and rollback coverage;
-- Alembic upgrade, downgrade, and metadata-parity coverage;
+- provider-independent LLM contract tests;
+- prompt registry, prompt hash, and untrusted-input boundary tests;
+- structured classification schema tests;
+- deterministic mock-provider tests;
+- OpenAI provider tests using injected fakes without network access;
+- provider error normalization tests;
+- gateway validation and bounded repair tests;
+- Decimal pricing and unknown-pricing tests;
+- LLM settings and secret-handling tests;
+- classification domain and ORM tests;
+- registry dispatch tests;
+- worker composition and lifecycle tests;
+- fenced classification repository tests;
+- PostgreSQL mock classification workflow integration;
+- retry and recovery idempotency coverage;
+- Alembic upgrade, downgrade, and metadata-parity coverage for classification tables;
 - settings validation tests;
 - lifecycle tests;
 - dependency failure-path tests;
@@ -278,23 +343,23 @@ The repository includes:
 - Docker image build validation;
 - GitHub Actions quality gates.
 
+Normal unit and integration tests do not require an OpenAI API key or paid external requests.
+
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, and `agent_runs` modules, plus a `supportops.worker` process entry point. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, execution, retry, recovery, and workspace-scoped inspection foundations coordinated during ticket intake, by the worker process, and through read-only HTTP routes.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules, a `supportops.worker` process entry point, and the cross-cutting `supportops.ai` foundation. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution and persistence. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
 
-Future implementation phases are expected to introduce or extend modules for:
+Future modules or extensions will introduce:
 
-- structured LLM classification;
+- classification inspection APIs;
+- evaluation datasets and execution;
+- evidence-driven prompt iteration;
 - internal runbook ingestion;
 - semantic retrieval and Qdrant indexing;
 - LangGraph orchestration;
-- explicitly registered tools;
-- human approval workflows;
-- usage and cost tracking;
-- AI observability;
-- prompt versioning;
-- retrieval and generation evaluation;
-- regression testing.
+- registered tools;
+- approval workflows;
+- broader AI observability.
 
 Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
 
@@ -312,8 +377,10 @@ Additional modules will be introduced only when they have concrete responsibilit
 ├── docs/
 │   ├── architecture/
 │   │   ├── agent-run-scheduling.md
+│   │   ├── llm-gateway.md
 │   │   ├── overview.md
 │   │   ├── runtime-topology.md
+│   │   ├── ticket-classification.md
 │   │   └── workspace-data-boundary.md
 │   ├── decisions/
 │   │   ├── 0001-use-a-modular-monolith.md
@@ -321,7 +388,8 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── 0003-use-qdrant-as-a-rebuildable-retrieval-index.md
 │   │   ├── 0004-use-a-postgresql-backed-worker-model.md
 │   │   ├── 0005-keep-ai-observability-behind-an-adapter.md
-│   │   └── 0006-establish-workspace-scoped-data-ownership.md
+│   │   ├── 0006-establish-workspace-scoped-data-ownership.md
+│   │   └── 0007-use-an-application-owned-llm-gateway.md
 │   └── development/
 │       ├── api-examples.md
 │       ├── environment-variables.md
@@ -329,6 +397,12 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       └── testing.md
 ├── src/
 │   └── supportops/
+│       ├── ai/
+│       │   ├── gateway/
+│       │   ├── pricing/
+│       │   ├── prompts/
+│       │   ├── providers/
+│       │   └── schemas/
 │       ├── api/
 │       │   ├── health/
 │       │   ├── application.py
@@ -352,10 +426,15 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   │   ├── application/
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
+│       │   ├── ticket_classifications/
+│       │   │   ├── application/
+│       │   │   ├── domain/
+│       │   │   └── infrastructure/
 │       │   ├── tickets/
 │       │   └── workspaces/
 │       └── worker/
 │           ├── __init__.py
+│           ├── composition.py
 │           └── main.py
 ├── tests/
 │   ├── integration/
@@ -371,7 +450,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, and `agent_runs` modules include domain, application, infrastructure, and API layers. The `agent_runs` module includes worker-facing application services and read-only inspection routes. Cross-module ticket intake lives under `supportops.application`. The worker process entry point lives under `supportops.worker`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules include domain, application, and infrastructure layers as required. The `agent_runs` module also includes read-only inspection routes. Cross-module ticket intake lives under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. Alembic migrations create workspace, ticket, AgentRun, invocation, and classification tables.
 
 ## Local setup
 
@@ -454,7 +533,22 @@ SUPPORTOPS_POSTGRESQL_URL
 SUPPORTOPS_QDRANT_URL
 ```
 
-Worker timing and identity are controlled by `SUPPORTOPS_WORKER_*` variables. Defaults are validated at process startup, including lease-versus-timeout and retry-base-versus-max invariants.
+Worker timing and identity are controlled by `SUPPORTOPS_WORKER_*` variables. Defaults are validated at process startup, including lease-versus-timeout and retry-base-versus-max invariants. The worker always composes the versioned executor registry. Executor selection is not a deployment switch.
+
+AI runtime selection uses:
+
+```text
+SUPPORTOPS_LLM_PROVIDER
+SUPPORTOPS_OPENAI_API_KEY
+SUPPORTOPS_OPENAI_MODEL
+SUPPORTOPS_OPENAI_BASE_URL
+SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS
+SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES
+SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS
+SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION
+```
+
+The local default provider is `mock`. An OpenAI API key is required only when `openai` is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `ticket-classification-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers.
 
 The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
 
@@ -534,7 +628,7 @@ Validate offline migration execution:
 uv run alembic upgrade head --sql
 ```
 
-The current head creates the `workspaces`, `tickets`, `agent_runs`, and `agent_run_attempts` tables. Downgrade commands must run only against the local development or test database.
+The current head creates the `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, and `ticket_classifications` tables. Downgrade commands must run only against the local development or test database.
 
 ## Docker image
 
@@ -581,6 +675,7 @@ The repository records the following accepted decisions:
 - [Use a PostgreSQL-backed worker model](docs/decisions/0004-use-a-postgresql-backed-worker-model.md)
 - [Keep AI observability behind an application-owned adapter](docs/decisions/0005-keep-ai-observability-behind-an-adapter.md)
 - [Establish workspace-scoped data ownership](docs/decisions/0006-establish-workspace-scoped-data-ownership.md)
+- [Use an application-owned LLM Gateway](docs/decisions/0007-use-an-application-owned-llm-gateway.md)
 
 ## Roadmap
 
@@ -613,11 +708,13 @@ Implemented:
 - versioned workspace and ticket HTTP endpoints;
 - opaque HTTP cursor pagination;
 - request and correlation identifier persistence;
-- atomic ticket intake with initial AgentRun scheduling.
+- atomic ticket intake with initial AgentRun scheduling;
+- durable structured classification;
+- durable invocation and accepted classification persistence.
 
 Planned:
 
-- structured classification;
+- classification inspection APIs;
 - operational auditability beyond request and correlation identifiers.
 
 ### Asynchronous processing
@@ -629,13 +726,15 @@ Implemented:
 - database-enforced workspace and ticket ownership;
 - duplicate initial scheduling prevention;
 - persisted initial retry budget;
-- minimal processing-run reference on ticket creation;
 - PostgreSQL-backed worker execution;
 - queue claiming with `FOR UPDATE SKIP LOCKED`;
 - leases and lease-token fencing;
 - bounded exponential backoff retries;
 - expired lease recovery;
+- versioned workflow executor registry;
 - deterministic baseline executor;
+- configured `ticket-classification-v1` scheduling and execution;
+- process-scoped provider and Gateway composition;
 - separate worker process with cooperative shutdown;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
@@ -647,6 +746,39 @@ Planned:
 - manual retry and cancellation;
 - global AgentRun listing and status filtering;
 - idempotent side effects for future executors and tools.
+
+### LLM Gateway and structured classification
+
+Implemented:
+
+- provider-independent async contracts;
+- deterministic mock provider;
+- OpenAI Responses API provider;
+- Structured Outputs;
+- application-side Pydantic validation;
+- bounded classification taxonomy;
+- prompt `ticket-classification` version 1;
+- deterministic prompt hashes;
+- normalized provider failures;
+- bounded repair;
+- token usage mapping and persistence;
+- versioned Decimal pricing catalog;
+- estimated-cost calculation and persistence;
+- validated AI runtime settings;
+- worker provider composition;
+- workflow executor registry;
+- durable ticket-classification execution;
+- `TicketClassification` persistence;
+- `LLMInvocation` persistence.
+
+Planned:
+
+- classification inspection API;
+- synthetic evaluation dataset and evaluator;
+- opt-in real-model evaluation;
+- evidence-driven prompt version 2;
+- cross-provider fallback after baseline behavior is observable;
+- operational cost reporting and invoice reconciliation.
 
 ### Retrieval
 
@@ -669,14 +801,19 @@ Planned:
 
 ### Observability and evaluation
 
+Implemented:
+
+- token usage and estimated-cost persistence with durable invocation provenance;
+- prompt `ticket-classification` version 1.
+
 Planned:
 
+- operational cost reporting and invoice reconciliation;
 - AI tracing;
-- token and cost tracking;
-- prompt versioning;
+- evidence-driven prompt iteration;
 - retrieval evaluation;
 - generation evaluation;
-- prompt regression testing.
+- evaluation execution and prompt regression comparison.
 
 ## Intentionally deferred capabilities
 
@@ -690,15 +827,17 @@ The following capabilities remain deferred to preserve architectural focus and a
 - WebSockets and Server-Sent Events;
 - frontend monitoring applications;
 - Redis, Celery, Kafka, and SQS;
-- LLM provider integrations;
-- AI classification;
-- prompt execution and versioning;
+- classification inspection APIs;
+- evaluation execution;
+- evidence-driven prompt version 2;
+- cross-provider fallback and automatic model routing;
+- Anthropic provider;
+- operational cost reporting and invoice reconciliation;
 - embeddings and retrieval;
 - Qdrant collections and indexing;
 - LangGraph orchestration;
 - registered tools;
 - human approval workflows;
-- cost tracking;
 - AI observability integrations;
 - Langfuse integration;
 - RAGAS evaluation;
@@ -714,6 +853,8 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
+The application-owned LLM Gateway and durable ticket-classification workflow are implemented. Classification inspection APIs, evaluation execution, evidence-driven prompt version 2, cross-provider fallback, and operational cost reporting remain intentionally separated into later delivery boundaries.
+
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
 ## Documentation
@@ -721,6 +862,8 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Architecture overview](docs/architecture/overview.md)
 - [Runtime topology](docs/architecture/runtime-topology.md)
 - [Transactional AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
+- [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
+- [Durable ticket classification](docs/architecture/ticket-classification.md)
 - [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)
