@@ -3,7 +3,8 @@
 ## Purpose
 
 This document provides reproducible examples for the implemented workspace,
-support ticket, and AgentRun inspection HTTP API.
+support ticket, AgentRun, classification, and logical invocation inspection
+HTTP API.
 
 The examples use placeholder values suitable for local development and public
 documentation.
@@ -17,6 +18,10 @@ The API currently supports:
 - workspace-scoped ticket listing;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
+- AgentRun classification reference;
+- classification detail;
+- ticket classification history;
+- AgentRun logical invocation history;
 - opaque cursor pagination;
 - stable expected-error responses;
 - request and correlation trace identifiers.
@@ -25,12 +30,14 @@ The current API does not include authentication or authorization. Workspace
 scoping establishes an explicit data ownership boundary but does not establish
 trusted tenant isolation.
 
-A queued deterministic-baseline processing run records that durable work has
-been scheduled. It does not represent AI classification.
+A queued `ticket-classification-v1` processing run records that durable
+classification work has been scheduled. Classification completion remains an
+asynchronous worker outcome.
 
-AgentRun inspection endpoints are strictly read-only. They report current
-persisted state and do not guarantee future completion. They do not perform
-mutation, retry, cancellation, or lease revocation.
+AgentRun, classification, and logical invocation inspection endpoints are
+strictly read-only. They report current persisted state and do not guarantee
+future completion. They do not perform mutation, retry, cancellation, or lease
+revocation.
 
 ## Prerequisites
 
@@ -144,7 +151,7 @@ Expected response shape:
     "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
     "status": "queued",
     "workflow_name": "ticket-processing",
-    "workflow_version": "deterministic-baseline-v1"
+    "workflow_version": "ticket-classification-v1"
   }
 }
 ```
@@ -156,13 +163,13 @@ Expected behavior:
 - initial ticket status `open`;
 - processing-run status `queued`;
 - workflow name `ticket-processing`;
-- workflow version `deterministic-baseline-v1`;
+- workflow version `ticket-classification-v1`;
 - `workspace_id` equals workspace A;
 - `ingestion_request_id` equals `X-Request-ID`;
 - `correlation_id` equals `X-Correlation-ID`.
 
-A queued deterministic-baseline run does not indicate that AI classification
-has occurred.
+A queued `ticket-classification-v1` run does not indicate that AI classification
+has completed.
 
 Retain `$agentRunId` for the inspection examples below.
 
@@ -233,9 +240,10 @@ Expected queued response:
   "status": "queued",
   "workflow": {
     "name": "ticket-processing",
-    "version": "deterministic-baseline-v1",
+    "version": "ticket-classification-v1",
     "trigger_key": "initial-ticket-processing"
   },
+  "classification": null,
   "attempt_count": 0,
   "max_attempts": 3,
   "available_at": "2026-07-31T12:00:00Z",
@@ -249,11 +257,11 @@ Expected queued response:
 ```
 
 The response does not include lease ownership, lease tokens, lease expiry, or
-ingestion request identifiers.
+ingestion request identifiers. Queued runs return `classification: null`.
 
 ## Inspect a succeeded AgentRun
 
-After the deterministic worker processes the run:
+After the worker completes classification:
 
 ```powershell
 Invoke-RestMethod `
@@ -271,8 +279,13 @@ Expected succeeded response:
   "status": "succeeded",
   "workflow": {
     "name": "ticket-processing",
-    "version": "deterministic-baseline-v1",
+    "version": "ticket-classification-v1",
     "trigger_key": "initial-ticket-processing"
+  },
+  "classification": {
+    "id": "8f3c1b2a-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "schema_version": "ticket-classification-v1",
+    "created_at": "2026-07-31T12:00:01Z"
   },
   "attempt_count": 1,
   "max_attempts": 3,
@@ -285,6 +298,11 @@ Expected succeeded response:
   "updated_at": "2026-07-31T12:00:01Z"
 }
 ```
+
+The `classification` object is a minimal accepted-classification reference.
+Full labels and prompt provenance are available through the classification
+detail route. Retain `$classificationId` from `classification.id` for the
+examples below.
 
 Inspection reports persisted state at the time of the request. It does not
 guarantee future completion for runs that are still in progress.
@@ -302,9 +320,10 @@ When a run has safe error metadata after a retryable or terminal failure, the
   "status": "retry_scheduled",
   "workflow": {
     "name": "ticket-processing",
-    "version": "deterministic-baseline-v1",
+    "version": "ticket-classification-v1",
     "trigger_key": "initial-ticket-processing"
   },
+  "classification": null,
   "attempt_count": 1,
   "max_attempts": 3,
   "available_at": "2026-07-31T12:00:05Z",
@@ -321,7 +340,8 @@ When a run has safe error metadata after a retryable or terminal failure, the
 ```
 
 A terminal exhaustion path uses status `failed` with the same safe
-`last_error` shape. Raw exception text is not returned.
+`last_error` shape. Raw exception text is not returned. Runs without an
+accepted classification continue to return `classification: null`.
 
 ## Inspect empty attempt history
 
@@ -420,8 +440,217 @@ Missing and cross-workspace AgentRuns both return this contract. The standard
 error envelope includes the request ID. The response does not reveal that the
 AgentRun exists in another workspace.
 
-The same `agent_run_not_found` contract applies to attempt-history requests for
-missing or cross-workspace runs.
+The same `agent_run_not_found` contract applies to attempt-history and
+logical-invocation-history requests for missing or cross-workspace runs.
+
+## Inspect classification detail
+
+After a succeeded classification run:
+
+```powershell
+$classificationId = (
+  Invoke-RestMethod `
+    -Method Get `
+    -Uri (
+      "http://127.0.0.1:8000/api/v1/workspaces/" +
+      "$workspaceAId/agent-runs/$agentRunId"
+    )
+).classification.id
+
+Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$workspaceAId/ticket-classifications/$classificationId"
+  )
+```
+
+Expected status:
+
+```text
+200 OK
+```
+
+Expected response shape:
+
+```json
+{
+  "id": "8f3c1b2a-4d5e-6f70-8192-a3b4c5d6e7f8",
+  "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+  "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+  "agent_run_id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+  "accepted_invocation_id": "c1d2e3f4-5678-90ab-cdef-1234567890ab",
+  "category": "billing",
+  "intent": "ask_question",
+  "urgency": "normal",
+  "sentiment": "neutral",
+  "requires_human_review": false,
+  "summary": "The requester cannot access the billing dashboard after sign-in.",
+  "schema_version": "ticket-classification-v1",
+  "prompt": {
+    "id": "ticket-classification",
+    "version": 1,
+    "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "provider": "mock",
+  "model": "mock-ticket-classifier-v1",
+  "created_at": "2026-07-31T12:00:01Z"
+}
+```
+
+The response includes accepted invocation identity, bounded labels, nested
+prompt provenance, provider, model, and creation timestamp. Provider request
+IDs, raw prompts, raw responses, lease data, and execution request IDs are not
+exposed.
+
+## Inspect ticket classification history
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$workspaceAId/tickets/$ticketId/classifications?page_size=20"
+  )
+```
+
+Expected response shape:
+
+```json
+{
+  "items": [
+    {
+      "id": "8f3c1b2a-4d5e-6f70-8192-a3b4c5d6e7f8",
+      "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+      "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+      "agent_run_id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+      "accepted_invocation_id": "c1d2e3f4-5678-90ab-cdef-1234567890ab",
+      "category": "billing",
+      "intent": "ask_question",
+      "urgency": "normal",
+      "sentiment": "neutral",
+      "requires_human_review": false,
+      "summary": "The requester cannot access the billing dashboard after sign-in.",
+      "schema_version": "ticket-classification-v1",
+      "prompt": {
+        "id": "ticket-classification",
+        "version": 1,
+        "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "provider": "mock",
+      "model": "mock-ticket-classifier-v1",
+      "created_at": "2026-07-31T12:00:01Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+Classification history is ordered newest first and uses opaque keyset
+pagination through `page_size` and `cursor`. The route validates ticket
+ownership before returning history. Missing and cross-workspace tickets return
+`404` with `ticket_not_found`.
+
+## Inspect AgentRun logical invocation history
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$workspaceAId/agent-runs/$agentRunId/llm-invocations"
+  )
+```
+
+Expected response shape:
+
+```json
+{
+  "items": [
+    {
+      "id": "c1d2e3f4-5678-90ab-cdef-1234567890ab",
+      "agent_run_attempt_id": "2b39f5b7-b2a4-48d0-b079-fdad286d5315",
+      "attempt_number": 1,
+      "invocation_sequence": 1,
+      "status": "succeeded",
+      "provider": "mock",
+      "model": "mock-ticket-classifier-v1",
+      "prompt": {
+        "id": "ticket-classification",
+        "version": 1,
+        "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "schema_version": "ticket-classification-v1",
+      "usage": {
+        "input_tokens": 120,
+        "cached_input_tokens": 0,
+        "output_tokens": 24,
+        "reasoning_tokens": null,
+        "total_tokens": 144
+      },
+      "estimated_cost": {
+        "pricing_catalog_version": "supportops-pricing-2026-08-01",
+        "pricing_found": true,
+        "input_cost_usd": "0",
+        "cached_input_cost_usd": "0",
+        "output_cost_usd": "0",
+        "total_cost_usd": "0"
+      },
+      "latency_ms": 12,
+      "error_code": null,
+      "created_at": "2026-07-31T12:00:01Z"
+    }
+  ]
+}
+```
+
+Invocation history is ordered by attempt number ascending, then sequence
+ascending. The history is naturally bounded by retry and repair budgets and is
+not paginated. Each item exposes attempt identity and number, sequence, status,
+prompt provenance, usage when known, estimated cost, latency, and a safe
+`error_code`. Provider request IDs and raw provider content are not exposed.
+
+Queued runs may return:
+
+```json
+{
+  "items": []
+}
+```
+
+## Attempt cross-workspace classification inspection
+
+```powershell
+try {
+  Invoke-RestMethod `
+    -Method Get `
+    -Uri (
+      "http://127.0.0.1:8000/api/v1/workspaces/" +
+      "$workspaceBId/ticket-classifications/$classificationId"
+    )
+} catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.ErrorDetails.Message
+}
+```
+
+Expected status:
+
+```text
+404 Not Found
+```
+
+Expected error code:
+
+```text
+ticket_classification_not_found
+```
+
+Missing and cross-workspace classifications use the same contract. The response
+does not reveal that the classification exists in another workspace.
+
+Cross-workspace AgentRun invocation history uses the same
+`agent_run_not_found` contract as AgentRun detail and attempt history.
 
 ## List tickets in workspace A
 
@@ -691,6 +920,7 @@ Implemented expected error codes:
 workspace_not_found
 ticket_not_found
 agent_run_not_found
+ticket_classification_not_found
 workspace_slug_conflict
 ticket_external_reference_conflict
 invalid_pagination_cursor
@@ -698,3 +928,6 @@ invalid_pagination_cursor
 
 Malformed UUIDs, invalid page sizes, and invalid request schemas use FastAPI
 validation responses with status `422 Unprocessable Entity`.
+
+The API does not expose an endpoint that discovers AgentRuns by ticket. Clients
+retain the AgentRun identifier from ticket creation or another known source.

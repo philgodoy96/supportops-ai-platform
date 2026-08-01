@@ -43,10 +43,13 @@ The platform currently provides:
 - retryable and terminal LLM failure translation;
 - lease-fenced classification persistence;
 - idempotent recovery when an accepted classification already exists;
+- workspace-scoped classification detail and ticket classification history;
+- optional accepted-classification reference in AgentRun inspection;
+- AgentRun-scoped logical invocation history;
+- a versioned synthetic evaluation dataset;
+- a deterministic classification evaluator;
+- opt-in mock or OpenAI evaluation execution;
 - PostgreSQL integration coverage using the deterministic mock provider.
-
-The current delivery does not expose classification HTTP endpoints or execute
-evaluation datasets. Those capabilities remain separate delivery boundaries.
 
 ## End-to-end flow
 
@@ -207,7 +210,9 @@ Owns:
 - conversion from Gateway traces to persistence records;
 - classification and invocation persistence;
 - lease-fenced classification writes;
-- translation from final Gateway failures to AgentRun execution failures.
+- translation from final Gateway failures to AgentRun execution failures;
+- workspace-scoped classification and invocation inspection queries;
+- classification HTTP inspection routes.
 
 ### `supportops.worker`
 
@@ -678,6 +683,64 @@ catalog version. Those dimensions remain independently queryable.
 Prompt version 2 remains intentionally deferred until evaluation evidence
 identifies a justified behavioral change.
 
+## Inspection linkage
+
+Runtime classification produces durable records that inspection projects without
+mutating write-path semantics.
+
+Accepted classification detail:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/ticket-classifications/{classification_id}
+```
+
+Ticket classification history:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/classifications
+```
+
+AgentRun detail includes an optional minimal accepted-classification reference:
+
+```text
+classification = {
+  id
+  schema_version
+  created_at
+}
+```
+
+or `classification = null` when no accepted classification exists.
+
+AgentRun logical invocation history:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
+```
+
+Inspection remains read-only. It exposes safe prompt, provider, model, usage,
+estimated-cost, latency, and normalized error provenance. Provider request IDs,
+raw prompts, raw responses, lease data, and execution request IDs remain
+private.
+
+Inspection and evaluation architecture is documented in
+[`classification-evaluation.md`](classification-evaluation.md).
+
+## Evaluation linkage
+
+Offline evaluation reuses the same runtime contracts without sharing
+transaction ownership:
+
+- the same prompt `ticket-classification` version 1;
+- the same structured output schema;
+- the same application-owned LLM Gateway;
+- the same versioned pricing catalog.
+
+Evaluation does not write to PostgreSQL or Qdrant, does not create AgentRuns,
+and does not promote prompts automatically. Dataset cases, prediction
+artifacts, deterministic metrics, and report provenance remain under the
+evaluation package and committed `evals/` datasets.
+
 ## Token usage and estimated cost
 
 Each invocation may persist:
@@ -813,25 +876,22 @@ requests.
 
 The following capabilities remain intentionally separate:
 
-- classification list and detail HTTP APIs;
-- classification reference in AgentRun inspection;
-- synthetic evaluation dataset;
-- deterministic classification evaluator;
-- opt-in real-model evaluation;
 - prompt version 2;
+- evaluation comparison and promotion policy;
 - cross-provider fallback;
 - automatic model routing;
 - Anthropic provider;
 - operational cost dashboards and invoice reconciliation;
 - retrieval and RAG;
+- RAGAS;
 - LangGraph orchestration;
 - tool calling;
 - human approval workflows;
 - Langfuse;
-- RAGAS;
+- broader AI observability;
 - frontend monitoring.
 
-The current implementation establishes durable classification execution and
-provenance before adding inspection and evaluation surfaces. This sequencing
-keeps runtime reliability, persistence semantics, and evaluation behavior
-independently reviewable.
+Durable execution was established first. Read-only inspection and offline
+evaluation were then layered on without changing write-path semantics. This
+sequencing keeps runtime reliability, persistence semantics, and evaluation
+behavior independently reviewable.
