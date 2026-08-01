@@ -9,6 +9,12 @@ from pydantic import BaseModel
 
 from supportops.core.request_context import get_request_context
 from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
+from supportops.modules.ticket_classifications.application.errors import (
+    TicketClassificationNotFoundError,
+)
+from supportops.modules.ticket_classifications.application.pagination import (
+    InvalidClassificationPaginationCursorError,
+)
 from supportops.modules.tickets.api.pagination import InvalidPaginationCursorError
 from supportops.modules.tickets.application.errors import (
     TicketExternalReferenceConflictApplicationError,
@@ -66,6 +72,14 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         InvalidPaginationCursorError,
         _invalid_pagination_cursor_handler,
+    )
+    app.add_exception_handler(
+        TicketClassificationNotFoundError,
+        _ticket_classification_not_found_handler,
+    )
+    app.add_exception_handler(
+        InvalidClassificationPaginationCursorError,
+        _invalid_classification_pagination_cursor_handler,
     )
 
 
@@ -140,6 +154,34 @@ async def _agent_run_not_found_handler(
 
 
 async def _invalid_pagination_cursor_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=400,
+        code="invalid_pagination_cursor",
+        message="Pagination cursor is invalid.",
+    )
+
+
+async def _ticket_classification_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="ticket_classification_not_found",
+        message="Ticket classification was not found.",
+    )
+
+
+async def _invalid_classification_pagination_cursor_handler(
     request: Request,
     error: Exception,
 ) -> JSONResponse:
