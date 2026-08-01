@@ -247,6 +247,7 @@ def test_document_version_table_declares_expected_constraints() -> None:
 
     assert {
         ("uq_knowledge_document_versions_workspace_document_id"),
+        ("uq_knowledge_document_versions_chunk_profile"),
         ("uq_knowledge_document_versions_document_version_number"),
         ("uq_knowledge_document_versions_document_content_sha256"),
         ("ck_knowledge_document_versions_document_version_number_positive"),
@@ -309,11 +310,11 @@ def test_document_chunk_table_declares_expected_constraints() -> None:
     }.issubset(constraint_names(table))
 
 
-def test_document_chunk_table_declares_version_ownership_foreign_key() -> None:
+def test_document_chunk_table_declares_version_ownership_and_profile_foreign_key() -> None:
     table = cast(Table, DocumentChunkRecord.__table__)
     constraint = foreign_key_constraint(
         table,
-        name="fk_knowledge_document_chunks_version",
+        name="fk_knowledge_document_chunks_version_profile",
     )
 
     assert constraint.ondelete == "RESTRICT"
@@ -321,6 +322,8 @@ def test_document_chunk_table_declares_version_ownership_foreign_key() -> None:
         "knowledge_document_versions.workspace_id",
         "knowledge_document_versions.document_id",
         "knowledge_document_versions.id",
+        "knowledge_document_versions.chunking_strategy",
+        "knowledge_document_versions.chunking_version",
     ]
 
 

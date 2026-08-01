@@ -326,6 +326,14 @@ class DocumentVersionRecord(Base):
             name=("uq_knowledge_document_versions_workspace_document_id"),
         ),
         UniqueConstraint(
+            "workspace_id",
+            "document_id",
+            "id",
+            "chunking_strategy",
+            "chunking_version",
+            name="uq_knowledge_document_versions_chunk_profile",
+        ),
+        UniqueConstraint(
             "document_id",
             "version_number",
             name=("uq_knowledge_document_versions_document_version_number"),
@@ -466,7 +474,11 @@ class DocumentVersionRecord(Base):
                 "AND last_error_code IS NULL "
                 "AND embedding_input_tokens IS NULL "
                 "AND embedding_estimated_cost_usd IS NULL "
-                "AND embedding_pricing_catalog_version IS NULL"
+                "AND embedding_pricing_catalog_version IS NULL "
+                "AND ("
+                "chunking_strategy IS NOT NULL "
+                "OR chunk_count IS NULL"
+                ")"
                 ") OR ("
                 "status = 'failed' "
                 "AND chunking_strategy IS NOT NULL "
@@ -630,13 +642,17 @@ class DocumentChunkRecord(Base):
                 "workspace_id",
                 "document_id",
                 "document_version_id",
+                "chunking_strategy",
+                "chunking_version",
             ],
             [
                 "knowledge_document_versions.workspace_id",
                 "knowledge_document_versions.document_id",
                 "knowledge_document_versions.id",
+                "knowledge_document_versions.chunking_strategy",
+                "knowledge_document_versions.chunking_version",
             ],
-            name="fk_knowledge_document_chunks_version",
+            name="fk_knowledge_document_chunks_version_profile",
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
