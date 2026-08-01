@@ -47,7 +47,7 @@ def _classification() -> TicketClassification:
         prompt_content_hash=_PROMPT_HASH,
         provider="openai",
         model="gpt-5-nano",
-        accepted_invocation_sequence=1,
+        accepted_llm_invocation_id=uuid4(),
         now=_NOW,
     )
 
@@ -56,6 +56,7 @@ def test_create_builds_immutable_accepted_classification() -> None:
     workspace_id = uuid4()
     ticket_id = uuid4()
     agent_run_id = uuid4()
+    accepted_llm_invocation_id = uuid4()
 
     classification = TicketClassification.create(
         workspace_id=workspace_id,
@@ -73,7 +74,7 @@ def test_create_builds_immutable_accepted_classification() -> None:
         prompt_content_hash=_PROMPT_HASH,
         provider="openai",
         model="gpt-5-nano",
-        accepted_invocation_sequence=2,
+        accepted_llm_invocation_id=accepted_llm_invocation_id,
         now=_NOW,
     )
 
@@ -87,7 +88,7 @@ def test_create_builds_immutable_accepted_classification() -> None:
     assert classification.requires_human_review is True
     assert classification.summary == ("Possible unauthorized account activity.")
     assert classification.prompt_version == 1
-    assert classification.accepted_invocation_sequence == 2
+    assert classification.accepted_llm_invocation_id == accepted_llm_invocation_id
     assert classification.created_at == _NOW
     assert classification.updated_at == _NOW
 
@@ -135,26 +136,6 @@ def test_rejects_non_positive_prompt_version(
         replace(
             _classification(),
             prompt_version=prompt_version,
-        )
-
-
-@pytest.mark.parametrize(
-    "accepted_invocation_sequence",
-    [
-        0,
-        -1,
-    ],
-)
-def test_rejects_non_positive_accepted_invocation_sequence(
-    accepted_invocation_sequence: int,
-) -> None:
-    with pytest.raises(
-        ValueError,
-        match=("accepted_invocation_sequence must be positive"),
-    ):
-        replace(
-            _classification(),
-            accepted_invocation_sequence=(accepted_invocation_sequence),
         )
 
 

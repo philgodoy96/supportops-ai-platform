@@ -57,7 +57,7 @@ class TicketClassification:
     prompt_content_hash: str
     provider: str
     model: str
-    accepted_invocation_sequence: int
+    accepted_llm_invocation_id: UUID
     created_at: datetime
     updated_at: datetime
 
@@ -104,11 +104,6 @@ class TicketClassification:
             maximum_length=(TICKET_CLASSIFICATION_MODEL_MAX_LENGTH),
         )
 
-        if self.accepted_invocation_sequence <= 0:
-            raise ValueError(
-                "accepted_invocation_sequence must be positive.",
-            )
-
         _validate_utc_timestamp(
             self.created_at,
             field_name="created_at",
@@ -142,7 +137,7 @@ class TicketClassification:
         prompt_content_hash: str,
         provider: str,
         model: str,
-        accepted_invocation_sequence: int,
+        accepted_llm_invocation_id: UUID,
         classification_id: UUID | None = None,
         now: datetime | None = None,
     ) -> "TicketClassification":
@@ -167,7 +162,7 @@ class TicketClassification:
             prompt_content_hash=prompt_content_hash,
             provider=provider,
             model=model,
-            accepted_invocation_sequence=(accepted_invocation_sequence),
+            accepted_llm_invocation_id=accepted_llm_invocation_id,
             created_at=created_at,
             updated_at=created_at,
         )
