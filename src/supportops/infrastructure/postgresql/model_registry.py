@@ -8,6 +8,11 @@ def register_persistence_models() -> None:
         AgentRunAttemptRecord,
         AgentRunRecord,
     )
+    from supportops.modules.knowledge_documents.infrastructure.models import (
+        DocumentChunkRecord,
+        DocumentRecord,
+        DocumentVersionRecord,
+    )
     from supportops.modules.ticket_classifications.infrastructure.models import (
         LLMInvocationRecord,
         TicketClassificationRecord,
@@ -21,6 +26,9 @@ def register_persistence_models() -> None:
 
     _ = (
         WorkspaceRecord,
+        DocumentRecord,
+        DocumentVersionRecord,
+        DocumentChunkRecord,
         TicketRecord,
         AgentRunRecord,
         AgentRunAttemptRecord,
