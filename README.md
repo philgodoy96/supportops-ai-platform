@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, and offline deterministic classification evaluation are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, and workspace-scoped immutable knowledge-document versioning are implemented.
 
 The current platform includes:
 
@@ -80,7 +80,19 @@ The current platform includes:
 - Ruff, mypy, and pytest quality gates;
 - a reproducible application Docker image;
 - GitHub Actions continuous integration;
-- professional architecture and development documentation.
+- professional architecture and development documentation;
+- workspace-scoped knowledge documents with optional workspace-local external references;
+- immutable plain-text and Markdown document versions;
+- deterministic source normalization and SHA-256 content hashing;
+- PostgreSQL-backed authoritative document, version, and chunk records;
+- concurrency-safe document version allocation under a document row lock;
+- database-enforced duplicate-content rejection within one document;
+- explicit `pending`, `failed`, and `ready` version states;
+- explicit activation that permits only ready versions;
+- opaque cursor pagination for document and version listings;
+- source content exposure only through the workspace-scoped version detail route;
+- cross-workspace document and version access that resolves as `404`;
+- reversible migrations and concurrency-sensitive integration coverage for the knowledge-document domain.
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
@@ -192,9 +204,11 @@ The PostgreSQL integration includes:
 - shared declarative metadata;
 - deterministic constraint naming;
 - Alembic async migration configuration;
-- registered workspace, ticket, AgentRun, invocation, and classification persistence models;
-- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, and `ticket_classifications`;
-- composite ownership constraints and accepted-invocation provenance for classification records.
+- registered workspace, ticket, AgentRun, invocation, classification, and knowledge-document persistence models;
+- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`, `knowledge_documents`, `knowledge_document_versions`, and `knowledge_document_chunks`;
+- composite ownership constraints and accepted-invocation provenance for classification records;
+- composite document-version and chunk-profile constraints for authoritative knowledge content;
+- database triggers that permit activation only for ready versions and prevent ready-version rewrites.
 
 ### Workspace and ticket persistence
 
@@ -207,6 +221,43 @@ The first business modules provide:
 - named uniqueness constraints for workspace slugs and workspace-scoped external references;
 - a minimal SQLAlchemy transaction adapter for application-owned boundaries;
 - repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
+
+### Versioned knowledge documents
+
+The `knowledge_documents` module provides PostgreSQL-authoritative source registration and version rollout without performing embedding or vector-index operations.
+
+Implemented behavior includes:
+
+- workspace-owned document identities;
+- optional external references unique within a workspace;
+- immutable `text/plain` and `text/markdown` versions;
+- deterministic line-ending normalization and UTF-8 SHA-256 content hashing;
+- duplicate normalized content rejection within one document;
+- authoritative source content stored on `DocumentVersion`;
+- authoritative deterministic chunk records prepared for the indexing phase;
+- `pending`, `failed`, and `ready` indexing lifecycle states;
+- immutable persisted indexing-profile fields once assigned;
+- concurrency-safe next-version allocation under a document row lock;
+- explicit activation through an active-version pointer owned by PostgreSQL;
+- database enforcement that only ready, owned versions can become active;
+- database enforcement that ready versions cannot be rewritten;
+- workspace-scoped document and version APIs with opaque keyset pagination;
+- source content returned only from the version detail endpoint;
+- tenant-safe `404` behavior for missing and cross-workspace documents and versions.
+
+Current document lifecycle:
+
+```text
+create document and version 1
+→ version remains pending
+→ future explicit indexing command produces chunks and vectors
+→ successful indexing marks the version ready
+→ explicit activation changes the document active-version pointer
+```
+
+Document registration and version creation make no embedding-provider or Qdrant calls. The indexing pipeline and semantic retrieval are introduced in subsequent PRs.
+
+The domain and transaction model are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md).
 
 ### Durable AgentRun scheduling and PostgreSQL worker
 
@@ -280,11 +331,11 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
 
 AgentRun detail includes an optional minimal classification reference.
 
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md).
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md).
 
-### Workspace, ticket, and AgentRun API
+### Workspace, ticket, AgentRun, and knowledge document API
 
-Slice 1 exposes versioned business routes under `/api/v1`:
+The platform exposes versioned business routes under `/api/v1`:
 
 - workspace creation and retrieval;
 - workspace-scoped ticket creation, retrieval, and listing;
@@ -292,10 +343,13 @@ Slice 1 exposes versioned business routes under `/api/v1`:
 - workspace-scoped AgentRunAttempt history listing;
 - workspace-scoped classification detail and ticket classification history;
 - workspace-scoped AgentRun logical invocation history;
-- opaque cursor pagination for ticket listing and classification history;
+- workspace-scoped knowledge-document creation, retrieval, and listing;
+- immutable document-version creation, retrieval, and listing;
+- explicit ready-version activation;
+- opaque cursor pagination for ticket, classification, document, and version listings;
 - stable expected-error responses for missing resources, conflicts, and invalid cursors;
 - persistence of request and correlation identifiers on accepted tickets;
-- cross-workspace retrieval that returns the same `404` contract as a missing ticket, AgentRun, or classification.
+- cross-workspace retrieval that returns the same `404` contract as a missing ticket, AgentRun, classification, document, or document version.
 
 Current operational flow:
 
@@ -320,7 +374,7 @@ The Qdrant integration includes:
 - optional API key configuration;
 - bounded read-only connectivity checks.
 
-No collections, vectors, embeddings, ingestion pipelines, or retrieval behavior exist yet.
+No collections, vectors, embeddings, indexing operations, or retrieval behavior exist yet. PostgreSQL now owns versioned source content and active-version state, providing the authoritative input for the later Qdrant indexing pipeline.
 
 ### Testing and quality
 
@@ -356,7 +410,10 @@ The repository includes:
 - retry and recovery idempotency coverage;
 - classification inspection integration coverage;
 - evaluation dataset, metrics, predictor, runner, and CLI unit coverage;
-- Alembic upgrade, downgrade, and metadata-parity coverage for classification tables;
+- Alembic upgrade, downgrade, and metadata-parity coverage for classification and knowledge-document tables;
+- knowledge-document domain, persistence mapping, repository, application-service, pagination, and API coverage;
+- PostgreSQL concurrency tests for distinct and duplicate normalized document-version creation;
+- database-trigger coverage for ready-only activation and ready-version immutability;
 - settings validation tests;
 - lifecycle tests;
 - dependency failure-path tests;
@@ -372,15 +429,17 @@ Normal unit and integration tests do not require an OpenAI API key or paid exter
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, and the offline `supportops.evaluation.ticket_classification` package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, and the offline `supportops.evaluation.ticket_classification` package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
 
 Future modules or extensions will introduce:
 
+- deterministic token-aware knowledge chunking and explicit indexing;
+- mock and OpenAI embedding providers;
+- Qdrant collection management and semantic retrieval;
+- retrieval evaluation datasets and deterministic scoring;
 - evidence-driven prompt version 2;
 - prompt regression comparison across versions;
 - scheduled evaluation and evaluation history persistence;
-- internal runbook ingestion;
-- semantic retrieval and Qdrant indexing;
 - LangGraph orchestration;
 - registered tools;
 - approval workflows;
@@ -403,6 +462,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   ├── architecture/
 │   │   ├── agent-run-scheduling.md
 │   │   ├── classification-evaluation.md
+│   │   ├── knowledge-documents.md
 │   │   ├── llm-gateway.md
 │   │   ├── overview.md
 │   │   ├── runtime-topology.md
@@ -460,6 +520,11 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   │   ├── application/
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
+│       │   ├── knowledge_documents/
+│       │   │   ├── api/
+│       │   │   ├── application/
+│       │   │   ├── domain/
+│       │   │   └── infrastructure/
 │       │   ├── ticket_classifications/
 │       │   │   ├── api/
 │       │   │   ├── application/
@@ -485,7 +550,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, and `ticket_classifications` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, and classification tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, and versioned knowledge-document tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
 
 ## Local setup
 
@@ -874,15 +939,31 @@ Planned:
 - cross-provider fallback after baseline behavior is observable;
 - operational cost reporting and invoice reconciliation.
 
-### Retrieval
+### Retrieval foundation
+
+Implemented:
+
+- workspace-scoped knowledge-document identities;
+- immutable plain-text and Markdown versions;
+- deterministic source normalization and content hashing;
+- duplicate normalized content protection;
+- concurrency-safe version numbering;
+- PostgreSQL-authoritative source content;
+- explicit ready-state and active-version separation;
+- workspace-scoped document and version APIs;
+- stable version detail access for source inspection.
 
 Planned:
 
-- runbook ingestion;
-- chunking;
-- embeddings;
-- Qdrant collections and indexing;
-- retrieval quality controls.
+- deterministic token-aware chunk generation;
+- mock and OpenAI embedding providers;
+- embedding usage and cost accounting;
+- Qdrant collection bootstrap and compatibility validation;
+- deterministic vector-point indexing;
+- active-version semantic retrieval;
+- PostgreSQL chunk hydration;
+- stable retrieval citations;
+- retrieval quality datasets and deterministic scoring.
 
 ### Controlled orchestration
 
@@ -936,8 +1017,9 @@ The following capabilities remain deferred to preserve architectural focus and a
 - cross-provider fallback and automatic model routing;
 - Anthropic provider;
 - operational cost reporting and invoice reconciliation;
-- embeddings and retrieval;
-- Qdrant collections and indexing;
+- automated and high-volume document ingestion;
+- embeddings and semantic retrieval;
+- Qdrant collections and vector indexing;
 - LangGraph orchestration;
 - registered tools;
 - human approval workflows;
