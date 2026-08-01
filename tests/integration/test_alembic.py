@@ -11,7 +11,7 @@ from supportops.core.settings import Settings
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "b7d3f1e5a9c2"
+EXPECTED_HEAD = "d4e8f2a6c901"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -65,6 +65,15 @@ async def test_alembic_upgrade_creates_business_tables(
         assert await relation_exists(engine, "public.alembic_version")
         assert await relation_exists(engine, "public.workspaces")
         assert await relation_exists(engine, "public.tickets")
+        assert await relation_exists(engine, "public.knowledge_documents")
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_versions",
+        )
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_chunks",
+        )
     finally:
         await engine.dispose()
 
@@ -84,6 +93,18 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
     try:
         assert not await relation_exists(engine, "public.tickets")
         assert not await relation_exists(engine, "public.workspaces")
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_documents",
+        )
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_document_versions",
+        )
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_document_chunks",
+        )
     finally:
         await engine.dispose()
 
@@ -95,5 +116,66 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
         assert await relation_exists(engine, "public.alembic_version")
         assert await relation_exists(engine, "public.workspaces")
         assert await relation_exists(engine, "public.tickets")
+        assert await relation_exists(engine, "public.knowledge_documents")
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_versions",
+        )
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_chunks",
+        )
     finally:
         await engine.dispose()
+
+
+async def test_alembic_downgrade_one_removes_only_knowledge_tables_and_can_reupgrade(
+    exclusive_integration_database: None,
+) -> None:
+    settings = Settings()
+    engine = create_async_engine(str(settings.postgresql_url))
+
+    upgrade = run_alembic_command("upgrade", "head")
+    assert upgrade.returncode == 0, upgrade.stderr
+
+    try:
+        downgrade = run_alembic_command("downgrade", "-1")
+        assert downgrade.returncode == 0, downgrade.stderr
+
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_documents",
+        )
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_document_versions",
+        )
+        assert not await relation_exists(
+            engine,
+            "public.knowledge_document_chunks",
+        )
+        assert await relation_exists(engine, "public.workspaces")
+        assert await relation_exists(engine, "public.tickets")
+        assert await relation_exists(engine, "public.agent_runs")
+        assert await relation_exists(engine, "public.agent_run_attempts")
+        assert await relation_exists(engine, "public.llm_invocations")
+        assert await relation_exists(
+            engine,
+            "public.ticket_classifications",
+        )
+
+        reupgrade = run_alembic_command("upgrade", "head")
+        assert reupgrade.returncode == 0, reupgrade.stderr
+
+        assert await relation_exists(engine, "public.knowledge_documents")
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_versions",
+        )
+        assert await relation_exists(
+            engine,
+            "public.knowledge_document_chunks",
+        )
+    finally:
+        await engine.dispose()
+        run_alembic_command("upgrade", "head")

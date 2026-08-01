@@ -145,6 +145,12 @@ async def clean_business_tables(
     )
 
     async def cleanup() -> None:
+        await lock_connection.execute(text("DELETE FROM knowledge_document_chunks"))
+        await lock_connection.execute(
+            text("UPDATE knowledge_documents SET active_version_id = NULL"),
+        )
+        await lock_connection.execute(text("DELETE FROM knowledge_document_versions"))
+        await lock_connection.execute(text("DELETE FROM knowledge_documents"))
         await lock_connection.execute(text("DELETE FROM ticket_classifications"))
         await lock_connection.execute(text("DELETE FROM llm_invocations"))
         await lock_connection.execute(text("DELETE FROM agent_run_attempts"))
