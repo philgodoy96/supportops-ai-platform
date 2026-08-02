@@ -3,7 +3,7 @@
 ## Purpose
 
 The `knowledge_documents` module establishes the PostgreSQL-authoritative source
-content required by the platform's later retrieval pipeline.
+content required by the platform's indexing and later retrieval pipeline.
 
 The module provides:
 
@@ -16,8 +16,10 @@ The module provides:
 - explicit ready-version activation;
 - workspace-scoped HTTP management.
 
-This phase deliberately stops before token-aware chunk generation, embeddings,
-Qdrant indexing, semantic retrieval, or grounded answer generation.
+Document registration remains source-only. Token-aware chunk generation,
+embeddings, and Qdrant indexing belong to the separate explicit indexing
+pipeline documented in [`knowledge-indexing.md`](knowledge-indexing.md).
+Semantic retrieval and grounded answer generation remain later capabilities.
 
 ## Module boundary
 
@@ -116,12 +118,12 @@ Its responsibilities are:
 - retain chunking strategy and version;
 - retain a deterministic UUIDv5 identity.
 
-Chunk rows are introduced with the source-of-truth model so the later indexing
+Chunk rows are introduced with the source-of-truth model so the indexing
 pipeline can persist and verify deterministic chunks without making Qdrant an
 authoritative content store.
 
-The current phase defines and persists chunk invariants but does not yet
-generate chunks from document content.
+Chunk generation is performed by the explicit indexing command. The HTTP API
+does not create chunks during document or version registration.
 
 ## Content normalization and hashing
 
@@ -150,7 +152,7 @@ content stored in PostgreSQL.
 Consequences:
 
 - line endings do not produce environment-specific hashes;
-- hashing and future chunking consume the same authoritative input;
+- hashing and indexing consume the same authoritative input;
 - meaningful Markdown and code formatting remain unchanged;
 - duplicate normalized content can be rejected deterministically.
 
@@ -209,9 +211,14 @@ There is no durable `indexing` state in this phase.
 
 A new version begins as `pending`.
 
-A future explicit indexing command will bind the indexing profile, persist or
-verify deterministic chunks, perform embedding and Qdrant operations outside
-database transactions, and then move the version to `ready` or `failed`.
+Pending versions may be indexed explicitly through the
+`supportops-index-knowledge` CLI. That command binds or validates the immutable
+indexing profile, persists or verifies deterministic chunks, performs embedding
+and Qdrant operations outside database transactions, verifies the exact version
+projection count, and then moves the version to `ready` or `failed`.
+
+Failed versions retain their assigned profile and authoritative chunks. Compatible
+failed versions may retry. Ready versions may be re-run as a no-op.
 
 The indexing profile contains:
 
@@ -236,15 +243,20 @@ A ready version contains:
 - pricing-catalog provenance;
 - optional estimated cost;
 - indexing completion timestamp;
-- no failure code.
+- no failure code;
+- a complete verified Qdrant projection for the version.
 
 Unknown pricing remains `null`; it is never treated as zero.
+
+Ready means the indexing projection completed and was verified. Ready does not
+mean active.
 
 ## Ready state and active state
 
 Readiness and activation represent different decisions.
 
-`ready` means the version's future indexing pipeline completed successfully.
+`ready` means the version's indexing pipeline completed successfully and the
+exact Qdrant projection count was verified.
 
 `active` means the document currently exposes that ready version to future
 retrieval.
@@ -281,6 +293,28 @@ Activation is idempotent when the selected version is already active.
 
 A successfully indexed version may remain ready but inactive. This supports
 controlled rollout and validation before retrieval eligibility changes.
+
+## Indexing integration
+
+Document registration remains source-only. Creating a document or version
+through the HTTP API persists PostgreSQL state and does not call an embedding
+provider or Qdrant.
+
+The explicit indexing pipeline:
+
+- binds or validates one immutable index profile per document version;
+- persists authoritative chunks as PostgreSQL records;
+- writes only derived vectors and non-content metadata into Qdrant;
+- marks the version ready only after exact projection-count verification;
+- does not activate the version.
+
+Successful indexing therefore leaves `active_version_id` unchanged until an
+operator activates a ready version through the API.
+
+Indexing architecture is documented in
+[`knowledge-indexing.md`](knowledge-indexing.md). The explicit profiled
+indexing decision is recorded in
+[`../decisions/0008-use-explicit-profiled-knowledge-indexing.md`](../decisions/0008-use-explicit-profiled-knowledge-indexing.md).
 
 ## Persistence model
 
@@ -502,36 +536,22 @@ Normal tests make no paid provider calls.
 
 The following capabilities are deliberately deferred:
 
-- token-aware chunk generation;
-- embedding-provider contracts;
-- mock and OpenAI embeddings;
-- embedding usage and cost calculation;
-- Qdrant collection creation;
-- vector-point indexing;
 - semantic retrieval;
 - stable retrieval citations;
+- reranking;
 - retrieval evaluation;
 - grounded answer generation;
 - document deletion;
 - automatic activation;
+- automatic indexing scheduling;
 - automated high-volume ingestion;
 - PDF, DOCX, OCR, image, or web ingestion;
 - authentication and authorization.
 
-These capabilities require the source-content, ownership, immutability, and
-rollout guarantees established by this module.
+Token-aware chunk generation, embedding providers, embedding usage and cost
+calculation, Qdrant collection creation, and vector-point indexing are
+implemented by the separate knowledge indexing pipeline.
 
-## Next integration step
-
-The next delivery phase introduces the indexing pipeline:
-
-```text
-load immutable pending version
-→ generate deterministic token-aware chunks
-→ persist or verify authoritative chunks
-→ generate embeddings through an application-owned boundary
-→ upsert deterministic Qdrant points
-→ mark the version ready
-```
-
-Activation remains a separate operation after successful indexing.
+These deferred capabilities require the source-content, ownership, immutability,
+indexing, and rollout guarantees established by this module and the indexing
+pipeline.
