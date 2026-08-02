@@ -121,6 +121,8 @@ async def exclusive_integration_database(
     await connection.execute(
         text(f"SELECT pg_advisory_lock({_INTEGRATION_DATABASE_LOCK_KEY})"),
     )
+    # Commit so CREATE INDEX CONCURRENTLY (checkpoint setup) is not blocked.
+    await connection.commit()
 
     try:
         yield None
