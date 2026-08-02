@@ -160,6 +160,7 @@ async def test_returns_scripted_knowledge_search() -> None:
     provider = MockLLMProvider.with_strict_tool_decisions(
         (
             MockToolDecisionOutcome.search_knowledge(
+                query="account access reset",
                 top_k=5,
                 document_ids=None,
                 usage=usage,
@@ -171,7 +172,9 @@ async def test_returns_scripted_knowledge_search() -> None:
     response = await provider.decide(_decision_request())
 
     assert response.function_name == "search_knowledge"
-    assert response.arguments_json == ('{"document_ids":null,"top_k":5}')
+    assert response.arguments_json == (
+        '{"document_ids":null,"query":"account access reset","top_k":5}'
+    )
     assert response.provider == MOCK_LLM_PROVIDER_NAME
     assert response.model == MOCK_SUPPORT_MODEL
     assert response.provider_request_id == "mock-request-1"

@@ -124,6 +124,7 @@ class MockToolDecisionOutcome:
     def search_knowledge(
         cls,
         *,
+        query: str = "support guidance",
         top_k: int = 5,
         document_ids: tuple[UUID, ...] | None = None,
         usage: LLMTokenUsage | None = None,
@@ -137,6 +138,7 @@ class MockToolDecisionOutcome:
         return cls.function_call(
             function_name="search_knowledge",
             arguments={
+                "query": query,
                 "top_k": top_k,
                 "document_ids": serialized_document_ids,
             },
