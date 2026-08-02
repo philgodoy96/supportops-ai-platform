@@ -168,7 +168,7 @@ def create_request(
         model="stub-support-model-v1",
         instructions=("Select one approved function for the controlled support workflow."),
         input=('{"ticket":{"subject":"Reset access"},"classification":{"category":"how_to"}}'),
-        tools=tools or (create_search_definition(),),
+        tools=((create_search_definition(),) if tools is None else tools),
         terminal_control=(terminal_control or create_terminal_control()),
         timeout_seconds=20,
         metadata={
@@ -233,6 +233,20 @@ def test_application_request_projects_provider_only_metadata() -> None:
     assert "output_schema" not in executable_payload
     assert "failure_policy" not in executable_payload
     assert "audit_policy" not in executable_payload
+
+
+def test_application_request_supports_terminal_only_decision() -> None:
+    request = create_request(tools=())
+
+    provider_request = request.to_provider_request()
+
+    assert request.tools == ()
+    assert provider_request.tool_choice == "required"
+    assert provider_request.parallel_tool_calls is False
+    assert [function.name for function in provider_request.functions] == [
+        COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME,
+    ]
+    assert provider_request.functions[0].strict is True
 
 
 def test_application_request_copies_and_freezes_metadata() -> None:
@@ -406,6 +420,43 @@ async def test_gateway_returns_validated_terminal_control() -> None:
     )
     assert result.decision.output.recommended_action == "respond"
     assert result.decision.output.evidence_sufficient is True
+
+
+async def test_gateway_accepts_terminal_control_without_executable_tools() -> None:
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(
+            function_name=(COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME),
+            arguments_json=(
+                "{"
+                '"recommended_action":"request_more_information",'
+                '"evidence_sufficient":false,'
+                '"requires_human_review":false,'
+                '"decision_summary":'
+                '"Additional diagnostic details are required."'
+                "}"
+            ),
+        )
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(20.0, 20.01),
+    )
+
+    result = await gateway.decide(create_request(tools=()))
+
+    assert len(provider.requests) == 1
+    assert len(provider.requests[0].functions) == 1
+    assert provider.requests[0].functions[0].name == (COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME)
+    assert isinstance(
+        result.decision,
+        LLMTerminalControlDecision,
+    )
+    assert isinstance(
+        result.decision.output,
+        CompleteSupportAnalysisInput,
+    )
+    assert result.decision.output.recommended_action == ("request_more_information")
+    assert result.decision.output.evidence_sufficient is False
 
 
 @pytest.mark.parametrize(

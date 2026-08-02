@@ -207,9 +207,6 @@ class LLMToolDecisionRequest:
             )
         )
 
-        if not normalized_tools:
-            raise ValueError("At least one executable tool is required.")
-
         if len(normalized_tools) > 10:
             raise ValueError("Too many executable tools were provided.")
 
