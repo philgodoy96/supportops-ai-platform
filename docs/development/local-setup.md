@@ -18,6 +18,7 @@ The current platform includes:
 - versioned workspace, ticket, AgentRun, and knowledge-document HTTP APIs;
 - durable AgentRun scheduling and PostgreSQL worker execution;
 - workspace-scoped AgentRun inspection;
+- controlled support aggregate inspection;
 - explicit profiled knowledge indexing;
 - active-version semantic knowledge retrieval;
 - unit and integration tests;
@@ -164,6 +165,9 @@ Business routes under `/api/v1` require a migrated PostgreSQL database. Ticket c
 
 ## Start the worker
 
+Ensure PostgreSQL and Qdrant are running before starting the worker. The complete
+controlled workflow requires both dependencies.
+
 In a separate terminal, start the PostgreSQL worker:
 
 ```powershell
@@ -174,9 +178,14 @@ uv run supportops-worker
 Expected startup behavior:
 
 - settings validate successfully;
+- PostgreSQL and Qdrant are available for the complete controlled workflow;
+- the worker initializes checkpoint, embedding, and Qdrant resources in addition
+  to the LLM runtime;
+- checkpoint setup creates or upgrades framework-owned checkpoint tables;
+- the worker registry includes `deterministic-baseline-v1`,
+  `ticket-classification-v1`, and `controlled-support-v1`;
 - the process emits a structured `worker_started` log;
-- the worker begins recovery, claim, and processing cycles against PostgreSQL;
-- the worker does not initialize or connect to Qdrant.
+- the worker begins recovery, claim, and processing cycles against PostgreSQL.
 
 Docker Compose intentionally does not run the worker. Keep the API terminal and the worker terminal running while exercising ticket intake.
 
@@ -275,7 +284,7 @@ Expected behavior:
 - ticket status is `open`;
 - `processing_run.status` is `queued`;
 - `processing_run.workflow_name` is `ticket-processing`;
-- `processing_run.workflow_version` is `deterministic-baseline-v1`;
+- `processing_run.workflow_version` is `controlled-support-v1`;
 - `ingestion_request_id` matches `X-Request-ID`;
 - `correlation_id` matches `X-Correlation-ID`;
 - the response confirms ticket acceptance, not final processing success.
@@ -316,9 +325,9 @@ Expected queued attempt history:
 ### Observe worker processing and succeeded state
 
 With the worker running, observe structured worker logs such as
-`worker_cycle_completed` for claimed and processed runs. The deterministic
-baseline validates the workflow contract and does not perform AI
-classification.
+`worker_cycle_completed` for claimed and processed runs. The default
+`controlled-support-v1` workflow may include classification, read-only tool
+execution, and recommendation persistence before the outer AgentRun succeeds.
 
 After processing completes, inspect the AgentRun again:
 
@@ -328,7 +337,7 @@ Invoke-RestMethod `
   -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/agent-runs/$agentRunId"
 ```
 
-Expected succeeded behavior for the deterministic baseline:
+Expected succeeded behavior for a completed controlled run:
 
 - status is `succeeded`;
 - `attempt_count` is `1`;
@@ -349,6 +358,29 @@ Expected succeeded attempt history:
 - `attempt_number` is `1`;
 - `outcome` is `succeeded`;
 - lease tokens and execution request IDs are not present.
+
+### Inspect controlled support aggregate state
+
+```powershell
+$inspection = Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$($workspace.id)/tickets/$($ticket.id)/agent-runs/" +
+    "$agentRunId/inspection"
+  )
+
+$inspection.agent_run.status
+$inspection.classification
+$inspection.tool_calls
+$inspection.llm_usage
+$inspection.recommendation
+```
+
+Queued, running, retrying, and failed workflows may return valid partial
+inspection responses. A completed controlled run includes the persisted
+recommendation. The endpoint reads durable business records and does not
+deserialize LangGraph checkpoint state.
 
 Inspection reports current persisted state. It does not guarantee future
 completion while a run is still in progress.
@@ -527,8 +559,13 @@ uv run alembic current
 uv run alembic heads
 ```
 
-The current head creates the `workspaces`, `tickets`, `agent_runs`, and
-`agent_run_attempts` tables.
+The current head creates the `workspaces`, `tickets`, `agent_runs`,
+`agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
+`agent_tool_calls`, `support_recommendations`,
+`support_recommendation_citations`, and versioned knowledge-document tables.
+Framework-owned LangGraph checkpoint tables are created by checkpointer setup.
+Alembic ignores only those exact framework-owned checkpoint tables.
+`alembic check` should report no new upgrade operations.
 
 `alembic downgrade` must only run against the local development or test database. Do not run downgrades against shared or production databases.
 
@@ -549,7 +586,12 @@ docker compose exec postgresql `
 ```
 
 After `alembic upgrade head`, the schema includes `workspaces`, `tickets`,
-`agent_runs`, and `agent_run_attempts`.
+`agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
+`agent_tool_calls`, `support_recommendations`,
+`support_recommendation_citations`, and the versioned knowledge-document tables.
+Checkpoint tables appear after the worker checkpointer setup creates or upgrades
+framework-owned LangGraph tables. Those checkpoint tables are not application
+Alembic migrations.
 
 ## Run quality checks
 

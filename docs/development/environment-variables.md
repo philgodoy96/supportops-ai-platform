@@ -328,23 +328,29 @@ these values for identity, polling, claiming, execution timeout, retry
 scheduling, and cooperative shutdown. Ticket intake copies
 `SUPPORTOPS_WORKER_MAX_ATTEMPTS` into newly scheduled `AgentRun` records.
 
-The worker always composes a versioned executor registry containing both the
-deterministic baseline and classification workflows. Executor selection is not
-deployment configuration. Each AgentRun's stored workflow version controls
-dispatch.
+The worker always composes a versioned executor registry containing three exact
+workflow versions: `deterministic-baseline-v1`, `ticket-classification-v1`, and
+`controlled-support-v1`. Executor selection is not deployment configuration.
+Each AgentRun's stored workflow version controls dispatch. The local default
+configured version is `controlled-support-v1`. The worker may compose embedding
+and Qdrant resources for controlled workflow knowledge search in addition to its
+LLM and checkpoint runtimes.
 
 Cross-field invariants:
 
 - `SUPPORTOPS_WORKER_LEASE_SECONDS` must exceed
-  `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` by at least five seconds;
+  `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` by at least 15 seconds;
 - `SUPPORTOPS_WORKER_RETRY_MAX_SECONDS` must not be smaller than
   `SUPPORTOPS_WORKER_RETRY_BASE_SECONDS`;
-- the complete logical LLM invocation budget must fit inside
-  `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` with a five-second safety
-  margin;
-- logical invocation count is `1 + SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS`;
-- logical LLM budget is
-  `SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS × logical invocation count`;
+- controlled workflow generation slots equal 6 before repair multiplication;
+- each generation slot may use
+  `1 + SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS` logical provider requests;
+- controlled budget equals
+  `6 × SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS × (1 + SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS)`;
+- `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS` must cover the controlled budget
+  plus 15 seconds when the configured workflow is `controlled-support-v1`;
+- direct classification and deterministic baseline retain their smaller
+  single-generation validation behavior when selected;
 - provider transport retries are internal SDK behavior and are not separate
   application logical invocations.
 ### `SUPPORTOPS_WORKER_ID`
@@ -459,7 +465,7 @@ float seconds
 Default:
 
 ```text
-45.0
+150.0
 ```
 
 Accepted range:
@@ -482,7 +488,7 @@ Purpose:
 Example safe value:
 
 ```text
-45.0
+150.0
 ```
 
 ### `SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS`
@@ -504,7 +510,7 @@ float seconds
 Default:
 
 ```text
-30.0
+135.0
 ```
 
 Accepted range:
@@ -527,7 +533,7 @@ Purpose:
 Example safe value:
 
 ```text
-30.0
+135.0
 ```
 
 ### `SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS`
@@ -727,10 +733,13 @@ generation adapter or the OpenAI embedding adapter is selected.
 
 Provider, model, workflow version, prompt version, schema version, and embedding
 profile remain independent configuration and provenance dimensions. The API
-creates the configured embedding provider at startup for semantic retrieval and
-does not create the LLM provider. The worker creates the configured LLM provider
-once per process and does not create the embedding provider. The indexing CLI
-creates its own embedding provider. No provider fallback exists.
+owns the embedding provider for public semantic retrieval and does not create
+the LLM provider. The indexing CLI owns the embedding provider for indexing.
+The worker owns the LLM provider and, for controlled workflows, also owns the
+embedding provider used for controlled knowledge search. The worker converts
+`SUPPORTOPS_POSTGRESQL_URL` internally to a Psycopg-compatible DSN for the
+checkpoint runtime without logging the secret. No separate checkpoint DSN
+environment variable exists. No provider fallback exists.
 
 ### `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION`
 
@@ -752,7 +761,7 @@ literal string
 Default:
 
 ```text
-ticket-classification-v1
+controlled-support-v1
 ```
 
 Accepted values:
@@ -760,6 +769,7 @@ Accepted values:
 ```text
 deterministic-baseline-v1
 ticket-classification-v1
+controlled-support-v1
 ```
 
 Applies to:
@@ -773,7 +783,7 @@ Purpose:
 - assigns the workflow version persisted on newly created AgentRuns;
 - keeps workflow version independent from provider, model, prompt version, and
   schema version;
-- allows deterministic historical runs to remain supported;
+- allows deterministic and classification historical runs to remain supported;
 - requires the worker registry to contain the stored version for dispatch.
 
 This setting does not select provider or model. Historical runs retain their
@@ -782,7 +792,7 @@ stored versions after configuration changes.
 Example safe value:
 
 ```text
-ticket-classification-v1
+controlled-support-v1
 ```
 
 ### `SUPPORTOPS_LLM_PROVIDER`
@@ -1000,7 +1010,7 @@ float seconds
 Default:
 
 ```text
-12.0
+10.0
 ```
 
 Accepted range:
@@ -1026,7 +1036,7 @@ entire outer retry lifecycle.
 Example safe value:
 
 ```text
-12.0
+10.0
 ```
 
 ### `SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES`
@@ -1132,7 +1142,40 @@ Example safe value:
 
 ### LLM timing relationship
 
-Logical LLM timing relates to the worker execution timeout as follows:
+Logical LLM timing relates to the worker execution timeout as follows.
+
+For `controlled-support-v1`:
+
+```text
+controlled_generation_slots = 6
+logical_invocation_count_per_slot = 1 + llm_max_repair_attempts
+
+controlled_budget_seconds =
+    controlled_generation_slots
+    × llm_request_timeout_seconds
+    × logical_invocation_count_per_slot
+
+worker_execution_timeout_seconds
+    >= controlled_budget_seconds + 15
+
+worker_lease_seconds
+    >= worker_execution_timeout_seconds + 15
+```
+
+Defaults for the controlled workflow:
+
+```text
+controlled_generation_slots = 6
+llm_request_timeout_seconds = 10
+llm_max_repair_attempts = 1
+logical_invocation_count_per_slot = 2
+controlled_budget_seconds = 120
+configured worker execution timeout = 135
+configured worker lease = 150
+```
+
+For `ticket-classification-v1` and `deterministic-baseline-v1`, validation uses
+the smaller single-generation budget:
 
 ```text
 logical_invocation_count = 1 + llm_max_repair_attempts
@@ -1141,21 +1184,11 @@ logical_llm_budget_seconds =
     llm_request_timeout_seconds × logical_invocation_count
 
 worker_execution_timeout_seconds
-    >= logical_llm_budget_seconds + 5
-```
-
-Defaults:
-
-```text
-logical_invocation_count = 2
-logical_llm_budget_seconds = 24
-minimum worker execution timeout = 29
-configured worker execution timeout = 30
-configured worker lease = 45
+    >= logical_llm_budget_seconds + 15
 ```
 
 The lease must independently exceed the worker execution timeout by at least
-five seconds.
+15 seconds.
 
 ### Provider and retry semantics
 
@@ -1203,18 +1236,21 @@ Applies to:
 ```text
 API semantic retrieval
 indexing CLI
+worker controlled workflow knowledge search
 ```
 
 Purpose:
 
-- selects the embedding adapter used by API query embeddings and the indexing CLI;
+- selects the embedding adapter used by API query embeddings, the indexing CLI,
+  and the worker controlled `search_knowledge` path;
 - keeps local development network-free by default;
 - remains independent from `SUPPORTOPS_LLM_PROVIDER`;
 - prevents implicit provider fallback.
 
 OpenAI embedding failure never selects `mock` automatically. The API creates the
-embedding provider at startup for semantic retrieval. Provider construction
-performs no embedding request at startup. OpenAI embedding mode means API
+embedding provider at startup for semantic retrieval. The worker creates its own
+embedding provider for controlled workflow retrieval. Provider construction
+performs no embedding request at startup. OpenAI embedding mode means process
 startup validates and constructs the client; query calls remain request-driven.
 
 Example safe value:
@@ -1532,7 +1568,7 @@ SUPPORTOPS_POSTGRESQL_MAX_OVERFLOW=10
 SUPPORTOPS_POSTGRESQL_POOL_TIMEOUT_SECONDS=10
 
 # AI runtime
-SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION=ticket-classification-v1
+SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION=controlled-support-v1
 SUPPORTOPS_LLM_PROVIDER=mock
 SUPPORTOPS_OPENAI_API_KEY=
 SUPPORTOPS_OPENAI_MODEL=gpt-5-nano
@@ -1557,7 +1593,9 @@ to appear in the local example file for basic local development. Set
 `SUPPORTOPS_WORKER_ID` explicitly when distinguishing concurrent local workers.
 `SUPPORTOPS_EMBEDDING_*` values likewise use validated mock defaults when unset.
 The AI runtime section above matches `.env.example`, including the empty
-`SUPPORTOPS_OPENAI_API_KEY=` placeholder.
+`SUPPORTOPS_OPENAI_API_KEY=` placeholder. When overriding LLM request timeout
+locally, keep worker execution timeout and lease values large enough for the
+selected workflow budget and the 15-second safety margins.
 
 ## Validation behavior
 
@@ -1571,8 +1609,10 @@ SUPPORTOPS_QDRANT_URL
 ```
 
 The shared settings model still requires `SUPPORTOPS_QDRANT_URL` for process
-construction. The worker validates that shared model at startup but does not
-initialize or connect to Qdrant.
+construction. The worker validates that shared model at startup and may
+initialize Qdrant and embedding resources for controlled workflows. The worker
+also converts `SUPPORTOPS_POSTGRESQL_URL` to a Psycopg-compatible checkpoint DSN
+internally without logging the secret.
 
 Examples of invalid configuration include:
 
@@ -1580,7 +1620,7 @@ Examples of invalid configuration include:
 - blank Qdrant URL;
 - API port outside the valid range;
 - worker maximum attempts outside the accepted range;
-- worker lease duration that does not exceed execution timeout by at least five seconds;
+- worker lease duration that does not exceed execution timeout by at least 15 seconds;
 - worker retry maximum smaller than retry base;
 - non-positive pool timeout;
 - non-positive dependency health timeout;
@@ -1596,7 +1636,7 @@ Examples of invalid configuration include:
 - embedding transport retry count outside 0 through 2;
 - repair attempt count outside 0 through 1;
 - logical LLM budget exceeding the worker execution timeout after the required
-  five-second safety margin.
+  15-second safety margin.
 
 Validate application settings through the test suite:
 

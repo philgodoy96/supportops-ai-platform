@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, and active-version semantic knowledge retrieval are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, and controlled support inspection are implemented.
 
 The current platform includes:
 
@@ -32,13 +32,24 @@ The current platform includes:
 - workspace creation and retrieval API;
 - workspace-scoped ticket intake;
 - atomic Ticket and initial AgentRun persistence;
-- configured `ticket-classification-v1` scheduling for newly accepted tickets;
+- configured `controlled-support-v1` scheduling for newly accepted tickets as the local default ticket-processing workflow;
+- exact registered workflow versions `deterministic-baseline-v1`, `ticket-classification-v1`, and `controlled-support-v1`;
 - durable AgentRun and AgentRunAttempt persistence;
 - PostgreSQL claiming with `FOR UPDATE SKIP LOCKED`;
 - attempt history, leases, and lease-token fencing;
 - bounded retries and expired lease recovery;
 - exact versioned workflow executor registry;
-- deterministic baseline and classification workflow execution outside database transactions;
+- deterministic baseline, classification, and controlled-support workflow execution outside database transactions;
+- LangGraph bounded orchestration inside AgentRun with PostgreSQL-backed checkpoint resume;
+- process-scoped worker checkpoint, embedding, and Qdrant resources for controlled-support-v1;
+- read-only controlled tools `search_knowledge` and `lookup_service_status`;
+- durable `AgentToolCall` audits with post-commit/pre-checkpoint recovery;
+- authoritative PostgreSQL reconstruction of knowledge observations;
+- durable `SupportRecommendation` and `SupportRecommendationCitation` records;
+- controlled support inspection endpoint over persisted business records;
+- attempt-scoped tool and invocation ordering;
+- historical estimated-cost aggregation from persisted invocations;
+- exact Alembic exclusion of framework-owned LangGraph checkpoint tables;
 - process-scoped mock or OpenAI worker provider;
 - Structured Outputs classification through the LLM Gateway;
 - durable `LLMInvocation` history;
@@ -110,9 +121,9 @@ The current platform includes:
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
-Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `ticket-classification-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status or execute tools. The deterministic baseline remains registered for historical or explicitly scheduled runs and performs no LLM call.
+Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `controlled-support-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status. The controlled workflow may execute read-only tools and persist a support recommendation without mutating the ticket or executing write-capable actions. The deterministic baseline and direct classification workflows remain registered for historical or explicitly scheduled runs.
 
-Inspection endpoints report current persisted AgentRun, classification, and logical invocation state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant.
+Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant.
 
 ## Engineering goals
 
@@ -141,9 +152,9 @@ The FastAPI process and the PostgreSQL worker process share:
 - the same PostgreSQL database;
 - the same infrastructure adapters where each process requires them.
 
-The API owns HTTP acceptance, transactional AgentRun scheduling, and semantic knowledge retrieval. For retrieval, the API process owns Qdrant client resources and a process-scoped embedding provider with an immutable retrieval profile. The worker owns recovery, claim, execution, and fenced outcome persistence. PostgreSQL is the durable work queue and transactional source of truth. The worker does not initialize or depend on Qdrant, retains only its LLM provider, and does not own the knowledge indexing command. The indexing CLI remains a separate one-shot process.
+The API owns HTTP acceptance, transactional AgentRun scheduling, semantic knowledge retrieval, and controlled support inspection. For public retrieval, the API process owns Qdrant client resources and a process-scoped embedding provider with an immutable retrieval profile. The worker owns recovery, claim, execution, fenced outcome persistence, and the process-scoped LLM, checkpoint, embedding, and Qdrant resources required by `controlled-support-v1`. PostgreSQL is the durable work queue and transactional source of truth for business records, and it also stores framework-owned LangGraph checkpoint tables. The indexing CLI remains a separate one-shot process.
 
-PostgreSQL owns source content, authoritative chunks, indexing status, immutable index profile, active-version selection, embedding usage, estimated cost, failure provenance, and retrieval evidence content. Qdrant owns only the rebuildable vector projection used for candidate search. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
+PostgreSQL owns source content, authoritative chunks, indexing status, immutable index profile, active-version selection, embedding usage, estimated cost, failure provenance, retrieval evidence content, tool audits, recommendations, and citations. LangGraph checkpoint schema remains framework-owned and is excluded from application Alembic ownership. Qdrant owns only the rebuildable vector projection used for candidate search by both public retrieval and controlled workflow knowledge search. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
 
 Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Future executors and tools must make side effects idempotent or otherwise safely fenced.
 
@@ -160,6 +171,7 @@ The current runtime foundation uses:
 - PostgreSQL;
 - Qdrant;
 - OpenAI Python SDK;
+- LangGraph;
 - Docker Compose;
 - pytest;
 - pytest-asyncio;
@@ -184,6 +196,7 @@ The repository provides:
 - OpenAPI project metadata;
 - process-owned PostgreSQL and Qdrant resources;
 - process-scoped embedding provider and immutable retrieval profile for semantic search;
+- process-scoped worker LLM, checkpoint, embedding, and Qdrant composition for controlled-support-v1;
 - centralized startup and shutdown lifecycle with partial startup cleanup and independent shutdown cleanup;
 - structured JSON logging;
 - non-root container execution.
@@ -327,7 +340,7 @@ Retrieval architecture is documented in [`docs/architecture/semantic-knowledge-r
 
 ### Durable AgentRun scheduling and PostgreSQL worker
 
-Ticket intake schedules the configured workflow version in the same application-owned transaction that creates the ticket. The local default is `ticket-classification-v1`. The HTTP request returns the existing Ticket response after that transaction commits and does not execute the workflow or call the model.
+Ticket intake schedules the configured workflow version in the same application-owned transaction that creates the ticket. The local default is `controlled-support-v1`. The HTTP request returns the existing Ticket response after that transaction commits and does not execute the workflow or call the model.
 
 Implemented behavior includes:
 
@@ -343,17 +356,18 @@ Implemented behavior includes:
 - attempt history, leases, and lease-token fencing;
 - bounded exponential backoff retries;
 - expired lease recovery before each claim cycle;
-- a versioned executor registry with exact workflow name and version dispatch;
-- deterministic baseline support for historical or explicitly scheduled runs;
-- classification provider calls outside database transactions;
-- separate fenced transactions for invocation and classification persistence and AgentRun completion;
-- cooperative SIGINT and SIGTERM shutdown with provider cleanup and engine disposal.
+- a versioned executor registry with exact workflow name and version dispatch for three registered versions;
+- deterministic baseline and direct classification support for historical or explicitly scheduled runs;
+- controlled-support-v1 LangGraph orchestration with checkpoint resume inside the AgentRun boundary;
+- provider, embedding, tool, and Qdrant calls outside database transactions;
+- separate fenced transactions for invocation, classification, tool audit, recommendation, and AgentRun completion;
+- cooperative SIGINT and SIGTERM shutdown with controlled runtime, provider, and engine cleanup.
 
-The ticket creation response remains the Ticket response shape and does not report classification completion.
+The ticket creation response remains the Ticket response shape and does not report recommendation completion.
 
-After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Inspection exposes status, retry budget, workflow identity, safe error metadata, and ordered attempt outcomes. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, or execution request IDs.
+After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Controlled support runs can also be inspected through the aggregate controlled support inspection endpoint. Inspection exposes status, retry budget, workflow identity, safe error metadata, ordered attempt outcomes, tool calls, invocations, usage, and recommendations where present. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, execution request IDs, or checkpoint blobs.
 
-Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md).
+Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md). Controlled workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md).
 
 ### Application-owned LLM Gateway and durable classification
 
@@ -397,7 +411,32 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
 
 AgentRun detail includes an optional minimal classification reference.
 
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). Semantic knowledge retrieval is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md).
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). Semantic knowledge retrieval is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md). Controlled support workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md). AgentRun and LangGraph durability ownership is recorded in [`docs/decisions/0010-separate-agent-run-and-langgraph-durability.md`](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
+
+### Controlled support workflow and inspection
+
+The platform implements `controlled-support-v1` as the default ticket-processing workflow. AgentRun owns outer durability. LangGraph owns bounded inner orchestration with PostgreSQL checkpoint resume. The worker process owns LLM, checkpoint, embedding, and Qdrant resources required by the controlled workflow. The API independently owns retrieval resources for the public semantic search endpoint.
+
+Implemented controlled-workflow behavior includes:
+
+- classification reuse through the existing durable classification boundary;
+- read-only tools `search_knowledge` and `lookup_service_status`;
+- durable `AgentToolCall` audits under lease fencing;
+- post-commit/pre-checkpoint recovery before requesting another model decision;
+- authoritative PostgreSQL reconstruction of knowledge observations;
+- durable `SupportRecommendation` and ordered `SupportRecommendationCitation` records;
+- outer AgentRun success only after a persisted recommendation identity exists;
+- attempt-scoped tool and invocation ordering;
+- historical estimated-cost aggregation from persisted invocations;
+- exact Alembic exclusion of framework-owned checkpoint tables.
+
+Implemented inspection route:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/agent-runs/{agent_run_id}/inspection
+```
+
+The inspection endpoint supports `controlled-support-v1` only. It reads persisted business records and does not deserialize LangGraph checkpoint state. Queued, running, retrying, and failed workflows may return valid partial inspection views.
 
 ### Workspace, ticket, AgentRun, and knowledge document API
 
@@ -409,6 +448,7 @@ The platform exposes versioned business routes under `/api/v1`:
 - workspace-scoped AgentRunAttempt history listing;
 - workspace-scoped classification detail and ticket classification history;
 - workspace-scoped AgentRun logical invocation history;
+- controlled support aggregate inspection for `controlled-support-v1` runs;
 - workspace-scoped knowledge-document creation, retrieval, and listing;
 - immutable document-version creation, retrieval, and listing;
 - explicit ready-version activation;
@@ -450,7 +490,7 @@ The Qdrant integration includes:
 - bounded upserts with exact version projection-count verification;
 - filtered candidate search for semantic retrieval against the named dense vector.
 
-Qdrant stores only the rebuildable vector projection. PostgreSQL remains authoritative for source content, chunks, status, profile, usage, cost, failure provenance, active-version selection, and retrieval evidence content. The API uses Qdrant for semantic candidate search and hydrates authoritative chunk content from PostgreSQL. The worker does not connect to Qdrant, and the HTTP API does not perform indexing.
+Qdrant stores only the rebuildable vector projection. PostgreSQL remains authoritative for source content, chunks, status, profile, usage, cost, failure provenance, active-version selection, and retrieval evidence content. The API uses Qdrant for semantic candidate search and hydrates authoritative chunk content from PostgreSQL. The worker uses Qdrant for controlled `search_knowledge` candidate search and likewise hydrates authoritative content from PostgreSQL. Deterministic baseline and direct classification workflows do not use Qdrant. The HTTP API does not perform indexing.
 
 ### Testing and quality
 
@@ -511,19 +551,17 @@ Normal unit and integration tests do not require an OpenAI API key or paid exter
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the offline `supportops.evaluation.ticket_classification` package, the explicit `supportops.knowledge_index` indexing package, and the `supportops.knowledge_retrieval` semantic search package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns active-version resolution, query embedding composition, Qdrant candidate search, PostgreSQL hydration, provenance validation, deterministic ranking, citations, and the workspace-scoped search route.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the offline `supportops.evaluation.ticket_classification` package, the explicit `supportops.knowledge_index` indexing package, the `supportops.knowledge_retrieval` semantic search package, the `supportops.agent_graph` controlled orchestration package, and the `supportops.agent_tools` bounded tool registry. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.modules.support_recommendations` module persists recommendations and citations. The `supportops.modules.controlled_support_inspection` module exposes the read-only controlled support inspection aggregate. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns active-version resolution, query embedding composition, Qdrant candidate search, PostgreSQL hydration, provenance validation, deterministic ranking, citations, and the workspace-scoped search route.
 
 Future modules or extensions will introduce:
 
 - reranking of retrieval candidates;
 - retrieval evaluation datasets and deterministic scoring;
-- grounded generation over retrieved evidence;
 - evidence-driven prompt version 2;
 - prompt regression comparison across versions;
 - scheduled evaluation and evaluation history persistence;
 - multi-profile score fusion;
-- LangGraph orchestration;
-- registered tools;
+- write-capable tools;
 - approval workflows;
 - broader AI observability.
 
@@ -544,6 +582,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   ├── architecture/
 │   │   ├── agent-run-scheduling.md
 │   │   ├── classification-evaluation.md
+│   │   ├── controlled-support-workflow.md
 │   │   ├── knowledge-documents.md
 │   │   ├── knowledge-indexing.md
 │   │   ├── llm-gateway.md
@@ -561,7 +600,9 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── 0006-establish-workspace-scoped-data-ownership.md
 │   │   ├── 0007-use-an-application-owned-llm-gateway.md
 │   │   ├── 0008-use-explicit-profiled-knowledge-indexing.md
-│   │   └── 0009-hydrate-retrieval-evidence-from-postgresql.md
+│   │   ├── 0009-hydrate-retrieval-evidence-from-postgresql.md
+│   │   ├── 0010-separate-agent-run-and-langgraph-durability.md
+│   │   └── 0011-treat-langgraph-checkpoints-as-framework-owned-schema.md
 │   └── development/
 │       ├── api-examples.md
 │       ├── environment-variables.md
@@ -581,6 +622,8 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   ├── prompts/
 │       │   ├── providers/
 │       │   └── schemas/
+│       ├── agent_graph/
+│       ├── agent_tools/
 │       ├── api/
 │       │   ├── health/
 │       │   ├── application.py
@@ -619,11 +662,13 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   │   ├── application/
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
+│       │   ├── controlled_support_inspection/
 │       │   ├── knowledge_documents/
 │       │   │   ├── api/
 │       │   │   ├── application/
 │       │   │   ├── domain/
 │       │   │   └── infrastructure/
+│       │   ├── support_recommendations/
 │       │   ├── ticket_classifications/
 │       │   │   ├── api/
 │       │   │   ├── application/
@@ -657,7 +702,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns semantic search contracts, adapters, orchestration, and the workspace-scoped HTTP search route. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, and versioned knowledge-document tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules include domain, application, and infrastructure layers as required. The `agent_runs`, `ticket_classifications`, and `controlled_support_inspection` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM, checkpoint, embedding, and Qdrant composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.agent_graph` package owns bounded LangGraph orchestration for controlled support. The `supportops.agent_tools` package owns the read-only controlled tool registry. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns semantic search contracts, adapters, orchestration, and the workspace-scoped HTTP search route. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, tool-call, recommendation, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
 
 ## Local setup
 
@@ -852,7 +897,7 @@ SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS
 SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES
 ```
 
-The local default LLM and embedding providers are both `mock`. LLM provider and embedding provider selections are independent. The API creates the configured embedding provider at startup for semantic retrieval and does not create the LLM provider. The worker creates the configured LLM provider and does not create the embedding provider. The indexing CLI creates its own embedding provider. `SUPPORTOPS_OPENAI_API_KEY` is shared by the OpenAI generation and embedding adapters and is required when either OpenAI adapter is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `ticket-classification-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers. Embedding request timeout is independent from worker execution timeout. Query embeddings remain request-driven after API startup constructs the client.
+The local default LLM and embedding providers are both `mock`. LLM provider and embedding provider selections are independent. The API creates the configured embedding provider at startup for semantic retrieval and does not create the LLM provider. The worker creates the configured LLM provider and, for controlled workflows, also creates the embedding provider, checkpoint runtime, and Qdrant client. The indexing CLI creates its own embedding provider. `SUPPORTOPS_OPENAI_API_KEY` is shared by the OpenAI generation and embedding adapters and is required when either OpenAI adapter is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `controlled-support-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers. Embedding request timeout is independent from worker execution timeout. Query embeddings remain request-driven after API startup constructs the client. The worker converts `SUPPORTOPS_POSTGRESQL_URL` internally to a Psycopg-compatible DSN for the checkpoint runtime without logging the secret.
 
 The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
 
@@ -932,7 +977,7 @@ Validate offline migration execution:
 uv run alembic upgrade head --sql
 ```
 
-The current head creates the `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, and `ticket_classifications` tables. Downgrade commands must run only against the local development or test database.
+The current head creates the `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`, `agent_tool_calls`, `support_recommendations`, `support_recommendation_citations`, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Downgrade commands must run only against the local development or test database.
 
 ## Docker image
 
@@ -982,6 +1027,8 @@ The repository records the following accepted decisions:
 - [Use an application-owned LLM Gateway](docs/decisions/0007-use-an-application-owned-llm-gateway.md)
 - [Use explicit, profiled knowledge indexing](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md)
 - [Hydrate retrieval evidence from PostgreSQL](docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md)
+- [Separate AgentRun and LangGraph durability](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md)
+- [Treat LangGraph checkpoints as framework-owned schema](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md)
 
 ## Roadmap
 
@@ -1040,11 +1087,13 @@ Implemented:
 - expired lease recovery;
 - versioned workflow executor registry;
 - deterministic baseline executor;
-- configured `ticket-classification-v1` scheduling and execution;
-- process-scoped provider and Gateway composition;
+- configured `controlled-support-v1` scheduling and execution as the local default;
+- registered `deterministic-baseline-v1` and `ticket-classification-v1` retention;
+- process-scoped provider, Gateway, checkpoint, embedding, and Qdrant composition;
 - separate worker process with cooperative shutdown;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
+- controlled support aggregate inspection;
 - safe operational metadata projections;
 - tenant-safe `agent_run_not_found` responses.
 
@@ -1119,18 +1168,25 @@ Implemented:
 Planned:
 
 - reranking;
-- grounded generation over retrieved evidence;
 - retrieval quality datasets and deterministic scoring;
 - multi-profile score fusion.
 
 ### Controlled orchestration
 
+Implemented:
+
+- LangGraph bounded orchestration inside AgentRun;
+- PostgreSQL-backed checkpoint resume;
+- registered read-only tools `search_knowledge` and `lookup_service_status`;
+- durable tool-call audits and recommendation persistence;
+- controlled support inspection over business records;
+- AgentRun outer durability with LangGraph inner orchestration.
+
 Planned:
 
-- LangGraph workflows;
-- registered tools;
+- write-capable tools;
 - approval boundaries;
-- failure recovery.
+- failure recovery beyond the current post-commit/pre-checkpoint and checkpoint resume model for write-side effects.
 
 ### Observability and evaluation
 
@@ -1179,14 +1235,14 @@ The following capabilities remain deferred to preserve architectural focus and a
 - automatic indexing scheduling;
 - automatic version activation;
 - reranking;
-- grounded generation;
 - multi-profile score fusion;
-- LangGraph orchestration;
-- registered tools;
+- write-capable tools;
 - human approval workflows;
 - AI observability integrations;
 - Langfuse integration;
+- Phoenix integration;
 - RAGAS evaluation;
+- prompt regression comparison across versions;
 - retrieval and generation evaluation beyond structured classification;
 - OpenTelemetry;
 - Prometheus and Grafana;
@@ -1199,7 +1255,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway, durable ticket-classification workflow, classification inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, and active-version semantic knowledge retrieval are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, grounded generation, reranking, and retrieval evaluation remain intentionally separated into later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, and active-version semantic knowledge retrieval are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, reranking, and retrieval evaluation remain intentionally separated into later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
@@ -1208,6 +1264,7 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Architecture overview](docs/architecture/overview.md)
 - [Runtime topology](docs/architecture/runtime-topology.md)
 - [Transactional AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
+- [Controlled support workflow](docs/architecture/controlled-support-workflow.md)
 - [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
 - [Durable ticket classification](docs/architecture/ticket-classification.md)
 - [Classification inspection and evaluation](docs/architecture/classification-evaluation.md)

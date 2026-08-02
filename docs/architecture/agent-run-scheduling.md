@@ -12,7 +12,11 @@ the business record it belongs to.
 
 This document focuses on transactional scheduling and the handoff boundary to
 worker processing. Runtime process topology and worker operations are detailed
-in [`runtime-topology.md`](runtime-topology.md).
+in [`runtime-topology.md`](runtime-topology.md). The internal design of the
+default controlled workflow is detailed in
+[`controlled-support-workflow.md`](controlled-support-workflow.md), and the
+separation of outer and inner durability is recorded in
+[`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md).
 
 ## Scheduling flow
 
@@ -83,9 +87,9 @@ The configured value comes from:
 SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION
 ```
 
-The local default is `ticket-classification-v1`. `AgentRun.create_initial()` requires the workflow version as an explicit factory input. The stored version is immutable for that run. Historical runs preserve their original versions, including `deterministic-baseline-v1`.
+The local default is `controlled-support-v1`. `AgentRun.create_initial()` requires the workflow version as an explicit factory input. The stored version is immutable for that run. Historical runs preserve their original versions, including `ticket-classification-v1` and `deterministic-baseline-v1`.
 
-The worker registry must contain the stored workflow version. Exact name and version dispatch selects the executor. Unknown workflow or version values are terminal. A queued classification run records that durable processing has been scheduled; classification completion remains asynchronous and is not reported by ticket creation.
+The worker registry must contain the stored workflow version. Exact name and version dispatch selects the executor. Unknown workflow or version values are terminal. A queued run records that durable processing has been scheduled; workflow completion remains asynchronous and is not reported by ticket creation.
 
 ## Queued state and availability
 
@@ -121,7 +125,9 @@ The API does not claim runs, acquire leases, execute the workflow, call the
 model, or report final processing success in the ticket creation response.
 
 Inspection endpoints report current persisted state. They do not guarantee
-future completion. Classification inspection APIs remain planned.
+future completion. Classification inspection is implemented, and controlled
+runs additionally expose a read-only aggregate controlled support inspection
+view built from durable business records.
 
 ## Worker claim eligibility
 
@@ -171,11 +177,12 @@ After claim commit, the worker:
 3. bounds execution with a timeout;
 4. persists success or failure in a separate fenced transaction.
 
-Registered versions include:
+The registry contains exactly three versions:
 
 ```text
 ticket-processing / deterministic-baseline-v1
 ticket-processing / ticket-classification-v1
+ticket-processing / controlled-support-v1
 ```
 
 The deterministic baseline validates the durable execution contract and performs
@@ -187,10 +194,45 @@ lease fencing, and then returns to the processor for fenced AgentRun completion.
 Classification behavior is documented in
 [`ticket-classification.md`](ticket-classification.md).
 
+The controlled support workflow is the default. It ensures the durable
+classification, runs a bounded decision loop over registered read-only tools,
+persists tool-call audits under lease fencing, drafts a grounded recommendation,
+and persists that recommendation with ordered citations. Provider, embedding,
+tool, and Qdrant work runs outside database transactions; each durable result is
+written through a short lease-fenced transaction. The graph design is documented
+in [`controlled-support-workflow.md`](controlled-support-workflow.md).
+
 Typed retryable and terminal failures are handled explicitly. Unexpected
 exceptions become sanitized retryable failures. Raw exception text is not
 persisted. Unknown workflow or version values are terminal. No version fallback
 and no provider fallback exist.
+
+## Outer and inner durability
+
+Scheduling, claiming, attempts, leases, execution timeout, retries, expired
+lease recovery, and final success or failure remain owned by the `AgentRun`
+lifecycle and the processor.
+
+For the controlled workflow, LangGraph owns only bounded inner orchestration:
+node routing, the decision and tool loop, and durable node-boundary checkpoints
+keyed by the `AgentRun` identifier. A resumed checkpoint must match the
+requested workspace, ticket, `AgentRun`, workflow, graph version, and state
+schema version; mismatches fail closed.
+
+The consequences for scheduling are:
+
+- an attempt retry may resume the same graph thread instead of repeating
+  completed nodes;
+- LangGraph never sets `AgentRun` status;
+- reaching graph `END` is not the public workflow outcome;
+- the executor returns successfully only when validated graph state carries a
+  persisted recommendation identity;
+- the processor then performs the normal lease-fenced completion transition.
+
+Lease credentials and attempt identity are supplied through runtime context
+rather than checkpoint state, so checkpoints never become a second ownership
+source. This separation is recorded in
+[`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md).
 
 ## Success, failure, and retry transitions
 
@@ -215,7 +257,9 @@ lease_expired
 ```
 
 Successful completion changes the run to `succeeded`, closes the active
-attempt, and clears previous safe error details.
+attempt, and clears previous safe error details. A controlled run reaches
+`succeeded` only after its recommendation is durably persisted; a completed
+graph without a persisted recommendation is a terminal failure.
 
 Retryable failures and timeouts are retried only while attempt budget remains.
 Retry scheduling uses bounded exponential backoff and moves the run to
@@ -247,6 +291,10 @@ becomes `failed`.
 
 Recovery and claim remain separate operations. Scheduling itself does not
 perform recovery.
+
+Recovery affects the outer lifecycle only. Durable inner progress, including
+committed classifications, tool audits, recommendations, and graph checkpoints,
+survives recovery and is reused by the next attempt.
 
 ## Retry budget persistence
 
@@ -353,6 +401,12 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}
 GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/attempts
 ```
 
+Controlled runs also expose one aggregate read-only view:
+
+```text
+GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/agent-runs/{agent_run_id}/inspection
+```
+
 ## Inspection after scheduling
 
 After ticket creation, the client can:
@@ -367,7 +421,11 @@ After ticket creation, the client can:
 The worker updates durable state through claim, execution, and fenced outcome
 persistence. Inspection endpoints expose that persisted lifecycle. They are
 observational only and cannot alter retries, leases, or state transitions.
-Classification inspection APIs remain planned.
+
+Classification and logical invocation inspection are implemented. Controlled
+runs additionally support the aggregate controlled support inspection view,
+which reads durable business records and does not read LangGraph checkpoint
+state.
 
 Public `AgentRun` fields include ownership, workflow identity, status, retry
 budget, availability and completion timestamps, safe `last_error` metadata,
@@ -431,22 +489,28 @@ The current implementation provides:
 
 - durable initial work creation;
 - transactional ticket and run persistence;
-- configured classification scheduling with local default
-  `ticket-classification-v1`;
+- configured ticket-processing scheduling with local default
+  `controlled-support-v1`;
+- registered exact versions `deterministic-baseline-v1`,
+  `ticket-classification-v1`, and `controlled-support-v1`;
 - database-enforced workspace ownership;
 - duplicate initial scheduling protection;
 - stable workflow identity with immutable stored versions;
 - exact versioned registry dispatch;
-- durable classification worker execution;
-- durable invocation and accepted classification persistence;
+- AgentRun outer lifecycle ownership with LangGraph inner resume for
+  controlled runs;
+- durable classification, tool-audit, and recommendation worker execution;
+- durable invocation, accepted classification, recommendation, and citation
+  persistence;
 - handoff to PostgreSQL worker claim, execution, fencing, retry, and recovery;
 - workspace-scoped AgentRun and attempt-history inspection;
+- controlled support aggregate inspection over persisted business records;
 - safe operational metadata projections that omit fencing identifiers;
 - integration coverage for commit and rollback behavior.
 
-Classification inspection APIs remain planned. Manual retry, cancellation,
-lease revocation, worker administration, global AgentRun listing, status
-filtering, pagination across runs, WebSockets, Server-Sent Events, and
-frontend monitoring remain intentionally deferred. Redis, Celery, Kafka, SQS,
-and an outbox remain intentionally deferred because PostgreSQL already provides
-transactional durability and adequate local and portfolio scope for this phase.
+Manual retry, cancellation, lease revocation, worker administration, global
+AgentRun listing, status filtering, pagination across runs, WebSockets,
+Server-Sent Events, and frontend monitoring remain intentionally deferred.
+Redis, Celery, Kafka, SQS, and an outbox remain intentionally deferred because
+PostgreSQL already provides transactional durability and adequate local and
+portfolio scope for this phase.

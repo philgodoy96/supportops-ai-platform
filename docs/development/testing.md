@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -539,6 +539,44 @@ Integration tests are necessary for AgentRun and classification inspection becau
 - error envelope integration through registered handlers;
 - end-to-end tenant isolation behavior across HTTP and persistence.
 
+## Controlled support workflow
+
+Controlled support coverage verifies the final Slice 5 architecture across graph
+orchestration, tool audits, recommendation persistence, checkpoint resume, and
+inspection.
+
+### Unit coverage
+
+Unit tests cover:
+
+- graph state and routing;
+- decision contracts;
+- bounded tool registry and execution;
+- observation reconstruction;
+- recommendation execution;
+- worker composition for controlled runtime resources;
+- inspection contracts and schemas.
+
+### Integration coverage
+
+Integration tests cover:
+
+- tool audit persistence and fencing;
+- recommendation and citation persistence;
+- checkpoint setup and resume;
+- post-commit/pre-checkpoint recovery;
+- attempt-scoped ordering for tools and invocations;
+- controlled inspection repository behavior;
+- vertical HTTP inspection;
+- cross-workspace absence behavior;
+- Alembic metadata parity with exact framework-owned checkpoint table
+  exclusions.
+
+Default automated tests use mock LLM and embedding providers. No paid provider
+calls are required. PostgreSQL and Qdrant are required for integration tests.
+Tests that create checkpoint threads clean their own checkpoint rows. Shared
+business cleanup does not delete framework checkpoint tables.
+
 ## Full test suite
 
 Run all tests:
@@ -757,7 +795,7 @@ Ticket API integration coverage verifies:
 
 - request and correlation identifier persistence on intake;
 - nested ticket and processing-run response shape;
-- queued `ticket-processing` / `ticket-classification-v1` processing reference;
+- queued `ticket-processing` / `controlled-support-v1` processing reference;
 - persistence of the referenced AgentRun after successful creation;
 - missing workspace behavior for ticket creation and listing;
 - duplicate external-reference conflicts within one workspace;
@@ -927,8 +965,11 @@ docker compose ps
 
 The current migration head creates the `workspaces`, `tickets`, `agent_runs`,
 `agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
-`knowledge_documents`, `knowledge_document_versions`, and
-`knowledge_document_chunks` tables.
+`agent_tool_calls`, `support_recommendations`,
+`support_recommendation_citations`, `knowledge_documents`,
+`knowledge_document_versions`, and `knowledge_document_chunks` tables.
+Framework-owned LangGraph checkpoint tables are created by checkpointer setup
+and are excluded by exact name from Alembic comparison.
 
 Migration lifecycle commands:
 
@@ -945,12 +986,12 @@ Expected behavior:
 
 - commands complete successfully;
 - the expected revision is reported as head;
-- upgrade creates `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`,
-  `llm_invocations`, `ticket_classifications`, `knowledge_documents`,
-  `knowledge_document_versions`, and `knowledge_document_chunks`;
+- upgrade creates the application-owned business tables listed above;
 - downgrade removes those business tables;
 - re-upgrade restores them;
-- migration metadata remains aligned with SQLAlchemy model metadata.
+- migration metadata remains aligned with SQLAlchemy model metadata;
+- `alembic check` reports no new upgrade operations and does not propose
+  removal of the exact framework-owned checkpoint tables.
 
 Validate offline execution:
 
@@ -1127,19 +1168,19 @@ Later implementation phases are expected to add tests for:
 - authenticated tenant isolation;
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
-- retrieval quality scoring, reranking, and grounded generation;
-- LangGraph orchestration;
-- tool authorization;
+- retrieval quality scoring and reranking;
+- write-capable tool authorization;
 - approval enforcement;
 - prompt version 2 regression comparison;
 - scheduled evaluation and evaluation history persistence;
 - retrieval and generation evaluation beyond structured classification;
 - RAGAS;
-- idempotent side effects for future executors and tools.
+- idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
 Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery,
 deterministic execution, worker process coverage, workspace-scoped AgentRun and
-classification inspection, immutable knowledge-document versioning, explicit
-knowledge indexing, active-version semantic knowledge retrieval, and offline
-classification evaluation are part of the current suite.
+classification inspection, controlled support workflow coverage, immutable
+knowledge-document versioning, explicit knowledge indexing, active-version
+semantic knowledge retrieval, and offline classification evaluation are part of
+the current suite.

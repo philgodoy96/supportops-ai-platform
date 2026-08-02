@@ -4,7 +4,8 @@
 
 This document provides reproducible examples for the implemented workspace,
 support ticket, AgentRun, classification, logical invocation inspection,
-versioned knowledge-document, and semantic knowledge-search HTTP API.
+controlled support inspection, versioned knowledge-document, and semantic
+knowledge-search HTTP API.
 
 The examples use placeholder values suitable for local development and public
 documentation.
@@ -26,6 +27,7 @@ The API currently supports:
 - classification detail;
 - ticket classification history;
 - AgentRun logical invocation history;
+- controlled support aggregate inspection for `controlled-support-v1`;
 - opaque cursor pagination;
 - stable expected-error responses;
 - request and correlation trace identifiers.
@@ -34,14 +36,15 @@ The current API does not include authentication or authorization. Workspace
 scoping establishes an explicit data ownership boundary but does not establish
 trusted tenant isolation.
 
-A queued `ticket-classification-v1` processing run records that durable
-classification work has been scheduled. Classification completion remains an
-asynchronous worker outcome.
+A queued `controlled-support-v1` processing run records that durable controlled
+support work has been scheduled. Classification, tool execution, recommendation
+persistence, and final AgentRun completion remain asynchronous worker outcomes.
 
-AgentRun, classification, and logical invocation inspection endpoints are
-strictly read-only. They report current persisted state and do not guarantee
-future completion. They do not perform mutation, retry, cancellation, or lease
-revocation.
+AgentRun, classification, logical invocation, and controlled support inspection
+endpoints are strictly read-only. They report current persisted state and do not
+guarantee future completion. They do not perform mutation, retry, cancellation,
+or lease revocation. Controlled support inspection reads persisted business
+records and does not deserialize LangGraph checkpoint state.
 
 Knowledge-document registration and version creation persist source content only
 in PostgreSQL and do not call an embedding provider or Qdrant. Indexing is a
@@ -505,7 +508,7 @@ Expected response shape:
     "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
     "status": "queued",
     "workflow_name": "ticket-processing",
-    "workflow_version": "ticket-classification-v1"
+    "workflow_version": "controlled-support-v1"
   }
 }
 ```
@@ -517,13 +520,13 @@ Expected behavior:
 - initial ticket status `open`;
 - processing-run status `queued`;
 - workflow name `ticket-processing`;
-- workflow version `ticket-classification-v1`;
+- workflow version `controlled-support-v1`;
 - `workspace_id` equals workspace A;
 - `ingestion_request_id` equals `X-Request-ID`;
 - `correlation_id` equals `X-Correlation-ID`.
 
-A queued `ticket-classification-v1` run does not indicate that AI classification
-has completed.
+A queued `controlled-support-v1` run does not indicate that classification,
+tools, or recommendation persistence have completed.
 
 Retain `$agentRunId` for the inspection examples below.
 
@@ -594,7 +597,7 @@ Expected queued response:
   "status": "queued",
   "workflow": {
     "name": "ticket-processing",
-    "version": "ticket-classification-v1",
+    "version": "controlled-support-v1",
     "trigger_key": "initial-ticket-processing"
   },
   "classification": null,
@@ -633,7 +636,7 @@ Expected succeeded response:
   "status": "succeeded",
   "workflow": {
     "name": "ticket-processing",
-    "version": "ticket-classification-v1",
+    "version": "controlled-support-v1",
     "trigger_key": "initial-ticket-processing"
   },
   "classification": {
@@ -674,7 +677,7 @@ When a run has safe error metadata after a retryable or terminal failure, the
   "status": "retry_scheduled",
   "workflow": {
     "name": "ticket-processing",
-    "version": "ticket-classification-v1",
+    "version": "controlled-support-v1",
     "trigger_key": "initial-ticket-processing"
   },
   "classification": null,
@@ -1006,6 +1009,275 @@ does not reveal that the classification exists in another workspace.
 Cross-workspace AgentRun invocation history uses the same
 `agent_run_not_found` contract as AgentRun detail and attempt history.
 
+## Inspect controlled support aggregate state
+
+The controlled support inspection endpoint supports `controlled-support-v1`
+only. It assembles a read-only aggregate from persisted business records and
+does not deserialize LangGraph checkpoint state.
+
+```text
+GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/agent-runs/{agent_run_id}/inspection
+```
+
+### Queued partial inspection
+
+Immediately after ticket creation, before the worker claims the run:
+
+```powershell
+$inspection = Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$workspaceAId/tickets/$ticketId/agent-runs/" +
+    "$agentRunId/inspection"
+  )
+
+$inspection.agent_run.status
+$inspection.classification
+$inspection.tool_calls
+$inspection.llm_usage
+$inspection.recommendation
+```
+
+Expected status:
+
+```text
+200 OK
+```
+
+Expected bounded queued response:
+
+```json
+{
+  "agent_run": {
+    "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+    "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+    "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+    "workflow_name": "ticket-processing",
+    "workflow_version": "controlled-support-v1",
+    "status": "queued",
+    "attempt_count": 0,
+    "max_attempts": 3,
+    "created_at": "2026-07-31T12:00:00Z",
+    "first_started_at": null,
+    "completed_at": null,
+    "last_error_code": null
+  },
+  "classification": null,
+  "tool_calls": [],
+  "recommendation": null,
+  "llm_usage": {
+    "invocation_count": 0,
+    "successful_invocation_count": 0,
+    "failed_invocation_count": 0,
+    "input_tokens": 0,
+    "cached_input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "total_tokens": 0,
+    "estimated_cost_usd": "0",
+    "unpriced_invocation_count": 0
+  },
+  "llm_invocations": []
+}
+```
+
+Queued, running, retrying, and failed workflows may return valid partial
+inspection views.
+
+### Completed inspection
+
+After the worker completes a controlled run:
+
+```powershell
+$inspection = Invoke-RestMethod `
+  -Method Get `
+  -Uri (
+    "http://127.0.0.1:8000/api/v1/workspaces/" +
+    "$workspaceAId/tickets/$ticketId/agent-runs/" +
+    "$agentRunId/inspection"
+  )
+
+$inspection.agent_run.status
+$inspection.classification
+$inspection.tool_calls
+$inspection.llm_invocations
+$inspection.llm_usage
+$inspection.recommendation
+```
+
+Expected status:
+
+```text
+200 OK
+```
+
+Expected bounded completed response:
+
+```json
+{
+  "agent_run": {
+    "id": "24f24172-f39c-4dcf-9722-b073e22944d0",
+    "workspace_id": "59ecc675-bf00-4f3b-8284-876f226539d6",
+    "ticket_id": "6e688ded-cf71-4c01-b87f-591cc014af03",
+    "workflow_name": "ticket-processing",
+    "workflow_version": "controlled-support-v1",
+    "status": "completed",
+    "attempt_count": 1,
+    "max_attempts": 3,
+    "created_at": "2026-07-31T12:00:00Z",
+    "first_started_at": "2026-07-31T12:00:01Z",
+    "completed_at": "2026-07-31T12:00:08Z",
+    "last_error_code": null
+  },
+  "classification": {
+    "id": "91f3c0a3-5f2a-4d1e-9c7b-2a1d4e6f8091",
+    "category": "account_access",
+    "intent": "request_access",
+    "urgency": "normal",
+    "sentiment": "neutral",
+    "requires_human_review": false,
+    "summary": "The customer needs account recovery guidance.",
+    "created_at": "2026-07-31T12:00:02Z"
+  },
+  "tool_calls": [
+    {
+      "id": "a1b2c3d4-1111-4222-8333-444455556666",
+      "agent_run_attempt_id": "b2c3d4e5-2222-4333-8444-555566667777",
+      "attempt_number": 1,
+      "sequence": 1,
+      "tool_name": "search_knowledge",
+      "tool_version": 1,
+      "safety_level": "read_only",
+      "status": "succeeded",
+      "latency_ms": 42,
+      "error_code": null,
+      "started_at": "2026-07-31T12:00:03Z",
+      "finished_at": "2026-07-31T12:00:03Z",
+      "result_summary": {
+        "retrieval_query_id": "c3d4e5f6-3333-4444-8555-666677778888",
+        "result_count": 1,
+        "chunk_ids": ["d4e5f6a7-4444-4555-8666-777788889999"]
+      }
+    }
+  ],
+  "llm_invocations": [
+    {
+      "id": "e5f6a7b8-5555-4666-8777-888899990000",
+      "agent_run_attempt_id": "b2c3d4e5-2222-4333-8444-555566667777",
+      "attempt_number": 1,
+      "invocation_sequence": 1,
+      "status": "succeeded",
+      "provider": "mock",
+      "model": "mock-structured-v1",
+      "prompt_id": "ticket-classification",
+      "prompt_version": 1,
+      "prompt_content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": "ticket-classification-v1",
+      "input_tokens": 120,
+      "cached_input_tokens": 0,
+      "output_tokens": 40,
+      "reasoning_tokens": 0,
+      "total_tokens": 160,
+      "estimated_total_cost_usd": "0",
+      "pricing_found": true,
+      "latency_ms": 18,
+      "error_code": null,
+      "created_at": "2026-07-31T12:00:02Z"
+    }
+  ],
+  "llm_usage": {
+    "invocation_count": 1,
+    "successful_invocation_count": 1,
+    "failed_invocation_count": 0,
+    "input_tokens": 120,
+    "cached_input_tokens": 0,
+    "output_tokens": 40,
+    "reasoning_tokens": 0,
+    "total_tokens": 160,
+    "estimated_cost_usd": "0",
+    "unpriced_invocation_count": 0
+  },
+  "recommendation": {
+    "id": "f6a7b8c9-6666-4777-8888-999900001111",
+    "recommended_action": "respond",
+    "response_text": "Follow the documented account recovery steps.",
+    "requires_human_review": false,
+    "decision_summary": "The persisted evidence supports a direct response.",
+    "prompt": {
+      "id": "support-recommendation-draft",
+      "version": 1,
+      "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "provider": "mock",
+    "model": "mock-structured-v1",
+    "created_at": "2026-07-31T12:00:07Z",
+    "citations": [
+      {
+        "citation_order": 0,
+        "retrieval_query_id": "c3d4e5f6-3333-4444-8555-666677778888",
+        "retrieval_rank": 1,
+        "retrieval_score": 0.91,
+        "document_id": "11111111-2222-4333-8444-555566667777",
+        "document_version_id": "22222222-3333-4444-8555-666677778888",
+        "chunk_id": "d4e5f6a7-4444-4555-8666-777788889999"
+      }
+    ]
+  }
+}
+```
+
+The response intentionally excludes lease data, provider request IDs, provider
+tool-call IDs, raw prompts, raw `safe_input` or `safe_output`, checkpoint
+fields, and retrieved document bodies.
+
+### Attempt cross-workspace controlled support inspection
+
+```powershell
+try {
+  Invoke-RestMethod `
+    -Method Get `
+    -Uri (
+      "http://127.0.0.1:8000/api/v1/workspaces/" +
+      "$workspaceBId/tickets/$ticketId/agent-runs/" +
+      "$agentRunId/inspection"
+    )
+} catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.ErrorDetails.Message
+}
+```
+
+Expected status:
+
+```text
+404 Not Found
+```
+
+Expected error code:
+
+```text
+controlled_support_inspection_not_found
+```
+
+Missing, cross-ticket, and cross-workspace lookups use the same contract.
+
+### Unsupported workflow inspection
+
+When the AgentRun workflow version is outside the controlled inspection
+contract:
+
+```text
+409 Conflict
+unsupported_agent_run_inspection
+```
+
+Persisted records that violate inspection invariants return:
+
+```text
+controlled_support_inspection_inconsistent
+```
+
 ## List tickets in workspace A
 
 ```powershell
@@ -1279,6 +1551,9 @@ document_version_not_found
 ticket_not_found
 agent_run_not_found
 ticket_classification_not_found
+controlled_support_inspection_not_found
+unsupported_agent_run_inspection
+controlled_support_inspection_inconsistent
 workspace_slug_conflict
 document_external_reference_conflict
 document_version_content_conflict
