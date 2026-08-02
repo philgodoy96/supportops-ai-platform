@@ -16,6 +16,7 @@ class LLMErrorCode(StrEnum):
     REFUSAL = "llm_refusal"
     INCOMPLETE_RESPONSE = "llm_incomplete_response"
     OUTPUT_VALIDATION_FAILED = "llm_output_validation_failed"
+    TOOL_DECISION_VALIDATION_FAILED = "llm_tool_decision_validation_failed"
     UNEXPECTED_PROVIDER_FAILURE = "llm_unexpected_provider_failure"
 
 
@@ -130,6 +131,16 @@ class LLMOutputValidationError(LLMError):
     retryable = False
     terminal = True
     repairable = True
+
+
+class LLMToolDecisionValidationError(LLMError):
+    """Provider tool decision failed application-owned validation."""
+
+    error_code = LLMErrorCode.TOOL_DECISION_VALIDATION_FAILED
+    safe_summary = "The LLM tool decision failed application validation."
+    retryable = False
+    terminal = True
+    repairable = False
 
 
 class LLMUnexpectedProviderError(LLMError):
