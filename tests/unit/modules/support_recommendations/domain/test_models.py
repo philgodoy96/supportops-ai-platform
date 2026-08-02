@@ -99,9 +99,21 @@ def test_supports_only_non_executable_actions(
 ) -> None:
     recommendation = create_recommendation(
         recommended_action=action,
+        requires_human_review=(action is SupportRecommendationAction.RECOMMEND_ESCALATION),
     )
 
     assert recommendation.recommended_action is action
+
+
+def test_requires_review_for_escalation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="require human review",
+    ):
+        create_recommendation(
+            recommended_action=(SupportRecommendationAction.RECOMMEND_ESCALATION),
+            requires_human_review=False,
+        )
 
 
 def test_rejects_string_instead_of_action_enum() -> None:

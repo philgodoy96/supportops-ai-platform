@@ -4,9 +4,13 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID, uuid4
 
-SUPPORT_RECOMMENDATION_SCHEMA_VERSION = "support-recommendation-v1"
+SupportRecommendationSchemaVersion = Literal["support-recommendation-v1"]
+SUPPORT_RECOMMENDATION_SCHEMA_VERSION: SupportRecommendationSchemaVersion = (
+    "support-recommendation-v1"
+)
 
 SUPPORT_RECOMMENDATION_RESPONSE_MAX_LENGTH = 4_000
 SUPPORT_RECOMMENDATION_DECISION_SUMMARY_MAX_LENGTH = 500
@@ -64,6 +68,12 @@ class SupportRecommendation:
 
         if type(self.requires_human_review) is not bool:
             raise ValueError("requires_human_review must be a boolean.")
+
+        if (
+            self.recommended_action is SupportRecommendationAction.RECOMMEND_ESCALATION
+            and not self.requires_human_review
+        ):
+            raise ValueError("Escalation recommendations require human review.")
 
         _validate_bounded_text(
             self.decision_summary,
