@@ -660,6 +660,13 @@ class DocumentChunkRecord(Base):
             "ordinal",
             name=("uq_knowledge_document_chunks_version_ordinal"),
         ),
+        UniqueConstraint(
+            "workspace_id",
+            "document_id",
+            "document_version_id",
+            "id",
+            name=("uq_knowledge_document_chunks_workspace_document_version_id"),
+        ),
         CheckConstraint(
             "ordinal >= 0",
             name="document_chunk_ordinal_non_negative",
