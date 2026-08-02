@@ -1,8 +1,11 @@
 """Shared fixtures for infrastructure integration tests."""
 
+from __future__ import annotations
+
+import asyncio
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +20,18 @@ from supportops.infrastructure.postgresql import (
     create_postgresql_session_factory,
     dispose_postgresql_engine,
 )
+
+if sys.platform == "win32":
+
+    def pytest_asyncio_loop_factories(
+        config: object,
+        item: object,
+    ) -> Mapping[str, Callable[[], asyncio.AbstractEventLoop]]:
+        """Force SelectorEventLoop so Psycopg can run under Windows asyncio."""
+
+        del config, item
+        return {"selector": asyncio.SelectorEventLoop}
+
 
 # Session-level advisory lock shared by every integration test that mutates the
 # local PostgreSQL database. Concurrent pytest processes otherwise race on
