@@ -2,16 +2,17 @@
 
 ## Purpose
 
-This document defines the data ownership boundary introduced by the first
-SupportOps business domain.
+This document defines the data ownership boundary introduced by SupportOps
+business domains.
 
-Every support ticket belongs to exactly one workspace. Application and
-persistence operations require the workspace identifier whenever a ticket is
-retrieved or listed.
+Every support ticket, knowledge document, and semantic retrieval request belongs
+to exactly one workspace. Application and persistence operations require the
+workspace identifier whenever workspace-owned resources are retrieved, listed,
+indexed, or searched.
 
 This boundary prevents accidental unscoped access patterns and establishes the
 ownership model that future authentication and authorization controls will
-enforce.
+enforce. Workspace scoping is not authentication or authorization.
 
 ## Ownership model
 
@@ -19,15 +20,21 @@ The current ownership relationship is:
 
 ```text
 Workspace
-└── Ticket
+├── Ticket
+├── AgentRun and related inspection records
+└── Knowledge document
+    ├── Document version
+    └── Document chunk
 ```
 
-A workspace is the top-level owner of support ticket data.
+A workspace is the top-level owner of support and knowledge data.
 
-Each ticket contains an immutable `workspace_id` that references an existing
-workspace. Tickets cannot exist without that ownership relationship.
+Each ticket and knowledge document contains an immutable `workspace_id` that
+references an existing workspace. Those records cannot exist without that
+ownership relationship.
 
-The current release does not support moving a ticket between workspaces.
+The current release does not support moving a ticket or document between
+workspaces.
 
 ## Repository boundary
 
@@ -81,7 +88,7 @@ behind another ownership boundary.
 
 ## HTTP API boundary
 
-Slice 1 exposes nested workspace-scoped routes:
+The platform exposes nested workspace-scoped routes, including:
 
 ```text
 POST /api/v1/workspaces
@@ -89,9 +96,12 @@ GET  /api/v1/workspaces/{workspace_id}
 POST /api/v1/workspaces/{workspace_id}/tickets
 GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
 GET  /api/v1/workspaces/{workspace_id}/tickets
+POST /api/v1/workspaces/{workspace_id}/documents
+POST /api/v1/workspaces/{workspace_id}/knowledge/search
 ```
 
-Ticket operations are always nested under a workspace identifier.
+Ticket, document, and semantic search operations are always nested under a
+workspace identifier.
 
 Listing tickets for a missing workspace returns `404 Not Found` with
 `workspace_not_found`. Listing tickets for an existing workspace with no
@@ -107,6 +117,22 @@ range return FastAPI validation responses with status `422`.
 Accepted tickets persist `ingestion_request_id` and `correlation_id` from the
 active HTTP request context.
 
+## Semantic retrieval ownership
+
+Semantic knowledge retrieval is workspace-scoped at every layer:
+
+- the HTTP route requires `workspace_id`;
+- PostgreSQL resolves only that workspace's active ready versions;
+- optional document filters remain workspace-scoped;
+- Qdrant search applies a workspace filter and exact active document/version pairs;
+- chunk hydration is workspace-scoped;
+- citation workspace identity is validated against the request;
+- cross-workspace document filters return empty evidence without disclosing foreign ownership.
+
+Ready but inactive versions are excluded. Pending and failed versions are
+excluded. Workspace scoping remains a data ownership boundary and is not
+authentication or authorization.
+
 ## Workspace scoping and tenant security
 
 Workspace scoping is necessary, but it is not complete tenant isolation.
@@ -118,9 +144,10 @@ scoping is not authentication or authorization.
 The implemented boundary provides:
 
 - explicit data ownership;
-- repository-level resistance to unscoped ticket access;
+- repository-level resistance to unscoped ticket and document access;
 - database-enforced ownership;
 - nested HTTP routes that require a workspace identifier;
+- workspace-scoped semantic retrieval with empty evidence for foreign filters;
 - cross-workspace behavior that avoids resource disclosure;
 - a clear integration point for future authorization checks.
 
@@ -130,7 +157,8 @@ It does not provide:
 - workspace membership verification;
 - role-based authorization;
 - API key validation;
-- caller-to-workspace trust establishment.
+- caller-to-workspace trust establishment;
+- authenticated tenant isolation.
 
 The current API is therefore appropriate for local and internal portfolio
 demonstration. Public multi-tenant exposure requires an identity and
@@ -217,17 +245,14 @@ They do not establish identity, authorization, or ownership by themselves.
 This release does not introduce:
 
 - authentication or authorization;
+- authenticated tenant isolation;
 - workspace memberships;
 - ticket mutation or deletion;
 - workspace deletion;
-- asynchronous processing;
-- agent runs;
-- queues, leases, retries, or workers;
-- LLM classification;
-- retrieval or vector indexing;
+- grounded answer generation;
+- reranking;
 - external support integrations.
 
-Ticket status remains `open` after intake. Asynchronous execution state will
-be designed with the AgentRun and worker lifecycle so that claiming, leasing,
-retries, crash recovery, idempotency, and terminal failure semantics are
-defined together.
+Ticket status remains `open` after intake. Durable AgentRun scheduling, the
+PostgreSQL worker, knowledge indexing, and active-version semantic evidence
+retrieval are implemented. Authenticated tenant isolation remains deferred.

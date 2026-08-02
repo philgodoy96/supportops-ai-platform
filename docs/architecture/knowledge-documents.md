@@ -3,7 +3,7 @@
 ## Purpose
 
 The `knowledge_documents` module establishes the PostgreSQL-authoritative source
-content required by the platform's indexing and later retrieval pipeline.
+content required by the platform's indexing and semantic retrieval pipeline.
 
 The module provides:
 
@@ -19,7 +19,9 @@ The module provides:
 Document registration remains source-only. Token-aware chunk generation,
 embeddings, and Qdrant indexing belong to the separate explicit indexing
 pipeline documented in [`knowledge-indexing.md`](knowledge-indexing.md).
-Semantic retrieval and grounded answer generation remain later capabilities.
+Semantic evidence retrieval over active ready versions is documented in
+[`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md). Grounded
+answer generation remains a later capability.
 
 ## Module boundary
 
@@ -258,7 +260,7 @@ Readiness and activation represent different decisions.
 `ready` means the version's indexing pipeline completed successfully and the
 exact Qdrant projection count was verified.
 
-`active` means the document currently exposes that ready version to future
+`active` means the document currently exposes that ready version to semantic
 retrieval.
 
 The active state is stored only as:
@@ -291,8 +293,11 @@ immutable after another version becomes active.
 
 Activation is idempotent when the selected version is already active.
 
-A successfully indexed version may remain ready but inactive. This supports
-controlled rollout and validation before retrieval eligibility changes.
+A successfully indexed version may remain ready but inactive. Ready but inactive
+versions are not searched. Activation remains explicit: changing the active
+pointer updates retrieval eligibility but performs no indexing and no provider
+call. This supports controlled rollout and validation before retrieval
+eligibility changes.
 
 ## Indexing integration
 
@@ -312,8 +317,10 @@ Successful indexing therefore leaves `active_version_id` unchanged until an
 operator activates a ready version through the API.
 
 Indexing architecture is documented in
-[`knowledge-indexing.md`](knowledge-indexing.md). The explicit profiled
-indexing decision is recorded in
+[`knowledge-indexing.md`](knowledge-indexing.md). Active-version semantic
+retrieval is documented in
+[`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md). The
+explicit profiled indexing decision is recorded in
 [`../decisions/0008-use-explicit-profiled-knowledge-indexing.md`](../decisions/0008-use-explicit-profiled-knowledge-indexing.md).
 
 ## Persistence model
@@ -536,8 +543,6 @@ Normal tests make no paid provider calls.
 
 The following capabilities are deliberately deferred:
 
-- semantic retrieval;
-- stable retrieval citations;
 - reranking;
 - retrieval evaluation;
 - grounded answer generation;
@@ -550,8 +555,10 @@ The following capabilities are deliberately deferred:
 
 Token-aware chunk generation, embedding providers, embedding usage and cost
 calculation, Qdrant collection creation, and vector-point indexing are
-implemented by the separate knowledge indexing pipeline.
+implemented by the separate knowledge indexing pipeline. Active-version semantic
+evidence retrieval with authoritative PostgreSQL hydration is implemented by the
+separate knowledge retrieval package.
 
 These deferred capabilities require the source-content, ownership, immutability,
-indexing, and rollout guarantees established by this module and the indexing
-pipeline.
+indexing, rollout, and retrieval guarantees established by this module and the
+adjacent indexing and retrieval packages.

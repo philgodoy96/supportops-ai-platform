@@ -3,8 +3,8 @@
 ## Purpose
 
 This document provides reproducible examples for the implemented workspace,
-support ticket, AgentRun, classification, logical invocation inspection, and
-versioned knowledge-document HTTP API.
+support ticket, AgentRun, classification, logical invocation inspection,
+versioned knowledge-document, and semantic knowledge-search HTTP API.
 
 The examples use placeholder values suitable for local development and public
 documentation.
@@ -19,6 +19,7 @@ The API currently supports:
 - workspace-scoped knowledge-document creation, retrieval, and listing;
 - immutable document-version creation, retrieval, and listing;
 - explicit ready-version activation;
+- workspace-scoped semantic knowledge search returning ranked evidence;
 - workspace-scoped AgentRun inspection;
 - workspace-scoped AgentRunAttempt history inspection;
 - AgentRun classification reference;
@@ -44,8 +45,9 @@ revocation.
 
 Knowledge-document registration and version creation persist source content only
 in PostgreSQL and do not call an embedding provider or Qdrant. Indexing is a
-separate `supportops-index-knowledge` CLI operation. Semantic retrieval is not
-an HTTP capability yet.
+separate `supportops-index-knowledge` CLI operation. Semantic search returns
+ranked authoritative evidence and citations. The response contains no generated
+answer.
 
 ## Prerequisites
 
@@ -337,6 +339,91 @@ Expected behavior:
 - activation succeeds only because the version is already `ready`;
 - `active_version_id` equals `$documentVersion2Id`;
 - readiness alone never changes the active pointer.
+
+## Search active knowledge
+
+Semantic search queries only active ready versions in the requested workspace.
+Chunk content comes from PostgreSQL. The response contains evidence and citations
+and does not include a generated answer field.
+
+```powershell
+$searchResponse = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/knowledge/search" `
+  -ContentType "application/json" `
+  -Body (@{
+    query = "How do I recover the database?"
+    top_k = 5
+    document_ids = @($documentId)
+  } | ConvertTo-Json)
+
+$searchResponse.searched_version_count
+$searchResponse.evidence
+$searchResponse.evidence[0].citation
+```
+
+Expected behavior:
+
+- only active ready versions participate;
+- evidence items include rank, score, content, hash, token count, and citation;
+- citation identifies document, version, chunk, section path, and media type;
+- ready but inactive versions do not participate;
+- no generated answer field is present.
+
+## Empty or cross-workspace search scope
+
+A cross-workspace document filter remains workspace-scoped and returns empty
+evidence without disclosing foreign ownership.
+
+```powershell
+$emptySearchResponse = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceBId/knowledge/search" `
+  -ContentType "application/json" `
+  -Body (@{
+    query = "How do I recover the database?"
+    top_k = 5
+    document_ids = @($documentId)
+  } | ConvertTo-Json)
+
+$emptySearchResponse.searched_version_count
+$emptySearchResponse.evidence
+```
+
+Expected status:
+
+```text
+200 OK
+```
+
+Expected behavior:
+
+- `searched_version_count` is `0`;
+- `evidence` is empty;
+- no embedding call and no Qdrant search occur for an empty eligible scope.
+
+## Knowledge retrieval dependency failure
+
+When expected embedding or vector-store failures make retrieval temporarily
+unavailable, the search endpoint returns a sanitized contract:
+
+```text
+503 Service Unavailable
+```
+
+Expected error code:
+
+```text
+knowledge_retrieval_unavailable
+```
+
+Expected message:
+
+```text
+Knowledge retrieval is temporarily unavailable.
+```
+
+The standard `request_id` is preserved. Raw dependency messages are not exposed.
 
 ## Attempt cross-workspace document access
 
@@ -1199,6 +1286,7 @@ document_version_number_conflict
 document_version_not_ready
 ticket_external_reference_conflict
 invalid_pagination_cursor
+knowledge_retrieval_unavailable
 ```
 
 Malformed UUIDs, invalid page sizes, and invalid request schemas use FastAPI
