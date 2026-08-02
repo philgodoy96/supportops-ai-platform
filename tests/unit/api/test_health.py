@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from supportops.ai.embeddings.contracts import EmbeddingProvider
 from supportops.api.application import create_application
 from supportops.api.health.schemas import ApplicationHealthStatus
 from supportops.api.state import ApplicationState
@@ -16,6 +17,9 @@ from supportops.core.settings import Settings
 from supportops.infrastructure.health import (
     DependencyCheckResult,
     DependencyStatus,
+)
+from supportops.modules.knowledge_documents.domain.models import (
+    KnowledgeIndexProfile,
 )
 
 
@@ -30,10 +34,35 @@ def create_settings() -> Settings:
     )
 
 
+def create_knowledge_index_profile() -> KnowledgeIndexProfile:
+    """Create one valid profile matching mock settings defaults."""
+
+    return KnowledgeIndexProfile(
+        chunking_strategy="markdown-token",
+        chunking_version="v1",
+        tokenizer_encoding="cl100k_base",
+        embedding_provider="mock",
+        embedding_model="mock-hashing-embedding-v1",
+        embedding_dimensions=64,
+        knowledge_collection="supportops-knowledge-mock-v1",
+        knowledge_vector_name="dense",
+    )
+
+
+def create_embedding_provider_mock() -> MagicMock:
+    """Create a fake process-scoped embedding provider."""
+
+    provider = MagicMock(spec=EmbeddingProvider)
+    provider.close = AsyncMock()
+    return provider
+
+
 def create_test_application() -> FastAPI:
     """Create an application with isolated in-memory lifecycle state."""
 
     settings = create_settings()
+    embedding_provider = create_embedding_provider_mock()
+    knowledge_index_profile = create_knowledge_index_profile()
     engine = MagicMock(spec=AsyncEngine)
     session_factory = MagicMock(spec=async_sessionmaker[AsyncSession])
     qdrant_client = MagicMock(spec=AsyncQdrantClient)
@@ -42,6 +71,8 @@ def create_test_application() -> FastAPI:
     async def test_lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.supportops = ApplicationState(
             settings=settings,
+            embedding_provider=embedding_provider,
+            knowledge_index_profile=knowledge_index_profile,
             postgresql_engine=engine,
             postgresql_session_factory=session_factory,
             qdrant_client=qdrant_client,
