@@ -10,19 +10,21 @@ The current platform includes:
 - PostgreSQL and Qdrant through Docker Compose;
 - a FastAPI application process;
 - a separate `supportops-worker` process;
+- an explicit `supportops-index-knowledge` indexing CLI;
 - liveness and readiness endpoints;
 - structured JSON logging with HTTP request traceability;
-- Alembic migrations for workspace, ticket, and AgentRun tables;
-- versioned workspace, ticket, and AgentRun HTTP APIs;
+- Alembic migrations for workspace, ticket, AgentRun, classification, and
+  knowledge-document tables;
+- versioned workspace, ticket, AgentRun, and knowledge-document HTTP APIs;
 - durable AgentRun scheduling and PostgreSQL worker execution;
 - workspace-scoped AgentRun inspection;
+- explicit profiled knowledge indexing;
 - unit and integration tests;
 - local quality checks.
 
-AI classification and retrieval remain outside the current implementation
-scope. Workspace scoping is not authentication or authorization. Docker
-Compose provisions infrastructure only and intentionally does not run the
-worker.
+Semantic retrieval remains outside the current implementation scope. Workspace
+scoping is not authentication or authorization. Docker Compose provisions
+infrastructure only and intentionally does not run the worker or indexing CLI.
 
 ## Prerequisites
 
@@ -369,6 +371,57 @@ AgentRun inspection responses, and cursor pagination are documented in:
 ```text
 docs/development/api-examples.md
 ```
+
+## Index knowledge locally
+
+Knowledge-document registration through the HTTP API persists source content
+only. Indexing is a separate CLI operation.
+
+With PostgreSQL and Qdrant healthy and migrations applied:
+
+```powershell
+docker compose up -d postgresql qdrant
+uv run alembic upgrade head
+uv run supportops-index-knowledge ensure-collection
+uv run supportops-index-knowledge index-version `
+  --workspace-id "<workspace-id>" `
+  --document-id "<document-id>" `
+  --document-version-id "<document-version-id>"
+```
+
+Use the UUIDs returned by the knowledge-document API. Do not execute the literal
+placeholders.
+
+Expected default mock behavior:
+
+- ensure-collection and index-version are network-free with the mock embedding
+  provider;
+- successful indexing returns status `ready`;
+- indexing does not activate the version;
+- activate the ready version separately through the HTTP API;
+- a ready-version rerun is a no-op.
+
+Optional OpenAI opt-in using process environment variables:
+
+```powershell
+$env:SUPPORTOPS_EMBEDDING_PROVIDER="openai"
+$env:SUPPORTOPS_EMBEDDING_MODEL="text-embedding-3-small"
+$env:SUPPORTOPS_EMBEDDING_DIMENSIONS="1536"
+$env:SUPPORTOPS_OPENAI_API_KEY="<temporary-secret>"
+
+uv run supportops-index-knowledge ensure-collection --allow-external-provider
+
+uv run supportops-index-knowledge index-version `
+  --workspace-id "<workspace-id>" `
+  --document-id "<document-id>" `
+  --document-version-id "<document-version-id>" `
+  --allow-external-provider
+
+Remove-Item Env:SUPPORTOPS_OPENAI_API_KEY
+```
+
+Do not place a real API key in documentation or committed files. Remove the
+temporary process key after the command.
 
 ## Validate dependency failure behavior
 

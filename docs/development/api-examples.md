@@ -43,7 +43,9 @@ future completion. They do not perform mutation, retry, cancellation, or lease
 revocation.
 
 Knowledge-document registration and version creation persist source content only
-in PostgreSQL and do not call an embedding provider or Qdrant.
+in PostgreSQL and do not call an embedding provider or Qdrant. Indexing is a
+separate `supportops-index-knowledge` CLI operation. Semantic retrieval is not
+an HTTP capability yet.
 
 ## Prerequisites
 
@@ -203,7 +205,7 @@ Expected behavior:
 - version `1` remains unchanged;
 - version `2` is created with status `pending`;
 - the active-version pointer remains unchanged;
-- no embedding or vector indexing occurs in the request.
+- the HTTP registration request itself performs no indexing.
 
 ## List knowledge documents
 
@@ -256,8 +258,85 @@ Expected error code:
 document_version_not_ready
 ```
 
-Successful activation is demonstrated after the explicit indexing command is
-introduced. Indexing and activation remain separate operations.
+Pending and failed versions cannot be activated. Indexing and activation remain
+separate operations.
+
+## Index a document version through the operator CLI
+
+Indexing is performed outside the HTTP API through the operator CLI. Use the
+workspace, document, and version identifiers already established above.
+
+```powershell
+uv run supportops-index-knowledge ensure-collection
+
+uv run supportops-index-knowledge index-version `
+  --workspace-id "$workspaceAId" `
+  --document-id "$documentId" `
+  --document-version-id "$documentVersion2Id"
+```
+
+Expected successful JSON fields include:
+
+```text
+status
+already_ready
+chunk_count
+embedding_input_tokens
+embedding_estimated_cost_usd
+pricing_catalog_version
+knowledge_collection
+```
+
+Expected behavior:
+
+- `status` is `ready`;
+- `already_ready` is `false` on the first successful indexing run;
+- chunk count and embedding usage provenance are present;
+- mock estimated cost is known zero;
+- the document `active_version_id` remains unchanged.
+
+Retrieve the version detail again:
+
+```powershell
+$version2Detail = Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions/$documentVersion2Id"
+
+$version2Detail.status
+$version2Detail.chunk_count
+$version2Detail.content
+```
+
+Expected behavior after indexing:
+
+- version status is `ready`;
+- index profile and indexing provenance are visible on the version detail;
+- source content remains available only through version detail;
+- document `active_version_id` remains unchanged until explicit activation.
+
+A ready-version CLI rerun is a no-op and reports `already_ready` as `true`.
+
+## Activate a ready version
+
+Activation is separate from indexing and remains an explicit API operation.
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId/versions/$documentVersion2Id/activate"
+
+$documentAfterActivation = Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/documents/$documentId"
+
+$documentAfterActivation.active_version_id
+```
+
+Expected behavior:
+
+- activation succeeds only because the version is already `ready`;
+- `active_version_id` equals `$documentVersion2Id`;
+- readiness alone never changes the active pointer.
 
 ## Attempt cross-workspace document access
 

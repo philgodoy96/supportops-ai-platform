@@ -720,14 +720,17 @@ Example safe value:
 
 ## AI runtime configuration
 
-Provider choice is explicit. Local development defaults to `mock`, which does
-not require a network connection or an OpenAI API key. OpenAI credentials are
-required only when `openai` is selected.
+LLM provider and embedding provider selections are independent. Local
+development defaults both to `mock`, which does not require a network connection
+or an OpenAI API key. OpenAI credentials are required when either the OpenAI
+generation adapter or the OpenAI embedding adapter is selected.
 
-Provider, model, workflow version, prompt version, and schema version remain
-independent configuration and provenance dimensions. The worker composes the
-selected provider once per process. No provider fallback exists. The API
-process validates shared settings but does not create the provider.
+Provider, model, workflow version, prompt version, schema version, and embedding
+profile remain independent configuration and provenance dimensions. The worker
+composes the selected LLM provider once per process. The indexing CLI creates
+the selected embedding provider. No provider fallback exists. The API process
+validates shared settings but does not create the LLM provider or the embedding
+provider.
 
 ### `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION`
 
@@ -834,8 +837,9 @@ mock
 
 ### `SUPPORTOPS_OPENAI_API_KEY`
 
-Optional OpenAI API credential required only when
-`SUPPORTOPS_LLM_PROVIDER=openai`.
+Optional OpenAI API credential required when either
+`SUPPORTOPS_LLM_PROVIDER=openai` or `SUPPORTOPS_EMBEDDING_PROVIDER=openai` is
+selected.
 
 Settings field:
 
@@ -858,13 +862,13 @@ omitted
 Constraints:
 
 - blank values normalize to omitted;
-- OpenAI provider selection requires a nonblank value;
+- OpenAI LLM or embedding provider selection requires a nonblank value;
 - mock provider selection does not require a value.
 
 Applies to:
 
 ```text
-worker configuration when OpenAI is selected
+worker OpenAI generation and indexing CLI OpenAI embeddings
 ```
 
 Security requirements:
@@ -1157,6 +1161,256 @@ five seconds.
 - no automatic model switching exists;
 - no cross-provider fallback exists.
 
+### `SUPPORTOPS_EMBEDDING_PROVIDER`
+
+Explicit embedding provider adapter selection for indexing composition.
+
+Settings field:
+
+```text
+embedding_provider
+```
+
+Type:
+
+```text
+enum string
+```
+
+Default:
+
+```text
+mock
+```
+
+Accepted values:
+
+```text
+mock
+openai
+```
+
+Applies to:
+
+```text
+indexing and later retrieval embedding adapter selection
+```
+
+Purpose:
+
+- selects the embedding adapter used by the indexing CLI;
+- keeps local development network-free by default;
+- remains independent from `SUPPORTOPS_LLM_PROVIDER`;
+- prevents implicit provider fallback.
+
+OpenAI embedding failure never selects `mock` automatically. The API process
+does not create the embedding provider.
+
+Example safe value:
+
+```text
+mock
+```
+
+### `SUPPORTOPS_EMBEDDING_MODEL`
+
+Deployment-configured embedding model identifier.
+
+Settings field:
+
+```text
+embedding_model
+```
+
+Type:
+
+```text
+string
+```
+
+Default:
+
+```text
+mock-hashing-embedding-v1
+```
+
+Constraints:
+
+- the mock profile requires `mock-hashing-embedding-v1`;
+- the OpenAI profile requires `text-embedding-3-small`.
+
+Applies to:
+
+```text
+indexing CLI embedding composition
+```
+
+Purpose:
+
+- binds the selected embedding model into the immutable index profile;
+- keeps model identity out of business modules;
+- preserves provider and model provenance on indexed versions.
+
+Example safe value:
+
+```text
+mock-hashing-embedding-v1
+```
+
+### `SUPPORTOPS_EMBEDDING_DIMENSIONS`
+
+Expected dense-vector dimensionality for the selected embedding profile.
+
+Settings field:
+
+```text
+embedding_dimensions
+```
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+64
+```
+
+Accepted range:
+
+```text
+1 through 4096
+```
+
+Constraints:
+
+- the OpenAI profile requires `1536`.
+
+Applies to:
+
+```text
+indexing CLI embedding composition and Qdrant collection compatibility
+```
+
+Purpose:
+
+- validates provider output dimensions;
+- selects compatible Qdrant collection geometry;
+- remains part of the immutable index profile.
+
+Example safe value:
+
+```text
+64
+```
+
+### `SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS`
+
+Maximum duration of one embedding provider request.
+
+Settings field:
+
+```text
+embedding_request_timeout_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+12.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 300
+```
+
+Applies to:
+
+```text
+indexing CLI embedding provider requests
+```
+
+Purpose:
+
+- bounds one provider request;
+- remains independent from worker execution timeout and LLM request timeout.
+
+Example safe value:
+
+```text
+12.0
+```
+
+### `SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES`
+
+Maximum SDK-managed transport retries within one embedding provider request.
+
+Settings field:
+
+```text
+embedding_transport_max_retries
+```
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+1
+```
+
+Accepted range:
+
+```text
+0 through 2
+```
+
+Applies to:
+
+```text
+OpenAI embedding provider configuration
+```
+
+Purpose:
+
+- makes SDK transport retry behavior explicit;
+- handles eligible transient provider transport failures;
+- is not an application-level indexing retry loop.
+
+Example safe value:
+
+```text
+1
+```
+
+### Embedding-provider semantics
+
+- LLM provider and embedding provider selections are independent;
+- no cross-provider embedding fallback exists;
+- OpenAI embeddings require `--allow-external-provider` at the indexing CLI;
+- the external-provider flag is rejected in mock mode;
+- mock and OpenAI vectors use separate Qdrant collections;
+- mock embeddings are network-free and zero-priced in the application catalog;
+- mock vectors use deterministic lexical SHA-256 hashing and are not a
+  semantic-quality benchmark;
+- persisted index-profile compatibility is enforced on retry;
+- unknown pricing remains null rather than being treated as zero.
+
 ## Docker Compose variables
 
 These variables configure local infrastructure containers.
@@ -1283,6 +1537,7 @@ SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS=2
 `SUPPORTOPS_WORKER_*` values use validated defaults when unset and do not need
 to appear in the local example file for basic local development. Set
 `SUPPORTOPS_WORKER_ID` explicitly when distinguishing concurrent local workers.
+`SUPPORTOPS_EMBEDDING_*` values likewise use validated mock defaults when unset.
 The AI runtime section above matches `.env.example`, including the empty
 `SUPPORTOPS_OPENAI_API_KEY=` placeholder.
 
@@ -1314,10 +1569,13 @@ Examples of invalid configuration include:
 - unsupported environment value;
 - unsupported log level;
 - unsupported LLM provider;
+- unsupported embedding provider;
 - unsupported ticket-processing workflow version;
-- OpenAI selected without an API key;
+- OpenAI LLM or embedding selection without an API key;
 - request timeout outside its accepted range;
+- embedding request timeout outside its accepted range;
 - transport retry count outside 0 through 2;
+- embedding transport retry count outside 0 through 2;
 - repair attempt count outside 0 through 1;
 - logical LLM budget exceeding the worker execution timeout after the required
   five-second safety margin.

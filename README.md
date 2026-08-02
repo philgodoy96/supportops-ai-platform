@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, and workspace-scoped immutable knowledge-document versioning are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, and explicit profiled knowledge indexing are implemented.
 
 The current platform includes:
 
@@ -92,7 +92,14 @@ The current platform includes:
 - opaque cursor pagination for document and version listings;
 - source content exposure only through the workspace-scoped version detail route;
 - cross-workspace document and version access that resolves as `404`;
-- reversible migrations and concurrency-sensitive integration coverage for the knowledge-document domain.
+- reversible migrations and concurrency-sensitive integration coverage for the knowledge-document domain;
+- deterministic markdown-token chunking with `cl100k_base` tokenization;
+- application-owned embedding contracts with mock and OpenAI providers;
+- versioned embedding usage and estimated-cost provenance;
+- Qdrant collection bootstrap, compatibility validation, and deterministic point upsert;
+- explicit `supportops-index-knowledge` indexing CLI;
+- indexing idempotency, partial-projection recovery, and ready-state verification;
+- unit and integration coverage for chunking, embeddings, vector store, and indexing orchestration.
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
@@ -127,9 +134,9 @@ The FastAPI process and the PostgreSQL worker process share:
 - the same PostgreSQL database;
 - the same infrastructure adapters where each process requires them.
 
-The API owns HTTP acceptance and transactional AgentRun scheduling. The worker owns recovery, claim, execution, and fenced outcome persistence. PostgreSQL is the durable work queue and transactional source of truth. The worker does not initialize or depend on Qdrant.
+The API owns HTTP acceptance and transactional AgentRun scheduling. The worker owns recovery, claim, execution, and fenced outcome persistence. PostgreSQL is the durable work queue and transactional source of truth. The worker does not initialize or depend on Qdrant and does not own the knowledge indexing command.
 
-Qdrant is treated as a rebuildable retrieval index. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
+PostgreSQL owns source content, authoritative chunks, indexing status, immutable index profile, active-version selection, embedding usage, estimated cost, and failure provenance. Qdrant owns only the rebuildable vector projection. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
 
 Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Future executors and tools must make side effects idempotent or otherwise safely fenced.
 
@@ -153,6 +160,7 @@ The current runtime foundation uses:
 - Ruff;
 - mypy;
 - uv;
+- tiktoken;
 - GitHub Actions.
 
 Detailed architecture documentation is maintained under [`docs/architecture`](docs/architecture).
@@ -224,7 +232,7 @@ The first business modules provide:
 
 ### Versioned knowledge documents
 
-The `knowledge_documents` module provides PostgreSQL-authoritative source registration and version rollout without performing embedding or vector-index operations.
+The `knowledge_documents` module provides PostgreSQL-authoritative source registration and version rollout. Document registration and version creation make no embedding-provider or Qdrant calls.
 
 Implemented behavior includes:
 
@@ -250,14 +258,39 @@ Current document lifecycle:
 ```text
 create document and version 1
 → version remains pending
-→ future explicit indexing command produces chunks and vectors
+→ explicit indexing command produces chunks and vectors
 → successful indexing marks the version ready
 → explicit activation changes the document active-version pointer
 ```
 
-Document registration and version creation make no embedding-provider or Qdrant calls. The indexing pipeline and semantic retrieval are introduced in subsequent PRs.
+Ready means the verified indexing projection completed. Ready does not mean active. Activation remains a separate explicit API operation.
 
 The domain and transaction model are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md).
+
+### Knowledge indexing
+
+The `supportops.knowledge_index` package provides explicit, profiled indexing from immutable PostgreSQL document versions to a rebuildable Qdrant projection.
+
+Implemented behavior includes:
+
+- deterministic `markdown-token` / `v1` chunking with `cl100k_base`, 500-token maximum, and 75-token overlap;
+- Markdown-aware heading, paragraph, and fenced-code handling, plus plain-text support without Markdown interpretation;
+- deterministic chunk IDs and content hashes persisted as authoritative PostgreSQL records;
+- application-owned embedding contracts with ordered batches, dimensions, usage, provider, model, and request IDs;
+- mock provider `mock-hashing-embedding-v1` at 64 dimensions using deterministic lexical SHA-256 hashing;
+- OpenAI provider `text-embedding-3-small` at 1536 dimensions;
+- versioned Decimal embedding pricing with known-zero mock cost and cataloged OpenAI pricing;
+- separate mock and OpenAI Qdrant collections with named vector `dense`, cosine distance, and ownership payload indexes;
+- Qdrant payloads that exclude source and chunk content;
+- deterministic chunk IDs used as Qdrant point IDs;
+- bounded upserts with `wait=True` and exact version projection-count verification before ready;
+- short database transactions that do not span tokenization, provider calls, or Qdrant calls;
+- failed compatible-version retry, ready-version no-op reruns, and partial-projection recovery;
+- the `supportops-index-knowledge` CLI for `ensure-collection` and `index-version`.
+
+Indexing does not activate a document version. Semantic retrieval remains unimplemented. Mock embeddings support local pipeline testing and are not a semantic-quality benchmark. OpenAI embeddings require explicit `--allow-external-provider` acknowledgement at the CLI.
+
+Indexing architecture is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). The explicit profiled indexing decision is recorded in [`docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md`](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md).
 
 ### Durable AgentRun scheduling and PostgreSQL worker
 
@@ -331,7 +364,7 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
 
 AgentRun detail includes an optional minimal classification reference.
 
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md).
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md).
 
 ### Workspace, ticket, AgentRun, and knowledge document API
 
@@ -372,9 +405,15 @@ The Qdrant integration includes:
 - explicit client lifecycle;
 - environment-based endpoint configuration;
 - optional API key configuration;
-- bounded read-only connectivity checks.
+- bounded read-only connectivity checks;
+- compatible named-vector knowledge collections with cosine distance;
+- separate mock and OpenAI collections selected by immutable index profile;
+- ownership payload indexes for `workspace_id`, `document_id`, and `document_version_id`;
+- deterministic chunk IDs as point IDs;
+- payloads that exclude source and chunk content;
+- bounded upserts with exact version projection-count verification.
 
-No collections, vectors, embeddings, indexing operations, or retrieval behavior exist yet. PostgreSQL now owns versioned source content and active-version state, providing the authoritative input for the later Qdrant indexing pipeline.
+Qdrant stores only the rebuildable vector projection. PostgreSQL remains authoritative for source content, chunks, status, profile, usage, cost, failure provenance, and active-version selection. Semantic retrieval is not implemented. The worker does not connect to Qdrant, and the HTTP API does not perform indexing.
 
 ### Testing and quality
 
@@ -414,6 +453,10 @@ The repository includes:
 - knowledge-document domain, persistence mapping, repository, application-service, pagination, and API coverage;
 - PostgreSQL concurrency tests for distinct and duplicate normalized document-version creation;
 - database-trigger coverage for ready-only activation and ready-version immutability;
+- deterministic chunking and tokenizer adapter coverage;
+- embedding contract, pricing, mock, OpenAI fake, and error coverage;
+- Qdrant collection, payload-index, upsert, and exact-count adapter coverage;
+- indexing orchestration, composition, CLI, idempotency, and recovery coverage;
 - settings validation tests;
 - lifecycle tests;
 - dependency failure-path tests;
@@ -429,13 +472,13 @@ Normal unit and integration tests do not require an OpenAI API key or paid exter
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, and the offline `supportops.evaluation.ticket_classification` package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the offline `supportops.evaluation.ticket_classification` package, and the explicit `supportops.knowledge_index` indexing package. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI.
 
 Future modules or extensions will introduce:
 
-- deterministic token-aware knowledge chunking and explicit indexing;
-- mock and OpenAI embedding providers;
-- Qdrant collection management and semantic retrieval;
+- semantic retrieval over active document versions;
+- query embeddings and authoritative PostgreSQL chunk hydration;
+- stable retrieval citations and reranking;
 - retrieval evaluation datasets and deterministic scoring;
 - evidence-driven prompt version 2;
 - prompt regression comparison across versions;
@@ -463,6 +506,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── agent-run-scheduling.md
 │   │   ├── classification-evaluation.md
 │   │   ├── knowledge-documents.md
+│   │   ├── knowledge-indexing.md
 │   │   ├── llm-gateway.md
 │   │   ├── overview.md
 │   │   ├── runtime-topology.md
@@ -475,7 +519,8 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── 0004-use-a-postgresql-backed-worker-model.md
 │   │   ├── 0005-keep-ai-observability-behind-an-adapter.md
 │   │   ├── 0006-establish-workspace-scoped-data-ownership.md
-│   │   └── 0007-use-an-application-owned-llm-gateway.md
+│   │   ├── 0007-use-an-application-owned-llm-gateway.md
+│   │   └── 0008-use-explicit-profiled-knowledge-indexing.md
 │   └── development/
 │       ├── api-examples.md
 │       ├── environment-variables.md
@@ -489,6 +534,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 ├── src/
 │   └── supportops/
 │       ├── ai/
+│       │   ├── embeddings/
 │       │   ├── gateway/
 │       │   ├── pricing/
 │       │   ├── prompts/
@@ -514,6 +560,12 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       ├── infrastructure/
 │       │   ├── postgresql/
 │       │   └── qdrant/
+│       ├── knowledge_index/
+│       │   ├── chunking/
+│       │   ├── indexing/
+│       │   ├── vector_store/
+│       │   ├── composition.py
+│       │   └── cli.py
 │       ├── modules/
 │       │   ├── agent_runs/
 │       │   │   ├── api/
@@ -538,7 +590,13 @@ Additional modules will be introduced only when they have concrete responsibilit
 │           └── main.py
 ├── tests/
 │   ├── integration/
+│   │   ├── knowledge_index/
+│   │   └── ...
 │   └── unit/
+│       ├── ai/
+│       │   └── embeddings/
+│       ├── knowledge_index/
+│       └── ...
 ├── .env.example
 ├── .gitignore
 ├── .python-version
@@ -550,7 +608,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, and versioned knowledge-document tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, and `knowledge_documents` modules include domain, application, and infrastructure layers as required. The `agent_runs` and `ticket_classifications` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, and versioned knowledge-document tables. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
 
 ## Local setup
 
@@ -609,6 +667,42 @@ Invoke-RestMethod http://127.0.0.1:8000/health/ready
 ```
 
 Workspace and ticket request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
+
+### Index a knowledge document version
+
+Ensure the profile collection exists, then index a specific pending or failed version:
+
+```powershell
+uv run supportops-index-knowledge ensure-collection
+
+uv run supportops-index-knowledge index-version `
+  --workspace-id "<workspace-id>" `
+  --document-id "<document-id>" `
+  --document-version-id "<document-version-id>"
+```
+
+Use the UUIDs returned by the knowledge-document API. Do not execute the literal placeholders. Default mock mode is network-free. Successful indexing returns `ready` but does not activate the version. Activate separately through the HTTP API. A ready-version rerun is a no-op.
+
+OpenAI embeddings require process configuration and explicit permission:
+
+```powershell
+$env:SUPPORTOPS_EMBEDDING_PROVIDER="openai"
+$env:SUPPORTOPS_EMBEDDING_MODEL="text-embedding-3-small"
+$env:SUPPORTOPS_EMBEDDING_DIMENSIONS="1536"
+$env:SUPPORTOPS_OPENAI_API_KEY="<temporary-secret>"
+
+uv run supportops-index-knowledge ensure-collection --allow-external-provider
+
+uv run supportops-index-knowledge index-version `
+  --workspace-id "<workspace-id>" `
+  --document-id "<document-id>" `
+  --document-version-id "<document-version-id>" `
+  --allow-external-provider
+
+Remove-Item Env:SUPPORTOPS_OPENAI_API_KEY
+```
+
+Do not place a real API key in documentation or committed files.
 
 The complete setup procedure is documented in [`docs/development/local-setup.md`](docs/development/local-setup.md).
 
@@ -702,9 +796,14 @@ SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS
 SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES
 SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS
 SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION
+SUPPORTOPS_EMBEDDING_PROVIDER
+SUPPORTOPS_EMBEDDING_MODEL
+SUPPORTOPS_EMBEDDING_DIMENSIONS
+SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS
+SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES
 ```
 
-The local default provider is `mock`. An OpenAI API key is required only when `openai` is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `ticket-classification-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers.
+The local default LLM and embedding providers are both `mock`. LLM provider and embedding provider selections are independent. `SUPPORTOPS_OPENAI_API_KEY` is shared by the OpenAI generation and embedding adapters and is required when either OpenAI adapter is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `ticket-classification-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers. Embedding request timeout is independent from worker execution timeout.
 
 The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
 
@@ -832,6 +931,7 @@ The repository records the following accepted decisions:
 - [Keep AI observability behind an application-owned adapter](docs/decisions/0005-keep-ai-observability-behind-an-adapter.md)
 - [Establish workspace-scoped data ownership](docs/decisions/0006-establish-workspace-scoped-data-ownership.md)
 - [Use an application-owned LLM Gateway](docs/decisions/0007-use-an-application-owned-llm-gateway.md)
+- [Use explicit, profiled knowledge indexing](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md)
 
 ## Roadmap
 
@@ -949,20 +1049,26 @@ Implemented:
 - duplicate normalized content protection;
 - concurrency-safe version numbering;
 - PostgreSQL-authoritative source content;
+- deterministic token-aware chunk generation;
+- authoritative PostgreSQL chunk persistence;
+- mock and OpenAI embedding providers;
+- embedding usage and cost accounting;
+- Qdrant collection bootstrap and compatibility validation;
+- deterministic vector-point indexing;
+- exact projection-count verification before ready;
+- explicit `supportops-index-knowledge` CLI;
 - explicit ready-state and active-version separation;
 - workspace-scoped document and version APIs;
 - stable version detail access for source inspection.
 
 Planned:
 
-- deterministic token-aware chunk generation;
-- mock and OpenAI embedding providers;
-- embedding usage and cost accounting;
-- Qdrant collection bootstrap and compatibility validation;
-- deterministic vector-point indexing;
 - active-version semantic retrieval;
-- PostgreSQL chunk hydration;
+- query embeddings;
+- PostgreSQL chunk hydration for retrieved points;
 - stable retrieval citations;
+- reranking;
+- grounded generation over retrieved evidence;
 - retrieval quality datasets and deterministic scoring.
 
 ### Controlled orchestration
@@ -1018,8 +1124,12 @@ The following capabilities remain deferred to preserve architectural focus and a
 - Anthropic provider;
 - operational cost reporting and invoice reconciliation;
 - automated and high-volume document ingestion;
-- embeddings and semantic retrieval;
-- Qdrant collections and vector indexing;
+- automatic indexing scheduling;
+- automatic version activation;
+- semantic retrieval;
+- query embeddings and authoritative retrieval hydration;
+- retrieval citations and reranking;
+- grounded generation;
 - LangGraph orchestration;
 - registered tools;
 - human approval workflows;
@@ -1038,7 +1148,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway, durable ticket-classification workflow, classification inspection, and offline evaluation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, and retrieval evaluation remain intentionally separated into later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, classification inspection, offline evaluation, versioned knowledge documents, and explicit profiled knowledge indexing are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, semantic retrieval, and retrieval evaluation remain intentionally separated into later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
@@ -1050,6 +1160,8 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
 - [Durable ticket classification](docs/architecture/ticket-classification.md)
 - [Classification inspection and evaluation](docs/architecture/classification-evaluation.md)
+- [Versioned knowledge documents](docs/architecture/knowledge-documents.md)
+- [Knowledge indexing pipeline](docs/architecture/knowledge-indexing.md)
 - [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
 - [Architecture decision records](docs/decisions)
 - [Local setup](docs/development/local-setup.md)
