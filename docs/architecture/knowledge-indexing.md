@@ -13,7 +13,7 @@ The pipeline converts an immutable PostgreSQL-backed knowledge document version 
 
 Indexing is an explicit operator-controlled operation. Document registration through the HTTP API does not invoke an embedding provider, write to Qdrant, or activate a document version.
 
-Semantic retrieval and grounded generation are separate capabilities and are not implemented by this pipeline.
+Semantic retrieval consumes the verified projection produced by this pipeline and is implemented separately under `supportops.knowledge_retrieval`. Grounded generation remains a separate later capability. Indexing and retrieval do not share one transaction or one command.
 
 ## Architectural position
 
@@ -374,8 +374,8 @@ This separation allows operators to:
 
 - index a new version;
 - inspect its provenance;
-- run retrieval evaluation;
-- activate it only after acceptance.
+- activate it only after acceptance;
+- search active knowledge for evidence.
 
 ## Transaction boundaries
 
@@ -644,11 +644,6 @@ Integration tests use real PostgreSQL and Qdrant to prove:
 
 This pipeline does not implement:
 
-- semantic search;
-- query embeddings;
-- active-version retrieval filtering;
-- PostgreSQL hydration of Qdrant results;
-- citations;
 - reranking;
 - grounded LLM generation;
 - LangGraph orchestration;
@@ -663,4 +658,4 @@ This pipeline does not implement:
 
 These capabilities remain separate engineering slices because they introduce distinct API contracts, reliability requirements, evaluation needs, and operational policies.
 
-The next retrieval capability will query only explicitly active ready versions, use Qdrant for candidate identifiers, and hydrate authoritative chunk text from PostgreSQL.
+Semantic evidence retrieval is implemented separately. That path queries only explicitly active ready versions, generates a request-driven query embedding, applies exact Qdrant document/version pair filters, hydrates authoritative chunk text from PostgreSQL, validates candidate provenance, and returns stable citations. See [`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md).

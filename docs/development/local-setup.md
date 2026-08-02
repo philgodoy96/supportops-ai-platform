@@ -19,12 +19,13 @@ The current platform includes:
 - durable AgentRun scheduling and PostgreSQL worker execution;
 - workspace-scoped AgentRun inspection;
 - explicit profiled knowledge indexing;
+- active-version semantic knowledge retrieval;
 - unit and integration tests;
 - local quality checks.
 
-Semantic retrieval remains outside the current implementation scope. Workspace
-scoping is not authentication or authorization. Docker Compose provisions
-infrastructure only and intentionally does not run the worker or indexing CLI.
+Workspace scoping is not authentication or authorization. Docker Compose
+provisions infrastructure only and intentionally does not run the worker or
+indexing CLI.
 
 ## Prerequisites
 
@@ -159,7 +160,7 @@ The process emits structured JSON logs.
 
 The application may start even when PostgreSQL or Qdrant is unavailable. Dependency availability is represented by readiness.
 
-Business routes under `/api/v1` require a migrated PostgreSQL database. Ticket creation schedules a durable `AgentRun` transactionally and does not execute the workflow. Business routes do not call Qdrant.
+Business routes under `/api/v1` require a migrated PostgreSQL database. Ticket creation schedules a durable `AgentRun` transactionally and does not execute the workflow. Semantic search routes use Qdrant for candidate search and the process-scoped embedding provider for request-driven query embeddings. The API does not perform indexing and does not use the LLM provider.
 
 ## Start the worker
 
@@ -422,6 +423,39 @@ Remove-Item Env:SUPPORTOPS_OPENAI_API_KEY
 
 Do not place a real API key in documentation or committed files. Remove the
 temporary process key after the command.
+
+## Search active knowledge locally
+
+After indexing and activating a ready version, search through the API.
+
+Start the API after setting the embedding profile variables. Indexing and API
+retrieval must use matching profiles. The default mock profile is network-free.
+
+```powershell
+$searchResponse = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/<workspace-id>/knowledge/search" `
+  -ContentType "application/json" `
+  -Body (@{
+    query = "How do I recover the database?"
+    top_k = 5
+  } | ConvertTo-Json)
+
+$searchResponse.searched_version_count
+$searchResponse.evidence
+```
+
+Use the workspace UUID returned by the knowledge-document API. Activate a ready
+version before search. An empty active scope returns HTTP `200` with
+`searched_version_count` `0` and empty evidence. No LLM answer is returned.
+
+For OpenAI embeddings, start the API process with the OpenAI embedding
+environment variables and key. The search endpoint itself does not accept
+`--allow-external-provider`; that CLI flag applies only to explicit indexing
+commands. Do not place a real API key in documentation or committed files.
+
+Complete request examples are documented in
+[`api-examples.md`](api-examples.md).
 
 ## Validate dependency failure behavior
 

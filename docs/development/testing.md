@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -86,7 +86,14 @@ They validate:
 - tokenizer adapter behavior;
 - embedding contracts, pricing, mock provider, OpenAI fake provider, and normalized embedding errors;
 - Qdrant adapter contracts, collection compatibility, payload indexes, upsert, and exact-count behavior;
-- indexing orchestration, composition, and CLI safety gates.
+- indexing orchestration, composition, and CLI safety gates;
+- knowledge-retrieval contracts and request bounds;
+- candidate provenance and Qdrant filter-pair validation;
+- malformed candidate discard and active-scope short circuit;
+- query embedding validation and authoritative hydration;
+- deterministic ranking;
+- retrieval API schemas, route composition, and `503` mappings;
+- retrieval lifespan cleanup.
 
 Unit tests use mocks only at external boundaries.
 
@@ -256,7 +263,7 @@ The knowledge-document suite verifies:
 - pending activation conflict and idempotent ready activation;
 - cross-workspace document and version access returning `404`.
 
-These tests do not initialize embedding providers, create Qdrant collections, or perform semantic retrieval. Knowledge-document API tests remain source-registration focused. Indexing behavior is covered by the dedicated knowledge-index suites below.
+These tests do not initialize embedding providers, create Qdrant collections, or perform semantic retrieval. Knowledge-document API tests remain source-registration focused. Indexing behavior is covered by the dedicated knowledge-index suites below. Retrieval behavior is covered by the dedicated knowledge-retrieval suites.
 
 ## Knowledge-index and embedding tests
 
@@ -289,6 +296,42 @@ The knowledge-index and embedding suites verify:
 - composition and CLI resource ownership, external-provider permission gates, and exit codes.
 
 Default automated tests use mock embeddings. OpenAI unit tests use injected fakes. No paid external provider call occurs in the automated suite. Integration tests create isolated Qdrant collections and delete them in `finally` blocks.
+
+## Knowledge-retrieval tests
+
+Focused unit coverage:
+
+```powershell
+uv run pytest tests/unit/knowledge_retrieval -vv
+```
+
+Focused integration coverage:
+
+```powershell
+uv run pytest -m integration tests/integration/knowledge_retrieval -vv
+```
+
+The knowledge-retrieval suites verify:
+
+- retrieval contracts and request bounds;
+- candidate provenance validation;
+- Qdrant filter pairs for workspace and active document/version targets;
+- malformed candidate discard;
+- active-scope short circuit with no embedding or Qdrant call;
+- query embedding validation;
+- authoritative PostgreSQL hydration;
+- deterministic ranking and rank promotion after invalid candidate discard;
+- API schemas and route composition;
+- `503` mappings for expected embedding and vector-store failures;
+- lifespan cleanup, including partial API startup cleanup;
+- real PostgreSQL and Qdrant integration with deterministic mock embeddings;
+- active ready participation and ready inactive exclusion;
+- workspace isolation and document filtering;
+- cross-workspace nondisclosure through empty evidence;
+- stale projection hash rejection;
+- logs that exclude source and chunk content.
+
+Default tests use mock embeddings and make no OpenAI network calls.
 
 ## Integration tests
 
@@ -360,11 +403,13 @@ They validate:
 - successful indexing with real PostgreSQL and Qdrant using mock embeddings;
 - ready-version rerun no-op behavior;
 - partial-projection failure and retry recovery;
-- indexing without implicit activation.
+- indexing without implicit activation;
+- semantic retrieval against real PostgreSQL and Qdrant with mock embeddings;
+- active-ready isolation, workspace isolation, document filters, stale-hash rejection, and rank promotion.
 
 Concurrency coverage uses independent sessions and synchronization primitives rather than arbitrary sleeps.
 
-Full API integration tests require PostgreSQL and applied migrations. Knowledge-document HTTP routes do not call Qdrant. Knowledge-index integration tests use real PostgreSQL and Qdrant with mock embeddings. Qdrant-dependent tests are not worker tests.
+Full API integration tests require PostgreSQL and applied migrations. Knowledge-document registration routes do not call Qdrant. Knowledge-index and knowledge-retrieval integration tests use real PostgreSQL and Qdrant with mock embeddings. Default automated tests make no OpenAI requests. Qdrant-dependent tests are not worker tests.
 
 PostgreSQL integration tests are required for claim ordering, `SKIP LOCKED` concurrency, lease-token fencing, and expired lease recovery because those behaviors depend on real row locking and commit visibility.
 
@@ -782,7 +827,10 @@ Covered failure paths include:
 - Qdrant response handling failure;
 - Qdrant operating system failure;
 - Qdrant timeout;
-- application cleanup failure.
+- application cleanup failure;
+- embedding retrieval failure;
+- vector-search failure;
+- partial API startup cleanup.
 
 These tests verify predictable behavior without requiring destructive infrastructure manipulation.
 
@@ -1079,7 +1127,7 @@ Later implementation phases are expected to add tests for:
 - authenticated tenant isolation;
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
-- semantic retrieval quality, citations, reranking, and grounded generation;
+- retrieval quality scoring, reranking, and grounded generation;
 - LangGraph orchestration;
 - tool authorization;
 - approval enforcement;
@@ -1093,5 +1141,5 @@ Authentication remains an intentional scope boundary for the current suite.
 Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery,
 deterministic execution, worker process coverage, workspace-scoped AgentRun and
 classification inspection, immutable knowledge-document versioning, explicit
-knowledge indexing, and offline classification evaluation are part of the
-current suite.
+knowledge indexing, active-version semantic knowledge retrieval, and offline
+classification evaluation are part of the current suite.

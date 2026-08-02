@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, and durable ticket-classification phase.
+This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, durable ticket classification, explicit knowledge indexing, and semantic knowledge retrieval.
 
 The topology is intentionally small. It provides the operational foundation required for reliable local development, testing, and controlled asynchronous processing without introducing premature distributed infrastructure.
 
@@ -12,8 +12,10 @@ The current runtime is designed around these components:
 
 - the FastAPI application process;
 - the PostgreSQL AgentRun worker process;
+- the one-shot `supportops-index-knowledge` indexing process;
 - PostgreSQL;
 - Qdrant;
+- the configured embedding provider used by API retrieval and the indexing command;
 - the configured LLM provider used only by the worker.
 
 ```mermaid
@@ -21,18 +23,24 @@ flowchart LR
     Client[API Client]
     API[FastAPI Process]
     Worker[PostgreSQL Worker Process]
+    Indexing[Indexing CLI Process]
     PostgreSQL[(PostgreSQL)]
     Qdrant[(Qdrant)]
+    Embedding[Configured Embedding Provider]
     Provider[Configured LLM Provider]
 
     Client -->|HTTP| API
     API -->|Async SQLAlchemy / asyncpg| PostgreSQL
+    API -->|semantic retrieval| Qdrant
+    API -->|query embeddings| Embedding
+    Indexing -->|Async SQLAlchemy / asyncpg| PostgreSQL
+    Indexing -->|vector projection| Qdrant
+    Indexing -->|chunk embeddings| Embedding
     Worker -->|Async SQLAlchemy / asyncpg| PostgreSQL
-    API -->|Async Qdrant client| Qdrant
     Worker -->|mock or OpenAI| Provider
 ```
 
-The worker may use the deterministic mock provider with no network, or the OpenAI provider over HTTPS. The API has no provider edge. Qdrant remains outside worker behavior.
+The worker may use the deterministic mock LLM provider with no network, or the OpenAI LLM provider over HTTPS. The API does not use the LLM provider. The API uses the configured embedding provider only for retrieval query embeddings and does not perform indexing. The indexing CLI uses the configured embedding provider for chunk embeddings. Qdrant remains outside worker behavior.
 
 The API and worker processes start independently from Docker Compose during the default local development workflow.
 
@@ -52,14 +60,19 @@ The FastAPI process owns:
 - router composition;
 - structured logging setup;
 - application startup and shutdown;
-- PostgreSQL engine lifecycle;
+- PostgreSQL engine and session factory lifecycle;
 - Qdrant client lifecycle;
+- process-scoped embedding provider construction for semantic retrieval;
+- process-scoped immutable retrieval profile;
 - HTTP request context middleware;
 - trace response headers;
 - liveness and readiness endpoints;
 - versioned `/api/v1` business routes;
 - stable expected-error handlers;
-- atomic Ticket and initial AgentRun scheduling during ticket intake.
+- atomic Ticket and initial AgentRun scheduling during ticket intake;
+- the workspace-scoped semantic search endpoint;
+- active-version resolution, Qdrant candidate search, and PostgreSQL hydration for retrieval;
+- provider and Qdrant cleanup on shutdown, including partial startup cleanup.
 
 The process is expected to run through Uvicorn.
 
@@ -67,7 +80,7 @@ The application may remain alive when PostgreSQL or Qdrant is unavailable. Depen
 
 Invalid required configuration remains a startup error.
 
-Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun with the configured workflow version in the same application-owned transaction. The API does not claim runs, acquire leases, execute workflows, recover stale ownership, or call the model. Business routes do not call Qdrant.
+Business routes persist and query PostgreSQL. Ticket creation schedules a durable AgentRun with the configured workflow version in the same application-owned transaction. The API does not claim runs, acquire leases, execute workflows, recover stale ownership, or call the LLM. Semantic search routes use Qdrant for candidate search and the configured embedding provider for request-driven query embeddings. The API does not perform indexing.
 
 ## Worker process
 
@@ -118,11 +131,9 @@ PostgreSQL currently owns:
 
 Repository operations use request-scoped async sessions for business HTTP routes. The worker opens one new `AsyncSession` per polling cycle. Engines and session factories remain process-owned.
 
-Each API request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter.
+Each API request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter. Semantic search constructs a request-scoped retrieval service over the same session while reusing the process-scoped embedding provider, Qdrant client, and immutable retrieval profile.
 
-Business routes do not call Qdrant. Qdrant remains limited to API readiness connectivity checks in the current phase.
-
-Future phases may extend PostgreSQL ownership for:
+PostgreSQL remains authoritative for retrieval content and active-version scope. Future phases may extend PostgreSQL ownership for:
 
 - approvals;
 - audit records;
@@ -156,18 +167,17 @@ Future phases may extend PostgreSQL ownership for:
 
 Qdrant is a rebuildable retrieval index.
 
-During the current phase, Qdrant is used only to establish:
+During the current phase, Qdrant is used for:
 
 - local service provisioning;
-- client configuration for the API process;
-- client lifecycle for the API process;
-- connectivity validation through API readiness.
+- client configuration and lifecycle for the API process;
+- connectivity validation through API readiness;
+- verified vector-point projection written by the indexing CLI;
+- filtered candidate search for API semantic retrieval.
 
-No collections, vectors, embeddings, ingestion workflows, or retrieval behavior are created.
+Qdrant returns candidate identifiers and selected metadata only. Authoritative chunk content is hydrated from PostgreSQL. Retrieval data must remain reproducible from authoritative source content.
 
-Qdrant is not involved in workspace, ticket, or AgentRun persistence. The worker must not connect to Qdrant. Ticket ownership, uniqueness, listing, repository behavior, AgentRun scheduling, claiming, and execution are PostgreSQL concerns only.
-
-Future retrieval data must remain reproducible from authoritative source content.
+Qdrant is not involved in workspace, ticket, or AgentRun persistence. The worker must not connect to Qdrant. Ticket ownership, uniqueness, listing, repository behavior, AgentRun scheduling, claiming, and execution are PostgreSQL concerns only. The API does not perform indexing; the indexing CLI owns its own Qdrant client for projection writes.
 
 ## Request flow for ticket creation
 
@@ -354,10 +364,15 @@ Application startup performs local construction tasks such as:
 
 - loading and validating settings;
 - configuring structured logging;
-- creating infrastructure clients;
+- creating the PostgreSQL engine and session factory;
+- creating the Qdrant client;
+- creating the configured embedding provider for semantic retrieval;
+- preparing the immutable retrieval profile;
 - preparing shared application state.
 
-Client construction does not imply dependency availability.
+Client and provider construction does not imply dependency availability and performs no embedding request at startup. OpenAI embedding mode means API startup validates and constructs the client; query calls remain request-driven. There is no automatic provider fallback.
+
+If startup fails after creating only some resources, partial cleanup closes what was constructed before the original failure propagates.
 
 The application does not require PostgreSQL or Qdrant to be reachable merely to expose liveness and diagnostic readiness behavior.
 
@@ -387,7 +402,7 @@ The request context is in-process and task-local.
 
 The engine and session factory are process-owned. Sessions are request-scoped.
 
-Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and do not call Qdrant. Worker claim, lease, retry, recovery, and execution behavior run in the separate worker process.
+Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and may call Qdrant for semantic candidate search. Worker claim, lease, retry, recovery, and execution behavior run in the separate worker process and do not use Qdrant.
 
 ### Route versioning
 
@@ -409,11 +424,12 @@ GET /health/ready
 
 ### Shutdown
 
-Application shutdown releases owned resources:
+Application shutdown releases owned resources independently:
 
-- the SQLAlchemy async engine is disposed;
+- the embedding provider is closed;
 - the Qdrant client is closed;
-- shutdown failures are logged with exception context.
+- the SQLAlchemy async engine is disposed;
+- shutdown failures are logged with exception context and without secrets.
 
 Lifecycle ownership must remain centralized and predictable.
 
@@ -489,18 +505,23 @@ flowchart LR
     TerminalA[Terminal: Docker Compose]
     TerminalB[Terminal: Uvicorn API]
     TerminalC[Terminal: supportops-worker]
+    TerminalD[Terminal: indexing CLI]
     PostgreSQL[(PostgreSQL Container)]
     Qdrant[(Qdrant Container)]
     API[Local FastAPI Process]
     Worker[Local Worker Process]
+    Indexing[Local Indexing Process]
 
     TerminalA --> PostgreSQL
     TerminalA --> Qdrant
     TerminalB --> API
     TerminalC --> Worker
+    TerminalD --> Indexing
     API --> PostgreSQL
-    Worker --> PostgreSQL
     API --> Qdrant
+    Worker --> PostgreSQL
+    Indexing --> PostgreSQL
+    Indexing --> Qdrant
 ```
 
 Expected execution model:
@@ -513,10 +534,11 @@ Expected execution model:
 6. start the worker with `uv run supportops-worker`;
 7. create a ticket through the API and observe the Ticket response;
 8. observe structured worker cycle logs for claim and classification execution;
-9. stop the worker with Ctrl+C and verify graceful shutdown logs;
-10. run local quality and test commands.
+9. index and activate a knowledge document version when exercising semantic search;
+10. stop the worker with Ctrl+C and verify graceful shutdown logs;
+11. run local quality and test commands.
 
-Docker Compose intentionally does not run the worker.
+Docker Compose intentionally does not run the worker or the indexing CLI.
 
 ## Multi-worker safety
 
@@ -655,7 +677,9 @@ The initial workflow intentionally avoids a runtime matrix because Python 3.12 i
 The API and worker run as separate processes:
 
 - each process creates and disposes its own database engine;
-- only the API owns a Qdrant client in the current phase;
+- the API owns a Qdrant client and a process-scoped embedding provider for semantic retrieval;
+- the worker does not own a Qdrant client or embedding provider;
+- the indexing CLI owns short-lived PostgreSQL, Qdrant, and embedding resources for one-shot commands;
 - in-memory state is not shared;
 - configuration is loaded independently;
 - logging context is process-specific;
@@ -705,7 +729,8 @@ Expected API behavior:
 - liveness remains healthy;
 - Qdrant readiness reports unhealthy;
 - overall readiness returns a non-success status;
-- the failure is logged safely.
+- the failure is logged safely;
+- semantic search maps expected vector-store failures to HTTP `503` with a sanitized retrieval-unavailable contract.
 
 The worker does not require Qdrant.
 

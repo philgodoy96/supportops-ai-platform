@@ -726,11 +726,11 @@ or an OpenAI API key. OpenAI credentials are required when either the OpenAI
 generation adapter or the OpenAI embedding adapter is selected.
 
 Provider, model, workflow version, prompt version, schema version, and embedding
-profile remain independent configuration and provenance dimensions. The worker
-composes the selected LLM provider once per process. The indexing CLI creates
-the selected embedding provider. No provider fallback exists. The API process
-validates shared settings but does not create the LLM provider or the embedding
-provider.
+profile remain independent configuration and provenance dimensions. The API
+creates the configured embedding provider at startup for semantic retrieval and
+does not create the LLM provider. The worker creates the configured LLM provider
+once per process and does not create the embedding provider. The indexing CLI
+creates its own embedding provider. No provider fallback exists.
 
 ### `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION`
 
@@ -868,8 +868,15 @@ Constraints:
 Applies to:
 
 ```text
-worker OpenAI generation and indexing CLI OpenAI embeddings
+API startup when OpenAI embeddings are selected
+worker startup when OpenAI LLM is selected
+indexing CLI when OpenAI embeddings are selected
 ```
+
+API startup requires the key when OpenAI embeddings are selected. Worker startup
+requires the key when OpenAI LLM is selected. The indexing CLI requires the key
+when OpenAI embeddings are selected. The key is not required only for LLM
+provider selection.
 
 Security requirements:
 
@@ -1163,7 +1170,8 @@ five seconds.
 
 ### `SUPPORTOPS_EMBEDDING_PROVIDER`
 
-Explicit embedding provider adapter selection for indexing composition.
+Explicit embedding provider adapter selection for API semantic retrieval and
+indexing composition.
 
 Settings field:
 
@@ -1193,18 +1201,21 @@ openai
 Applies to:
 
 ```text
-indexing and later retrieval embedding adapter selection
+API semantic retrieval
+indexing CLI
 ```
 
 Purpose:
 
-- selects the embedding adapter used by the indexing CLI;
+- selects the embedding adapter used by API query embeddings and the indexing CLI;
 - keeps local development network-free by default;
 - remains independent from `SUPPORTOPS_LLM_PROVIDER`;
 - prevents implicit provider fallback.
 
-OpenAI embedding failure never selects `mock` automatically. The API process
-does not create the embedding provider.
+OpenAI embedding failure never selects `mock` automatically. The API creates the
+embedding provider at startup for semantic retrieval. Provider construction
+performs no embedding request at startup. OpenAI embedding mode means API
+startup validates and constructs the client; query calls remain request-driven.
 
 Example safe value:
 
@@ -1242,12 +1253,13 @@ Constraints:
 Applies to:
 
 ```text
+API semantic retrieval
 indexing CLI embedding composition
 ```
 
 Purpose:
 
-- binds the selected embedding model into the immutable index profile;
+- binds the selected embedding model into the immutable index and retrieval profiles;
 - keeps model identity out of business modules;
 - preserves provider and model provenance on indexed versions.
 
@@ -1292,6 +1304,7 @@ Constraints:
 Applies to:
 
 ```text
+API semantic retrieval
 indexing CLI embedding composition and Qdrant collection compatibility
 ```
 
@@ -1299,7 +1312,7 @@ Purpose:
 
 - validates provider output dimensions;
 - selects compatible Qdrant collection geometry;
-- remains part of the immutable index profile.
+- remains part of the immutable index and retrieval profiles.
 
 Example safe value:
 
@@ -1338,6 +1351,7 @@ greater than 0 and no more than 300
 Applies to:
 
 ```text
+API semantic retrieval query embeddings
 indexing CLI embedding provider requests
 ```
 
@@ -1383,14 +1397,15 @@ Accepted range:
 Applies to:
 
 ```text
-OpenAI embedding provider configuration
+API OpenAI embedding provider configuration
+indexing CLI OpenAI embedding provider configuration
 ```
 
 Purpose:
 
 - makes SDK transport retry behavior explicit;
 - handles eligible transient provider transport failures;
-- is not an application-level indexing retry loop.
+- is not an application-level indexing or retrieval retry loop.
 
 Example safe value:
 
@@ -1402,13 +1417,16 @@ Example safe value:
 
 - LLM provider and embedding provider selections are independent;
 - no cross-provider embedding fallback exists;
+- API provider construction performs no embedding request at startup;
+- query embeddings remain request-driven;
 - OpenAI embeddings require `--allow-external-provider` at the indexing CLI;
+- the search endpoint does not accept `--allow-external-provider`;
 - the external-provider flag is rejected in mock mode;
 - mock and OpenAI vectors use separate Qdrant collections;
 - mock embeddings are network-free and zero-priced in the application catalog;
 - mock vectors use deterministic lexical SHA-256 hashing and are not a
   semantic-quality benchmark;
-- persisted index-profile compatibility is enforced on retry;
+- persisted index-profile compatibility is enforced on retry and retrieval;
 - unknown pricing remains null rather than being treated as zero.
 
 ## Docker Compose variables
