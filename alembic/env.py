@@ -2,9 +2,10 @@
 
 import asyncio
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
-from sqlalchemy import Connection, pool
+from sqlalchemy import Connection, Index, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from supportops.core.settings import Settings
@@ -20,6 +21,36 @@ if config.config_file_name is not None:
 
 register_persistence_models()
 target_metadata = Base.metadata
+
+# LangGraph owns and migrates these tables through checkpointer setup.
+LANGGRAPH_CHECKPOINT_TABLE_NAMES = frozenset(
+    {
+        "checkpoint_migrations",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+    }
+)
+
+
+def include_object(
+    object_: Any,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    del reflected, compare_to
+
+    if type_ == "table" and name in LANGGRAPH_CHECKPOINT_TABLE_NAMES:
+        return False
+
+    return not (
+        type_ == "index"
+        and isinstance(object_, Index)
+        and object_.table is not None
+        and object_.table.name in LANGGRAPH_CHECKPOINT_TABLE_NAMES
+    )
 
 
 def get_database_url() -> str:
@@ -51,6 +82,7 @@ def run_migrations_offline() -> None:
         compare_type=True,
         compare_server_default=True,
         render_as_batch=False,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -66,6 +98,7 @@ def run_sync_migrations(connection: Connection) -> None:
         compare_type=True,
         compare_server_default=True,
         render_as_batch=False,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
