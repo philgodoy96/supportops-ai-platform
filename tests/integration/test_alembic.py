@@ -11,7 +11,7 @@ from supportops.core.settings import Settings
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "d4e8f2a6c901"
+EXPECTED_HEAD = "e8b7c6d5a4f3"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -37,6 +37,37 @@ async def relation_exists(
             {"relation_name": relation_name},
         )
         return result.scalar_one() is not None
+
+
+async def constraint_exists(
+    engine: AsyncEngine,
+    *,
+    table_name: str,
+    constraint_name: str,
+) -> bool:
+    """Return whether a named PostgreSQL table constraint exists."""
+
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                """
+                SELECT 1
+                FROM pg_constraint AS constraint_def
+                JOIN pg_class AS table_def
+                    ON table_def.oid = constraint_def.conrelid
+                JOIN pg_namespace AS namespace_def
+                    ON namespace_def.oid = table_def.relnamespace
+                WHERE namespace_def.nspname = 'public'
+                  AND table_def.relname = :table_name
+                  AND constraint_def.conname = :constraint_name
+                """
+            ),
+            {
+                "table_name": table_name,
+                "constraint_name": constraint_name,
+            },
+        )
+        return result.scalar_one_or_none() is not None
 
 
 def test_alembic_reports_expected_head() -> None:
@@ -74,6 +105,22 @@ async def test_alembic_upgrade_creates_business_tables(
             engine,
             "public.knowledge_document_chunks",
         )
+        assert await relation_exists(engine, "public.agent_tool_calls")
+        assert await relation_exists(engine, "public.support_recommendations")
+        assert await relation_exists(
+            engine,
+            "public.support_recommendation_citations",
+        )
+        assert await constraint_exists(
+            engine,
+            table_name="ticket_classifications",
+            constraint_name="uq_ticket_classifications_run_id",
+        )
+        assert await constraint_exists(
+            engine,
+            table_name="knowledge_document_chunks",
+            constraint_name=("uq_knowledge_document_chunks_workspace_document_version_id"),
+        )
     finally:
         await engine.dispose()
 
@@ -105,6 +152,15 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
             engine,
             "public.knowledge_document_chunks",
         )
+        assert not await relation_exists(engine, "public.agent_tool_calls")
+        assert not await relation_exists(
+            engine,
+            "public.support_recommendations",
+        )
+        assert not await relation_exists(
+            engine,
+            "public.support_recommendation_citations",
+        )
     finally:
         await engine.dispose()
 
@@ -125,11 +181,17 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
             engine,
             "public.knowledge_document_chunks",
         )
+        assert await relation_exists(engine, "public.agent_tool_calls")
+        assert await relation_exists(engine, "public.support_recommendations")
+        assert await relation_exists(
+            engine,
+            "public.support_recommendation_citations",
+        )
     finally:
         await engine.dispose()
 
 
-async def test_alembic_downgrade_one_removes_only_knowledge_tables_and_can_reupgrade(
+async def test_alembic_downgrade_one_removes_only_controlled_workflow_tables_and_can_reupgrade(
     exclusive_integration_database: None,
 ) -> None:
     settings = Settings()
@@ -142,17 +204,14 @@ async def test_alembic_downgrade_one_removes_only_knowledge_tables_and_can_reupg
         downgrade = run_alembic_command("downgrade", "-1")
         assert downgrade.returncode == 0, downgrade.stderr
 
+        assert not await relation_exists(engine, "public.agent_tool_calls")
         assert not await relation_exists(
             engine,
-            "public.knowledge_documents",
+            "public.support_recommendations",
         )
         assert not await relation_exists(
             engine,
-            "public.knowledge_document_versions",
-        )
-        assert not await relation_exists(
-            engine,
-            "public.knowledge_document_chunks",
+            "public.support_recommendation_citations",
         )
         assert await relation_exists(engine, "public.workspaces")
         assert await relation_exists(engine, "public.tickets")
@@ -163,10 +222,6 @@ async def test_alembic_downgrade_one_removes_only_knowledge_tables_and_can_reupg
             engine,
             "public.ticket_classifications",
         )
-
-        reupgrade = run_alembic_command("upgrade", "head")
-        assert reupgrade.returncode == 0, reupgrade.stderr
-
         assert await relation_exists(engine, "public.knowledge_documents")
         assert await relation_exists(
             engine,
@@ -175,6 +230,36 @@ async def test_alembic_downgrade_one_removes_only_knowledge_tables_and_can_reupg
         assert await relation_exists(
             engine,
             "public.knowledge_document_chunks",
+        )
+        assert not await constraint_exists(
+            engine,
+            table_name="ticket_classifications",
+            constraint_name="uq_ticket_classifications_run_id",
+        )
+        assert not await constraint_exists(
+            engine,
+            table_name="knowledge_document_chunks",
+            constraint_name=("uq_knowledge_document_chunks_workspace_document_version_id"),
+        )
+
+        reupgrade = run_alembic_command("upgrade", "head")
+        assert reupgrade.returncode == 0, reupgrade.stderr
+
+        assert await relation_exists(engine, "public.agent_tool_calls")
+        assert await relation_exists(engine, "public.support_recommendations")
+        assert await relation_exists(
+            engine,
+            "public.support_recommendation_citations",
+        )
+        assert await constraint_exists(
+            engine,
+            table_name="ticket_classifications",
+            constraint_name="uq_ticket_classifications_run_id",
+        )
+        assert await constraint_exists(
+            engine,
+            table_name="knowledge_document_chunks",
+            constraint_name=("uq_knowledge_document_chunks_workspace_document_version_id"),
         )
     finally:
         await engine.dispose()
