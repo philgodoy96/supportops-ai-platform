@@ -2,12 +2,15 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from supportops.ai.embeddings.contracts import EmbeddingProvider
 from supportops.ai.gateway.contracts import LLMTokenUsage
 from supportops.ai.gateway.service import LLMGateway
 from supportops.ai.providers.mock import (
@@ -54,6 +57,9 @@ from supportops.modules.agent_runs.infrastructure.models import (
 from supportops.modules.agent_runs.infrastructure.repository import (
     SqlAlchemyAgentRunRepository,
 )
+from supportops.modules.knowledge_documents.domain.models import (
+    KnowledgeIndexProfile,
+)
 from supportops.modules.ticket_classifications.infrastructure.models import (
     LLMInvocationRecord,
     TicketClassificationRecord,
@@ -67,6 +73,7 @@ from supportops.modules.workspaces.infrastructure.repository import (
     SqlAlchemyWorkspaceRepository,
 )
 from supportops.worker.composition import (
+    WorkerControlledSupportRuntime,
     create_session_scoped_executor_registry,
 )
 
@@ -101,6 +108,32 @@ _SECOND_EXECUTION_REQUEST_ID = UUID(
 )
 
 _ZERO_COST = Decimal("0.000000000000")
+
+
+def _stub_controlled_runtime() -> WorkerControlledSupportRuntime:
+    """Build a controlled-support stub for classification-only tests."""
+
+    embedding_provider = MagicMock(spec=EmbeddingProvider)
+    embedding_provider.provider_name = "mock"
+    checkpoint_runtime = MagicMock()
+    checkpoint_runtime.checkpointer = MemorySaver()
+    return WorkerControlledSupportRuntime(
+        checkpoint_runtime=checkpoint_runtime,
+        embedding_provider=embedding_provider,
+        qdrant_client=MagicMock(),
+        index_profile=KnowledgeIndexProfile(
+            chunking_strategy="markdown-token",
+            chunking_version="v1",
+            tokenizer_encoding="cl100k_base",
+            embedding_provider="mock",
+            embedding_model="mock-hashing-embedding-v1",
+            embedding_dimensions=64,
+            knowledge_collection=("supportops-knowledge-mock-v1"),
+            knowledge_vector_name="dense",
+        ),
+        vector_store=MagicMock(),
+        vector_searcher=MagicMock(),
+    )
 
 
 def _successful_outcome() -> MockLLMOutcome:
@@ -213,6 +246,7 @@ async def _process_claim(
     *,
     claim: AgentRunClaim,
     gateway: LLMGateway,
+    provider: MockLLMProvider,
     model: str,
     finished_at: datetime,
 ) -> AgentRunTransitionResult:
@@ -225,8 +259,11 @@ async def _process_claim(
         session=session,
         transaction_manager=transaction_manager,
         gateway=gateway,
+        provider=provider,
         model=model,
         request_timeout_seconds=12,
+        controlled_runtime=_stub_controlled_runtime(),
+        embedding_timeout_seconds=12,
     )
     processor = ProcessClaimedAgentRun(
         ticket_repository=SqlAlchemyTicketRepository(
@@ -326,6 +363,7 @@ async def test_mock_workflow_persists_classification_and_completes_run(
                 processing_session,
                 claim=claim,
                 gateway=gateway,
+                provider=provider,
                 model=MOCK_TICKET_CLASSIFIER_MODEL,
                 finished_at=_FIRST_FINISHED_AT,
             )
@@ -441,8 +479,11 @@ async def test_persisted_classification_prevents_repeated_provider_call(
                 session=classification_session,
                 transaction_manager=(transaction_manager),
                 gateway=gateway,
+                provider=provider,
                 model=MOCK_TICKET_CLASSIFIER_MODEL,
                 request_timeout_seconds=12,
+                controlled_runtime=_stub_controlled_runtime(),
+                embedding_timeout_seconds=12,
             )
             executor = registry.resolve(
                 workflow_name=(claim.agent_run.workflow_name),
@@ -466,6 +507,7 @@ async def test_persisted_classification_prevents_repeated_provider_call(
                 recovery_session,
                 claim=claim,
                 gateway=gateway,
+                provider=provider,
                 model=MOCK_TICKET_CLASSIFIER_MODEL,
                 finished_at=_FIRST_FINISHED_AT,
             )
@@ -531,6 +573,7 @@ async def test_retry_creates_new_attempt_invocation_then_succeeds(
                 first_processing_session,
                 claim=first_claim,
                 gateway=gateway,
+                provider=provider,
                 model=MOCK_TICKET_CLASSIFIER_MODEL,
                 finished_at=_FIRST_FINISHED_AT,
             )
@@ -555,6 +598,7 @@ async def test_retry_creates_new_attempt_invocation_then_succeeds(
                 second_processing_session,
                 claim=second_claim,
                 gateway=gateway,
+                provider=provider,
                 model=MOCK_TICKET_CLASSIFIER_MODEL,
                 finished_at=_SECOND_FINISHED_AT,
             )

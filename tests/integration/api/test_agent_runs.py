@@ -9,6 +9,9 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from supportops.agent_graph.domain.state import (
+    CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+)
 from supportops.modules.agent_runs.domain.models import AgentRunAttempt
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
@@ -163,7 +166,7 @@ async def test_get_agent_run_returns_scheduled_processing_state(
     assert payload["status"] == "queued"
     assert payload["workflow"] == {
         "name": "ticket-processing",
-        "version": "ticket-classification-v1",
+        "version": CONTROLLED_SUPPORT_WORKFLOW_VERSION,
         "trigger_key": "initial-ticket-processing",
     }
     assert payload["attempt_count"] == 0

@@ -11,6 +11,9 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
+from supportops.agent_graph.domain.state import (
+    CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+)
 from supportops.ai.gateway.contracts import (
     LLMRequest,
     LLMTokenUsage,
@@ -737,6 +740,30 @@ async def test_rejects_unsupported_run_identity(
     assert captured.value.error_code == expected_code
     assert gateway.requests == []
     assert execution_repository.commands == []
+
+
+async def test_accepts_controlled_support_workflow_version() -> None:
+    context = _context()
+    controlled_context = replace(
+        context,
+        agent_run=replace(
+            context.agent_run,
+            workflow_version=(CONTROLLED_SUPPORT_WORKFLOW_VERSION),
+        ),
+    )
+    gateway = FakeGateway(_successful_result())
+    executor, _, execution_repository, _ = _executor(
+        gateway=gateway,
+    )
+
+    await executor.execute(controlled_context)
+
+    assert len(gateway.requests) == 1
+    assert len(execution_repository.commands) == 1
+    assert (
+        gateway.requests[0].metadata["supportops_workflow_version"]
+        == CONTROLLED_SUPPORT_WORKFLOW_VERSION
+    )
 
 
 async def test_rejects_unexpected_gateway_output_schema() -> None:

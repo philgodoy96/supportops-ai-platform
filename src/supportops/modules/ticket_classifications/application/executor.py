@@ -6,6 +6,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 
+from supportops.agent_graph.domain.state import (
+    CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+)
 from supportops.ai.gateway.contracts import (
     LLMOperation,
     LLMRequest,
@@ -364,7 +367,10 @@ def _validate_supported_workflow(
             ),
         )
 
-    if run.workflow_version != TICKET_CLASSIFICATION_WORKFLOW_VERSION:
+    if run.workflow_version not in {
+        TICKET_CLASSIFICATION_WORKFLOW_VERSION,
+        CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+    }:
         raise TerminalAgentRunExecutionError(
             error_code="unsupported_workflow_version",
             error_summary=(
