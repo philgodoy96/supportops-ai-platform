@@ -597,6 +597,11 @@ class TicketClassificationRecord(Base):
             "accepted_llm_invocation_id",
             name=("uq_ticket_classifications_accepted_invocation"),
         ),
+        UniqueConstraint(
+            "agent_run_id",
+            "id",
+            name="uq_ticket_classifications_run_id",
+        ),
         CheckConstraint(
             f"category IN ({_CATEGORY_SQL_VALUES})",
             name="ticket_classification_category",
