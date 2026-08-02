@@ -2,9 +2,11 @@
 
 ## Purpose
 
-This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, durable ticket classification, explicit knowledge indexing, and semantic knowledge retrieval.
+This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, durable ticket classification, explicit knowledge indexing, semantic knowledge retrieval, and the controlled support workflow.
 
 The topology is intentionally small. It provides the operational foundation required for reliable local development, testing, and controlled asynchronous processing without introducing premature distributed infrastructure.
+
+Controlled workflow behavior is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md).
 
 ## Current runtime components
 
@@ -13,9 +15,9 @@ The current runtime is designed around these components:
 - the FastAPI application process;
 - the PostgreSQL AgentRun worker process;
 - the one-shot `supportops-index-knowledge` indexing process;
-- PostgreSQL;
+- PostgreSQL, used for business records and for LangGraph checkpoint storage;
 - Qdrant;
-- the configured embedding provider used by API retrieval and the indexing command;
+- the configured embedding provider, owned independently by API retrieval, the worker, and the indexing command;
 - the configured LLM provider used only by the worker.
 
 ```mermaid
@@ -36,11 +38,16 @@ flowchart LR
     Indexing -->|Async SQLAlchemy / asyncpg| PostgreSQL
     Indexing -->|vector projection| Qdrant
     Indexing -->|chunk embeddings| Embedding
-    Worker -->|Async SQLAlchemy / asyncpg| PostgreSQL
-    Worker -->|mock or OpenAI| Provider
+    Worker -->|AgentRun and business records| PostgreSQL
+    Worker -->|LangGraph checkpoints| PostgreSQL
+    Worker -->|controlled knowledge candidate search| Qdrant
+    Worker -->|controlled query embeddings| Embedding
+    Worker -->|classification, decisions, recommendations| Provider
 ```
 
-The worker may use the deterministic mock LLM provider with no network, or the OpenAI LLM provider over HTTPS. The API does not use the LLM provider. The API uses the configured embedding provider only for retrieval query embeddings and does not perform indexing. The indexing CLI uses the configured embedding provider for chunk embeddings. Qdrant remains outside worker behavior.
+The worker may use the deterministic mock LLM provider with no network, or the OpenAI LLM provider over HTTPS. The API does not use the LLM provider.
+
+The worker reaches PostgreSQL through two separate connection paths: the SQLAlchemy engine used for AgentRun and business records, and the LangGraph checkpoint pool used for graph durability. The worker also owns its own embedding provider and Qdrant client for the controlled `search_knowledge` tool. The API keeps its own embedding provider and Qdrant client for the public semantic search endpoint, and the indexing CLI keeps its own for chunk embeddings and vector projection writes. These resources are not shared between processes.
 
 The API and worker processes start independently from Docker Compose during the default local development workflow.
 
@@ -89,17 +96,21 @@ The worker is a separate Python process exposed through the `supportops-worker` 
 The worker process owns:
 
 - loading and validating shared settings at process startup;
-- creating a process-owned PostgreSQL engine and session factory;
-- creating one process-scoped mock or OpenAI provider;
-- creating one process-scoped LLM Gateway;
+- creating a process-owned SQLAlchemy engine and session factory;
+- creating one process-scoped LLM runtime with a mock or OpenAI provider and one LLM Gateway;
+- creating one process-scoped PostgreSQL checkpoint runtime for LangGraph;
+- creating one process-scoped embedding provider;
+- creating one process-scoped Qdrant client;
+- building one immutable knowledge index profile;
+- creating one Qdrant knowledge vector store and search adapter;
 - resolving configured or generated worker identity;
-- composing a session-scoped versioned executor registry and classification repositories per cycle;
+- composing a session-scoped executor registry with three registered workflow versions, plus classification, tool, and recommendation repositories per cycle;
 - running continuous recovery, claim, and processing cycles;
 - emitting structured operational cycle logs;
 - cooperative SIGINT and SIGTERM shutdown;
-- closing the provider and disposing the SQLAlchemy engine on exit.
+- closing the controlled runtime, closing the LLM runtime, and disposing the SQLAlchemy engine on exit.
 
-Provider and Gateway instances are reused across cycles. The worker uses PostgreSQL as its durable work queue and source of truth. It does not initialize or depend on Qdrant.
+Provider, Gateway, checkpoint, embedding, and Qdrant resources are process-scoped and reused across cycles. The worker uses PostgreSQL as its durable work queue and business source of truth, and the same PostgreSQL instance stores LangGraph checkpoints through a separate connection pool. The worker now initializes Qdrant because controlled workflows may execute knowledge search.
 
 Worker identity may be configured through `SUPPORTOPS_WORKER_ID` or generated from hostname, process ID, and a UUID suffix.
 
@@ -118,6 +129,8 @@ PostgreSQL currently owns:
 - `workspaces` and `tickets` tables;
 - `agent_runs` and `agent_run_attempts` tables;
 - `llm_invocations` and `ticket_classifications` tables;
+- `agent_tool_calls`, `support_recommendations`, and `support_recommendation_citations` tables;
+- framework-owned LangGraph checkpoint tables created by checkpointer setup rather than by application migrations;
 - the workspace ownership foreign key on tickets;
 - composite workspace and ticket ownership for AgentRun, invocation, and classification records;
 - uniqueness constraints for workspace slugs and workspace-scoped external references;
@@ -129,7 +142,7 @@ PostgreSQL currently owns:
 - claim and recovery indexes and row-lock coordination;
 - lease ownership, retry scheduling, and attempt history.
 
-Repository operations use request-scoped async sessions for business HTTP routes. The worker opens one new `AsyncSession` per polling cycle. Engines and session factories remain process-owned.
+Repository operations use request-scoped async sessions for business HTTP routes. The worker opens one new `AsyncSession` per polling cycle. Engines and session factories remain process-owned. The LangGraph checkpoint pool is process-scoped and independent from the SQLAlchemy engine; Alembic autogenerate excludes the exact framework-owned checkpoint tables and their indexes from application schema comparison.
 
 Each API request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter. Semantic search constructs a request-scoped retrieval service over the same session while reusing the process-scoped embedding provider, Qdrant client, and immutable retrieval profile.
 
@@ -152,16 +165,21 @@ PostgreSQL remains authoritative for retrieval content and active-version scope.
 ### Worker process
 
 - the SQLAlchemy engine and session factory are process-owned and independent from the API process;
-- the configured provider and LLM Gateway are process-owned and reused across cycles;
+- the configured provider, LLM Gateway, checkpoint runtime, embedding provider, and Qdrant client are process-owned and reused across cycles;
+- the LangGraph checkpoint connection pool is process-scoped and separate from the SQLAlchemy engine;
 - each polling cycle opens one new `AsyncSession` and closes it when the cycle completes;
 - recovery uses one short transaction;
 - claim uses one short transaction that commits before executor work begins;
 - ticket loading uses one short transaction;
-- existing-classification lookup uses one short transaction;
-- provider calls run outside database transactions;
+- existing-classification, tool-audit, and recommendation recovery lookups each use one short transaction;
+- provider, embedding, tool, and Qdrant work runs outside business transactions;
 - fenced invocation and classification persistence uses one short transaction;
+- fenced tool-call audit persistence uses one short transaction per call;
+- fenced recommendation and citation persistence uses one short atomic transaction;
 - fenced AgentRun success or failure persistence uses a separate short transaction;
 - idle waits do not hold open transactions.
+
+Checkpoint writes occur at graph node boundaries through the checkpoint pool. They are not part of the application business transactions listed above.
 
 ## Qdrant runtime role
 
@@ -171,13 +189,15 @@ During the current phase, Qdrant is used for:
 
 - local service provisioning;
 - client configuration and lifecycle for the API process;
+- separate client configuration and lifecycle for the worker process;
 - connectivity validation through API readiness;
 - verified vector-point projection written by the indexing CLI;
-- filtered candidate search for API semantic retrieval.
+- filtered candidate search for API semantic retrieval;
+- filtered candidate search for the controlled `search_knowledge` tool.
 
-Qdrant returns candidate identifiers and selected metadata only. Authoritative chunk content is hydrated from PostgreSQL. Retrieval data must remain reproducible from authoritative source content.
+Qdrant returns candidate identifiers and selected metadata only. Authoritative chunk content is hydrated from PostgreSQL. Retrieval data must remain reproducible from authoritative source content. Graph resume reconstructs observations from PostgreSQL records rather than from Qdrant.
 
-Qdrant is not involved in workspace, ticket, or AgentRun persistence. The worker must not connect to Qdrant. Ticket ownership, uniqueness, listing, repository behavior, AgentRun scheduling, claiming, and execution are PostgreSQL concerns only. The API does not perform indexing; the indexing CLI owns its own Qdrant client for projection writes.
+Qdrant is not involved in workspace, ticket, AgentRun, tool-audit, or recommendation persistence. Ticket ownership, uniqueness, listing, repository behavior, AgentRun scheduling, claiming, and execution are PostgreSQL concerns only. The API does not perform indexing; the indexing CLI owns its own Qdrant client for projection writes.
 
 ## Request flow for ticket creation
 
@@ -219,7 +239,7 @@ flowchart TD
     Claim[Claim one available AgentRun]
     Idle[Idle cycle]
     Process[Dispatch claimed run outside transactions]
-    Persist[Persist fenced classification and AgentRun outcome]
+    Persist[Persist fenced workflow records and AgentRun outcome]
     Log[Emit structured cycle log]
     Close[Close session]
 
@@ -267,11 +287,12 @@ A successful claim:
 
 The worker dispatches exact workflow name and version through the session-scoped executor registry. No version fallback and no provider fallback exist.
 
-Registered versions include:
+The registry contains exactly three versions:
 
 ```text
 ticket-processing / deterministic-baseline-v1
 ticket-processing / ticket-classification-v1
+ticket-processing / controlled-support-v1
 ```
 
 The persisted initial workflow contract is:
@@ -282,7 +303,7 @@ workflow_version = configured value
 trigger_key = initial-ticket-processing
 ```
 
-The local default configured value is `ticket-classification-v1`. The deterministic baseline remains supported for historical or explicitly scheduled runs and performs no external I/O, LLM call, retrieval, or ticket classification.
+The local default configured value is `controlled-support-v1`. The classification workflow and the deterministic baseline remain supported for historical or explicitly scheduled runs; the deterministic baseline performs no external I/O, LLM call, retrieval, or ticket classification.
 
 After the claim transaction commits:
 
@@ -295,6 +316,8 @@ After the claim transaction commits:
 7. unexpected exceptions become sanitized retryable failures;
 8. raw exception text is not persisted;
 9. AgentRun success or failure is persisted in a separate fenced transaction.
+
+A controlled run additionally executes the compiled LangGraph graph with the process-scoped checkpointer. The graph ensures the durable classification, recovers committed tool outcomes before requesting another decision, requests bounded decisions, executes validated read-only tools outside transactions, persists tool audits under lease fencing, drafts the recommendation, and persists the recommendation and citations atomically. An attempt retry may resume the same graph thread instead of repeating completed nodes. The graph never transitions the AgentRun; the processor still owns the fenced completion transaction, and success requires a persisted recommendation identity in validated graph state.
 
 Unknown workflow or version values are terminal.
 
@@ -349,9 +372,10 @@ Shutdown behavior:
 - the idle wait is interruptible;
 - the active cycle may finish within the configured shutdown grace period;
 - the loop task is cancelled when the grace period is exceeded;
-- the LLM provider is closed during shutdown;
-- the SQLAlchemy engine is disposed during shutdown;
-- engine disposal is attempted even after provider cleanup failure;
+- the controlled runtime is closed, releasing the checkpoint pool, the embedding provider, and the Qdrant client;
+- the LLM runtime is closed;
+- the SQLAlchemy engine is disposed;
+- every independent cleanup operation is attempted even after an earlier cleanup failure;
 - structured logs record shutdown request, grace exceeded, and stop events.
 
 ## Application lifecycle
@@ -402,7 +426,7 @@ The request context is in-process and task-local.
 
 The engine and session factory are process-owned. Sessions are request-scoped.
 
-Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and may call Qdrant for semantic candidate search. Worker claim, lease, retry, recovery, and execution behavior run in the separate worker process and do not use Qdrant.
+Business routes under `/api/v1` schedule durable AgentRun records during ticket intake and may call Qdrant for semantic candidate search. Worker claim, lease, retry, recovery, and execution behavior run in the separate worker process using its own PostgreSQL, checkpoint, embedding, and Qdrant resources.
 
 ### Route versioning
 
@@ -494,7 +518,7 @@ If any required dependency is unavailable, timed out, or returns an unexpected f
 - the failing dependency is identified;
 - credentials and full connection strings are not returned.
 
-The worker does not expose these health endpoints and does not require Qdrant.
+The worker does not expose these health endpoints. It requires PostgreSQL for every cycle, and it requires Qdrant and the embedding provider whenever a controlled workflow executes `search_knowledge`. Worker dependency problems surface as typed workflow execution failures rather than health responses.
 
 ## Local development topology
 
@@ -520,6 +544,7 @@ flowchart LR
     API --> PostgreSQL
     API --> Qdrant
     Worker --> PostgreSQL
+    Worker --> Qdrant
     Indexing --> PostgreSQL
     Indexing --> Qdrant
 ```
@@ -528,15 +553,18 @@ Expected execution model:
 
 1. install dependencies with `uv`;
 2. create a local environment file;
-3. start PostgreSQL and Qdrant with Docker Compose;
+3. start PostgreSQL and Qdrant with Docker Compose and confirm both are running before starting the worker;
 4. apply the current Alembic migration head;
 5. start the FastAPI process with `uv run`;
-6. start the worker with `uv run supportops-worker`;
-7. create a ticket through the API and observe the Ticket response;
-8. observe structured worker cycle logs for claim and classification execution;
-9. index and activate a knowledge document version when exercising semantic search;
-10. stop the worker with Ctrl+C and verify graceful shutdown logs;
-11. run local quality and test commands.
+6. index and activate a knowledge document version so controlled knowledge search has eligible scope;
+7. start the worker with `uv run supportops-worker`, which creates its PostgreSQL, checkpoint, embedding, and Qdrant resources at startup;
+8. create a ticket through the API and observe the Ticket response;
+9. observe structured worker cycle logs for claim and controlled workflow execution;
+10. read the controlled support inspection endpoint for the resulting AgentRun;
+11. stop the worker with Ctrl+C and verify graceful shutdown logs;
+12. run local quality and test commands.
+
+The worker requires both PostgreSQL and Qdrant to be reachable at startup. Checkpoint setup runs during worker construction, so PostgreSQL must be available before the worker process starts.
 
 Docker Compose intentionally does not run the worker or the indexing CLI.
 
@@ -594,6 +622,11 @@ Unit tests validate:
 - deterministic executor behavior;
 - versioned registry dispatch;
 - classification executor and Gateway failure translation;
+- controlled graph state invariants, routing, and transitions;
+- provider decision normalization and terminal control validation;
+- bounded read-only tool execution and registry rejection rules;
+- tool observation reconstruction from durable audits;
+- controlled support inspection services and schema projections;
 - worker composition and lifecycle;
 - worker identity and graceful shutdown;
 - workspace and ticket API schemas;
@@ -616,6 +649,7 @@ flowchart LR
     API --> PostgreSQL
     WorkerLogic --> PostgreSQL
     API --> Qdrant
+    WorkerLogic --> Qdrant
 ```
 
 Integration tests validate:
@@ -624,7 +658,7 @@ Integration tests validate:
 - real Qdrant connectivity;
 - readiness success;
 - readiness failure;
-- Alembic upgrade, downgrade, re-upgrade, and metadata parity for classification tables;
+- Alembic upgrade, downgrade, re-upgrade, and metadata parity for business tables, with framework-owned checkpoint tables excluded from schema comparison;
 - workspace repository persistence;
 - ticket repository persistence and workspace scoping;
 - concurrency-sensitive uniqueness enforcement;
@@ -635,11 +669,16 @@ Integration tests validate:
 - mock classification workflow integration;
 - fenced invocation and classification persistence;
 - retry and recovery idempotency after classification commit;
+- LangGraph PostgreSQL checkpoint setup and resume without repeating completed nodes;
+- lease-fenced tool-audit persistence and stale-worker rejection;
+- lease-fenced recommendation and citation persistence;
+- post-commit and pre-checkpoint tool recovery;
+- controlled support inspection HTTP behavior and cross-workspace isolation;
 - workspace and ticket HTTP API behavior;
 - stable expected-error responses;
 - opaque cursor pagination.
 
-Qdrant-dependent tests are not worker tests. PostgreSQL integration coverage is required for concurrency and row-locking behavior.
+PostgreSQL integration coverage is required for concurrency and row-locking behavior. Controlled workflow integration tests use real PostgreSQL and Qdrant with deterministic mock providers. Shared business cleanup removes application rows in foreign-key-safe order and does not delete framework-owned checkpoint tables; tests that create durable graph threads clean up their own threads.
 
 ## Continuous integration topology
 
@@ -678,7 +717,7 @@ The API and worker run as separate processes:
 
 - each process creates and disposes its own database engine;
 - the API owns a Qdrant client and a process-scoped embedding provider for semantic retrieval;
-- the worker does not own a Qdrant client or embedding provider;
+- the worker owns a separate Qdrant client, embedding provider, index profile, and LangGraph checkpoint pool for controlled workflows;
 - the indexing CLI owns short-lived PostgreSQL, Qdrant, and embedding resources for one-shot commands;
 - in-memory state is not shared;
 - configuration is loaded independently;
@@ -700,11 +739,14 @@ The failure should be explicit and must not expose secret values.
 
 Worker construction also rejects invalid timing relationships:
 
-- lease duration must exceed execution timeout by at least five seconds;
+- lease duration must exceed execution timeout by at least fifteen seconds;
 - retry maximum must not be smaller than retry base;
-- the logical LLM invocation budget must fit inside the worker execution timeout with a five-second safety margin.
+- the logical LLM invocation budget must fit inside the worker execution timeout with a fifteen-second safety margin;
+- the controlled tool timeout must remain below the worker execution timeout.
 
-Provider composition startup failures prevent worker construction when the selected provider cannot be created.
+Local defaults are a worker execution timeout of 135 seconds, a lease duration of 150 seconds, a 15-second safety margin, and a 15-second controlled tool timeout. The controlled budget reserves six logical generation slots before repair multiplication: one classification, up to four decisions, and one recommendation.
+
+Provider composition startup failures prevent worker construction when the selected provider cannot be created. Checkpoint runtime setup failures also prevent worker construction, and partially created controlled resources are released before the original failure propagates.
 
 ### PostgreSQL unavailable
 
@@ -718,8 +760,9 @@ Expected API behavior:
 
 Expected worker behavior:
 
-- the worker depends on PostgreSQL for recovery, claim, classification persistence, and outcome persistence;
-- unavailable PostgreSQL surfaces as a runtime failure through the worker process path.
+- the worker depends on PostgreSQL for recovery, claim, classification persistence, tool-audit persistence, recommendation persistence, checkpoint durability, and outcome persistence;
+- unavailable PostgreSQL surfaces as a runtime failure through the worker process path;
+- checkpoint unavailability during execution becomes a retryable workflow execution failure handled by the outer processor.
 
 ### Qdrant unavailable
 
@@ -732,7 +775,12 @@ Expected API behavior:
 - the failure is logged safely;
 - semantic search maps expected vector-store failures to HTTP `503` with a sanitized retrieval-unavailable contract.
 
-The worker does not require Qdrant.
+Expected worker behavior:
+
+- the worker requires Qdrant for controlled workflows that execute `search_knowledge`;
+- the deterministic baseline and direct classification workflows do not use Qdrant;
+- an unavailable Qdrant or embedding dependency becomes a typed retryable workflow execution failure;
+- the outer processor then applies retry policy, attempt budget, and fenced state transitions.
 
 ### Dependency timeout
 
@@ -750,11 +798,19 @@ If the lease is lost before classification persistence commits, the fenced write
 
 A crash after the provider call but before classification persistence may repeat the provider call on recovery. A crash after classification persistence recovers without another provider call when an accepted classification already exists. Exactly-once provider cost is not claimed.
 
+### Controlled workflow failures
+
+Retryable controlled failures include provider timeouts, embedding or Qdrant dependency unavailability, checkpoint unavailability, and retryable tool timeouts.
+
+Terminal controlled failures include unsupported workflow identity, incompatible or mismatched checkpoint ownership, invalid provider decisions, unsupported tools or tool versions, exhausted graph, decision, or tool limits, inconsistent persisted audit provenance, recommendation validation failure, and a completed graph without a persisted recommendation.
+
+A crash after a terminal tool audit commits but before the checkpoint records it is recovered by an exact audit lookup at the decision boundary, so the tool is not executed twice. A crash after recommendation persistence recovers the existing recommendation without another drafting call.
+
 ### Shutdown failure
 
 A resource cleanup failure must be logged with exception information.
 
-Shutdown handling closes the provider and continues attempting engine disposal even after provider cleanup failure.
+Shutdown handling closes the controlled runtime, closes the LLM runtime, and disposes the engine, attempting every independent cleanup operation even after an earlier failure.
 
 ## Network and security boundaries
 
@@ -802,4 +858,4 @@ The current topology excludes:
 - cross-provider fallback;
 - automatic model routing.
 
-These components are not introduced until a concrete capability and operational requirement justify them. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL provides transactional durability and adequate local and portfolio scope for this phase. Configured mock or OpenAI provider calls are part of the worker topology when classification runs execute.
+These components are not introduced until a concrete capability and operational requirement justify them. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL provides transactional durability and adequate local and portfolio scope for this phase. Configured mock or OpenAI provider calls are part of the worker topology when classification or controlled support runs execute.
