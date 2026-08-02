@@ -374,3 +374,99 @@ def test_rejects_malformed_safe_output() -> None:
             malformed,
             expected_attempt_id=_ATTEMPT_ID,
         )
+
+
+def test_rejects_non_contiguous_search_evidence_ranks() -> None:
+    audit = _search_audit()
+    assert audit.safe_output is not None
+    original_evidence = audit.safe_output["evidence"]
+    assert isinstance(original_evidence, list)
+    non_contiguous = AgentToolCall.create(
+        tool_call_id=audit.id,
+        workspace_id=audit.workspace_id,
+        ticket_id=audit.ticket_id,
+        agent_run_id=audit.agent_run_id,
+        agent_run_attempt_id=audit.agent_run_attempt_id,
+        sequence=audit.sequence,
+        provider_tool_call_id=audit.provider_tool_call_id,
+        tool_name=audit.tool_name,
+        tool_version=audit.tool_version,
+        safety_level=audit.safety_level,
+        status=audit.status,
+        input_fingerprint=audit.input_fingerprint,
+        safe_input=audit.safe_input,
+        safe_output={
+            **dict(audit.safe_output),
+            "result_count": 1,
+            "evidence": [original_evidence[1]],
+        },
+        latency_ms=audit.latency_ms,
+        error_code=audit.error_code,
+        started_at=audit.started_at,
+        finished_at=audit.finished_at,
+    )
+
+    with pytest.raises(
+        ControlledSupportToolStateError,
+        match="knowledge-search audit output",
+    ):
+        record_persisted_tool_call(
+            _classified_state(
+                reserve_decision=True,
+            ),
+            non_contiguous,
+            expected_attempt_id=_ATTEMPT_ID,
+        )
+
+
+def test_rejects_duplicate_search_evidence_chunks() -> None:
+    audit = _search_audit()
+    assert audit.safe_output is not None
+    original_evidence = audit.safe_output["evidence"]
+    assert isinstance(original_evidence, list)
+    first_item = original_evidence[0]
+    second_item = original_evidence[1]
+    assert isinstance(first_item, dict)
+    assert isinstance(second_item, dict)
+    first_evidence = dict(first_item)
+    second_evidence = dict(second_item)
+    second_evidence["chunk_id"] = first_evidence["chunk_id"]
+    duplicate_chunks = AgentToolCall.create(
+        tool_call_id=audit.id,
+        workspace_id=audit.workspace_id,
+        ticket_id=audit.ticket_id,
+        agent_run_id=audit.agent_run_id,
+        agent_run_attempt_id=audit.agent_run_attempt_id,
+        sequence=audit.sequence,
+        provider_tool_call_id=audit.provider_tool_call_id,
+        tool_name=audit.tool_name,
+        tool_version=audit.tool_version,
+        safety_level=audit.safety_level,
+        status=audit.status,
+        input_fingerprint=audit.input_fingerprint,
+        safe_input=audit.safe_input,
+        safe_output={
+            **dict(audit.safe_output),
+            "result_count": 2,
+            "evidence": [
+                first_evidence,
+                second_evidence,
+            ],
+        },
+        latency_ms=audit.latency_ms,
+        error_code=audit.error_code,
+        started_at=audit.started_at,
+        finished_at=audit.finished_at,
+    )
+
+    with pytest.raises(
+        ControlledSupportToolStateError,
+        match="knowledge-search audit output",
+    ):
+        record_persisted_tool_call(
+            _classified_state(
+                reserve_decision=True,
+            ),
+            duplicate_chunks,
+            expected_attempt_id=_ATTEMPT_ID,
+        )
