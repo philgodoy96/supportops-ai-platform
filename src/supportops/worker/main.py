@@ -6,7 +6,7 @@ import logging
 import os
 import signal
 import socket
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from types import FrameType
 from typing import Any
@@ -39,8 +39,10 @@ from supportops.modules.agent_runs.infrastructure.worker_runtime import (
     PostgreSqlAgentWorkerCycleRunner,
 )
 from supportops.worker.composition import (
+    WorkerControlledSupportRuntime,
     WorkerLLMRuntime,
     create_session_scoped_executor_registry,
+    create_worker_controlled_support_runtime,
     create_worker_llm_runtime,
 )
 
@@ -50,6 +52,11 @@ _LOGGER = logging.getLogger("supportops.worker")
 
 _EXIT_SUCCESS = 0
 _EXIT_RUNTIME_FAILURE = 1
+
+type ControlledSupportRuntimeFactory = Callable[
+    ...,
+    Awaitable[WorkerControlledSupportRuntime],
+]
 
 
 def main() -> None:
@@ -63,12 +70,16 @@ async def run_worker(
     settings: Settings | None = None,
     stop_event: asyncio.Event | None = None,
     engine_factory: Callable[[str], AsyncEngine] | None = None,
+    controlled_runtime_factory: ControlledSupportRuntimeFactory | None = None,
 ) -> int:
     """Compose and run the worker until shutdown or runtime failure."""
 
     resolved_settings = settings or Settings()
     resolved_stop_event = stop_event or asyncio.Event()
     worker_id = resolve_worker_id(resolved_settings.worker_id)
+    build_controlled_runtime = (
+        controlled_runtime_factory or create_worker_controlled_support_runtime
+    )
 
     configure_logging()
 
@@ -93,13 +104,24 @@ async def run_worker(
         max_repair_attempts=(resolved_settings.llm_max_repair_attempts),
     )
 
+    try:
+        controlled_runtime = await build_controlled_runtime(
+            settings=resolved_settings,
+        )
+    except Exception:
+        await llm_runtime.close()
+        raise
+
     build_engine = engine_factory or create_worker_engine
     try:
         engine = build_engine(
             str(resolved_settings.postgresql_url),
         )
     except Exception:
-        await llm_runtime.close()
+        await _close_startup_resources(
+            controlled_runtime=controlled_runtime,
+            llm_runtime=llm_runtime,
+        )
         raise
 
     session_factory = async_sessionmaker(
@@ -122,8 +144,11 @@ async def run_worker(
             session=session,
             transaction_manager=transaction_manager,
             gateway=llm_runtime.gateway,
+            provider=llm_runtime.provider,
             model=llm_runtime.model,
             request_timeout_seconds=(resolved_settings.llm_request_timeout_seconds),
+            controlled_runtime=controlled_runtime,
+            embedding_timeout_seconds=(resolved_settings.embedding_request_timeout_seconds),
         )
 
     session_scoped_executor_factory: AgentRunExecutorFactory = executor_factory
@@ -198,10 +223,11 @@ async def run_worker(
                 await loop_task
 
         try:
-            try:
-                await llm_runtime.close()
-            finally:
-                await engine.dispose()
+            await _close_shutdown_resources(
+                controlled_runtime=controlled_runtime,
+                llm_runtime=llm_runtime,
+                engine=engine,
+            )
         finally:
             log_event(
                 logging.INFO,
@@ -211,6 +237,66 @@ async def run_worker(
             )
 
     return exit_code
+
+
+async def _close_startup_resources(
+    *,
+    controlled_runtime: WorkerControlledSupportRuntime,
+    llm_runtime: WorkerLLMRuntime,
+) -> None:
+    failures: list[Exception] = []
+
+    try:
+        await controlled_runtime.close()
+    except Exception as error:
+        failures.append(error)
+
+    try:
+        await llm_runtime.close()
+    except Exception as error:
+        failures.append(error)
+
+    if failures:
+        primary_failure = failures[0]
+        for secondary_failure in failures[1:]:
+            primary_failure.add_note(
+                "An additional startup resource failed to close: "
+                f"{type(secondary_failure).__name__}."
+            )
+        raise primary_failure
+
+
+async def _close_shutdown_resources(
+    *,
+    controlled_runtime: WorkerControlledSupportRuntime,
+    llm_runtime: WorkerLLMRuntime,
+    engine: AsyncEngine,
+) -> None:
+    failures: list[Exception] = []
+
+    try:
+        await controlled_runtime.close()
+    except Exception as error:
+        failures.append(error)
+
+    try:
+        await llm_runtime.close()
+    except Exception as error:
+        failures.append(error)
+
+    try:
+        await engine.dispose()
+    except Exception as error:
+        failures.append(error)
+
+    if failures:
+        primary_failure = failures[0]
+        for secondary_failure in failures[1:]:
+            primary_failure.add_note(
+                "An additional shutdown resource failed to close: "
+                f"{type(secondary_failure).__name__}."
+            )
+        raise primary_failure
 
 
 async def _wait_for_loop_or_shutdown(

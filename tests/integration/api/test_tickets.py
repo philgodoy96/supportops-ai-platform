@@ -8,10 +8,12 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from supportops.agent_graph.domain.state import (
+    CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+)
 from supportops.modules.agent_runs.domain.models import (
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
-    TICKET_CLASSIFICATION_WORKFLOW_VERSION,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunRecord,
@@ -115,7 +117,7 @@ async def test_create_ticket_persists_trace_identifiers(
     assert len(records) == 1
     record = records[0]
     assert record.workflow_name == INITIAL_TICKET_PROCESSING_WORKFLOW_NAME
-    assert record.workflow_version == TICKET_CLASSIFICATION_WORKFLOW_VERSION
+    assert record.workflow_version == CONTROLLED_SUPPORT_WORKFLOW_VERSION
     assert record.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert str(record.ingestion_request_id) == headers["x-request-id"]
     assert str(record.correlation_id) == correlation_id
@@ -151,7 +153,7 @@ async def test_create_ticket_persists_one_initial_agent_run(
     assert str(record.workspace_id) == workspace["id"]
     assert record.status == "queued"
     assert record.workflow_name == INITIAL_TICKET_PROCESSING_WORKFLOW_NAME
-    assert record.workflow_version == TICKET_CLASSIFICATION_WORKFLOW_VERSION
+    assert record.workflow_version == CONTROLLED_SUPPORT_WORKFLOW_VERSION
     assert record.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert record.attempt_count == 0
     assert record.lease_token is None

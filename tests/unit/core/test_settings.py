@@ -98,13 +98,13 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.postgresql_pool_timeout_seconds == 10.0
     assert settings.worker_id is None
     assert settings.worker_poll_interval_seconds == 1.0
-    assert settings.worker_lease_seconds == 45.0
-    assert settings.worker_execution_timeout_seconds == 30.0
+    assert settings.worker_lease_seconds == 150.0
+    assert settings.worker_execution_timeout_seconds == 135.0
     assert settings.worker_shutdown_grace_seconds == 10.0
     assert settings.worker_max_attempts == 3
     assert settings.worker_retry_base_seconds == 2.0
     assert settings.worker_retry_max_seconds == 60.0
-    assert settings.ticket_processing_workflow_version == "ticket-classification-v1"
+    assert settings.ticket_processing_workflow_version == "controlled-support-v1"
     assert settings.agent_graph_max_steps == 16
     assert settings.agent_graph_max_tool_calls == 3
     assert settings.agent_graph_max_decision_turns == 4
@@ -116,7 +116,7 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.openai_api_key is None
     assert settings.openai_model == "gpt-5-nano"
     assert settings.openai_base_url is None
-    assert settings.llm_request_timeout_seconds == 12.0
+    assert settings.llm_request_timeout_seconds == 10.0
     assert settings.llm_transport_max_retries == 1
     assert settings.llm_max_repair_attempts == 1
     assert settings.embedding_provider is EmbeddingProviderName.MOCK
@@ -133,12 +133,18 @@ def test_settings_load_worker_configuration_from_environment(
 ) -> None:
     monkeypatch.setenv("SUPPORTOPS_WORKER_ID", "worker-local-1")
     monkeypatch.setenv("SUPPORTOPS_WORKER_POLL_INTERVAL_SECONDS", "0.5")
-    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "70")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "80")
     monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS", "15")
     monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_BASE_SECONDS", "4")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_MAX_SECONDS", "120")
+    monkeypatch.setenv(
+        "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
+        "ticket-classification-v1",
+    )
+    monkeypatch.setenv("SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS", "0")
 
     settings_type = cast(Any, Settings)
     settings = cast(
@@ -154,7 +160,7 @@ def test_settings_load_worker_configuration_from_environment(
 
     assert settings.worker_id == "worker-local-1"
     assert settings.worker_poll_interval_seconds == 0.5
-    assert settings.worker_lease_seconds == 70.0
+    assert settings.worker_lease_seconds == 80.0
     assert settings.worker_execution_timeout_seconds == 60.0
     assert settings.worker_shutdown_grace_seconds == 15.0
     assert settings.worker_max_attempts == 5
@@ -179,7 +185,13 @@ def test_settings_load_agent_graph_configuration_from_environment(
     monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_DURABILITY", "sync")
     monkeypatch.setenv("SUPPORTOPS_SUPPORT_WORKFLOW_VERSION", "controlled-support-v1")
     monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
-    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "65")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "75")
+    monkeypatch.setenv(
+        "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
+        "ticket-classification-v1",
+    )
+    monkeypatch.setenv("SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS", "0")
 
     settings_type = cast(Any, Settings)
     settings = cast(
@@ -204,7 +216,7 @@ def test_settings_load_agent_graph_configuration_from_environment(
     assert settings.agent_graph_durability is AgentGraphDurability.SYNC
     assert settings.support_workflow_version == "controlled-support-v1"
     assert settings.worker_execution_timeout_seconds == 60.0
-    assert settings.worker_lease_seconds == 65.0
+    assert settings.worker_lease_seconds == 75.0
 
 
 def test_settings_load_llm_configuration_from_environment(
@@ -222,7 +234,7 @@ def test_settings_load_llm_configuration_from_environment(
     monkeypatch.setenv("SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES", "2")
     monkeypatch.setenv("SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS", "0")
     monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "50")
-    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "55")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "65")
 
     settings_type = cast(Any, Settings)
     settings = cast(
@@ -246,6 +258,7 @@ def test_settings_load_llm_configuration_from_environment(
     assert settings.llm_max_repair_attempts == 0
     assert settings.ticket_processing_workflow_version == "deterministic-baseline-v1"
     assert settings.worker_execution_timeout_seconds == 50.0
+    assert settings.worker_lease_seconds == 65.0
 
 
 def test_settings_load_embedding_configuration_from_environment(
@@ -305,8 +318,10 @@ def test_settings_reject_openai_provider_without_api_key() -> None:
         create_required_settings(
             llm_provider=LLMProviderName.OPENAI,
             openai_api_key=None,
+            ticket_processing_workflow_version="ticket-classification-v1",
             worker_execution_timeout_seconds=50,
-            worker_lease_seconds=55,
+            worker_lease_seconds=65,
+            llm_request_timeout_seconds=12,
         )
 
 
@@ -318,8 +333,10 @@ def test_settings_blank_openai_api_key_becomes_none_and_is_rejected_for_openai()
         create_required_settings(
             llm_provider=LLMProviderName.OPENAI,
             openai_api_key="   ",
+            ticket_processing_workflow_version="ticket-classification-v1",
             worker_execution_timeout_seconds=50,
-            worker_lease_seconds=55,
+            worker_lease_seconds=65,
+            llm_request_timeout_seconds=12,
         )
 
 
@@ -348,8 +365,10 @@ def test_settings_strip_surrounding_whitespace_from_openai_api_key() -> None:
     settings = create_required_settings(
         llm_provider=LLMProviderName.OPENAI,
         openai_api_key="  test-openai-key  ",
+        ticket_processing_workflow_version="ticket-classification-v1",
         worker_execution_timeout_seconds=50,
-        worker_lease_seconds=55,
+        worker_lease_seconds=65,
+        llm_request_timeout_seconds=12,
     )
 
     assert settings.openai_api_key is not None
@@ -360,8 +379,10 @@ def test_settings_openai_api_key_absent_from_repr() -> None:
     settings = create_required_settings(
         llm_provider=LLMProviderName.OPENAI,
         openai_api_key="super-secret-key",
+        ticket_processing_workflow_version="ticket-classification-v1",
         worker_execution_timeout_seconds=50,
-        worker_lease_seconds=55,
+        worker_lease_seconds=65,
+        llm_request_timeout_seconds=12,
     )
 
     assert "super-secret-key" not in repr(settings)
@@ -393,11 +414,12 @@ def test_settings_reject_unsupported_ticket_processing_workflow_version() -> Non
         )
 
 
-def test_settings_reject_controlled_support_as_ticket_processing_workflow_version() -> None:
-    with pytest.raises(ValidationError):
-        create_required_settings(
-            ticket_processing_workflow_version="controlled-support-v1",
-        )
+def test_settings_accept_controlled_support_as_ticket_processing_workflow_version() -> None:
+    settings = create_required_settings(
+        ticket_processing_workflow_version="controlled-support-v1",
+    )
+
+    assert settings.ticket_processing_workflow_version == "controlled-support-v1"
 
 
 def test_settings_reject_unsupported_agent_graph_durability() -> None:
@@ -636,9 +658,10 @@ def test_settings_reject_tool_timeout_equal_to_worker_execution_timeout() -> Non
         ),
     ):
         create_required_settings(
+            ticket_processing_workflow_version="ticket-classification-v1",
             agent_graph_tool_timeout_seconds=30,
             worker_execution_timeout_seconds=30,
-            worker_lease_seconds=35,
+            worker_lease_seconds=45,
             llm_request_timeout_seconds=12,
             llm_max_repair_attempts=0,
         )
@@ -646,9 +669,10 @@ def test_settings_reject_tool_timeout_equal_to_worker_execution_timeout() -> Non
 
 def test_settings_accept_tool_timeout_below_worker_execution_timeout() -> None:
     settings = create_required_settings(
+        ticket_processing_workflow_version="ticket-classification-v1",
         agent_graph_tool_timeout_seconds=29,
         worker_execution_timeout_seconds=30,
-        worker_lease_seconds=35,
+        worker_lease_seconds=45,
         llm_request_timeout_seconds=12,
         llm_max_repair_attempts=0,
     )
@@ -660,26 +684,33 @@ def test_settings_accept_tool_timeout_below_worker_execution_timeout() -> None:
 def test_settings_reject_lease_shorter_than_execution_timeout_margin() -> None:
     with pytest.raises(ValidationError):
         create_required_settings(
-            worker_lease_seconds=34,
+            ticket_processing_workflow_version="ticket-classification-v1",
+            worker_lease_seconds=44,
             worker_execution_timeout_seconds=30,
+            llm_request_timeout_seconds=12,
+            llm_max_repair_attempts=0,
         )
 
 
 def test_settings_accept_lease_equal_to_execution_timeout_margin() -> None:
     settings = create_required_settings(
-        worker_lease_seconds=35,
+        ticket_processing_workflow_version="ticket-classification-v1",
+        worker_lease_seconds=45,
         worker_execution_timeout_seconds=30,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=0,
     )
 
-    assert settings.worker_lease_seconds == 35.0
+    assert settings.worker_lease_seconds == 45.0
     assert settings.worker_execution_timeout_seconds == 30.0
 
 
 def test_settings_reject_execution_timeout_shorter_than_llm_budget() -> None:
     with pytest.raises(ValidationError):
         create_required_settings(
-            worker_execution_timeout_seconds=28,
-            worker_lease_seconds=34,
+            ticket_processing_workflow_version="ticket-classification-v1",
+            worker_execution_timeout_seconds=38,
+            worker_lease_seconds=53,
             llm_request_timeout_seconds=12,
             llm_max_repair_attempts=1,
         )
@@ -687,30 +718,69 @@ def test_settings_reject_execution_timeout_shorter_than_llm_budget() -> None:
 
 def test_settings_accept_execution_timeout_equal_to_llm_budget_margin() -> None:
     settings = create_required_settings(
-        worker_execution_timeout_seconds=29,
-        worker_lease_seconds=34,
+        ticket_processing_workflow_version="ticket-classification-v1",
+        worker_execution_timeout_seconds=39,
+        worker_lease_seconds=54,
         llm_request_timeout_seconds=12,
         llm_max_repair_attempts=1,
     )
 
-    assert settings.worker_execution_timeout_seconds == 29.0
-    assert settings.worker_lease_seconds == 34.0
+    assert settings.worker_execution_timeout_seconds == 39.0
+    assert settings.worker_lease_seconds == 54.0
     assert settings.llm_request_timeout_seconds == 12.0
     assert settings.llm_max_repair_attempts == 1
 
 
 def test_settings_accept_zero_repair_attempts_reduced_llm_budget() -> None:
     settings = create_required_settings(
-        worker_execution_timeout_seconds=17,
-        worker_lease_seconds=22,
+        ticket_processing_workflow_version="ticket-classification-v1",
+        worker_execution_timeout_seconds=27,
+        worker_lease_seconds=42,
         llm_request_timeout_seconds=12,
         llm_max_repair_attempts=0,
     )
 
-    assert settings.worker_execution_timeout_seconds == 17.0
-    assert settings.worker_lease_seconds == 22.0
+    assert settings.worker_execution_timeout_seconds == 27.0
+    assert settings.worker_lease_seconds == 42.0
     assert settings.llm_request_timeout_seconds == 12.0
     assert settings.llm_max_repair_attempts == 0
+
+
+def test_settings_reject_controlled_workflow_llm_budget_exceeding_execution_timeout() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"worker_execution_timeout_seconds must cover all configured LLM "
+            r"invocations plus the safety margin\."
+        ),
+    ):
+        create_required_settings(
+            ticket_processing_workflow_version="controlled-support-v1",
+            worker_execution_timeout_seconds=134,
+            worker_lease_seconds=149,
+            llm_request_timeout_seconds=10,
+            llm_max_repair_attempts=1,
+        )
+
+
+def test_settings_accept_baseline_and_classification_single_generation_budgets() -> None:
+    baseline = create_required_settings(
+        ticket_processing_workflow_version="deterministic-baseline-v1",
+        worker_execution_timeout_seconds=39,
+        worker_lease_seconds=54,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=1,
+    )
+    classification = create_required_settings(
+        ticket_processing_workflow_version="ticket-classification-v1",
+        worker_execution_timeout_seconds=39,
+        worker_lease_seconds=54,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=1,
+    )
+
+    assert baseline.ticket_processing_workflow_version == "deterministic-baseline-v1"
+    assert classification.ticket_processing_workflow_version == "ticket-classification-v1"
 
 
 def test_settings_reject_retry_max_smaller_than_retry_base() -> None:

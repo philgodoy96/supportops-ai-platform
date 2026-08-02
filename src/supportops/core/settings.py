@@ -52,11 +52,13 @@ class AgentGraphDurability(StrEnum):
 TicketProcessingWorkflowVersion = Literal[
     "deterministic-baseline-v1",
     "ticket-classification-v1",
+    "controlled-support-v1",
 ]
 
 SupportWorkflowVersion = Literal["controlled-support-v1"]
 
-_WORKER_EXECUTION_SAFETY_MARGIN_SECONDS = 5.0
+_WORKER_EXECUTION_SAFETY_MARGIN_SECONDS = 15.0
+_CONTROLLED_SUPPORT_LOGICAL_LLM_GENERATIONS = 6
 _CHECKPOINT_URL_ERROR = (
     "agent_graph_checkpoint_database_url must be a valid PostgreSQL connection URL."
 )
@@ -96,14 +98,14 @@ class Settings(BaseSettings):
 
     worker_id: str | None = Field(default=None, max_length=128)
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
-    worker_lease_seconds: float = Field(default=45.0, gt=0, le=3600)
-    worker_execution_timeout_seconds: float = Field(default=30.0, gt=0, le=1800)
+    worker_lease_seconds: float = Field(default=150.0, gt=0, le=3600)
+    worker_execution_timeout_seconds: float = Field(default=135.0, gt=0, le=1800)
     worker_shutdown_grace_seconds: float = Field(default=10.0, ge=0, le=300)
     worker_max_attempts: int = Field(default=3, ge=1, le=100)
     worker_retry_base_seconds: float = Field(default=2.0, gt=0, le=3600)
     worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 
-    ticket_processing_workflow_version: TicketProcessingWorkflowVersion = "ticket-classification-v1"
+    ticket_processing_workflow_version: TicketProcessingWorkflowVersion = "controlled-support-v1"
     agent_graph_max_steps: int = Field(default=16, ge=8, le=64)
     agent_graph_max_tool_calls: int = Field(default=3, ge=1, le=10)
     agent_graph_max_decision_turns: int = Field(default=4, ge=2, le=11)
@@ -115,7 +117,7 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_model: str = Field(default="gpt-5-nano", min_length=1, max_length=128)
     openai_base_url: str | None = Field(default=None, max_length=2048)
-    llm_request_timeout_seconds: float = Field(default=12.0, gt=0, le=300)
+    llm_request_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
     llm_transport_max_retries: int = Field(default=1, ge=0, le=2)
     llm_max_repair_attempts: int = Field(default=1, ge=0, le=1)
     embedding_provider: EmbeddingProviderName = EmbeddingProviderName.MOCK
@@ -265,7 +267,7 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "worker_lease_seconds must exceed "
-                "worker_execution_timeout_seconds by at least 5 seconds."
+                "worker_execution_timeout_seconds by at least 15 seconds."
             )
 
         if self.worker_retry_max_seconds < self.worker_retry_base_seconds:
@@ -281,8 +283,15 @@ class Settings(BaseSettings):
             raise ValueError("openai_api_key is required when an OpenAI provider is configured.")
 
         maximum_logical_invocation_count = 1 + self.llm_max_repair_attempts
+        logical_generation_count = (
+            _CONTROLLED_SUPPORT_LOGICAL_LLM_GENERATIONS
+            if self.ticket_processing_workflow_version == "controlled-support-v1"
+            else 1
+        )
         logical_llm_budget_seconds = (
-            self.llm_request_timeout_seconds * maximum_logical_invocation_count
+            logical_generation_count
+            * self.llm_request_timeout_seconds
+            * maximum_logical_invocation_count
         )
         if (
             self.worker_execution_timeout_seconds

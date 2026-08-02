@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import Callable
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -53,6 +53,19 @@ class FakeLLMRuntime:
         self.provider = FakeProvider(provider_name)
         self.gateway = object()
         self.model = model
+        self.close_calls = 0
+        self.close_error: Exception | None = None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class FakeControlledRuntime:
+    """Process-scoped controlled-support runtime stand-in."""
+
+    def __init__(self) -> None:
         self.close_calls = 0
         self.close_error: Exception | None = None
 
@@ -114,6 +127,16 @@ class ImmediateWorkerLoop:
 
     async def execute(self) -> None:
         return None
+
+
+class FailingWorkerLoop:
+    """Worker loop that fails during execution."""
+
+    def __init__(self, **kwargs: object) -> None:
+        del kwargs
+
+    async def execute(self) -> None:
+        raise RuntimeError("worker loop failed")
 
 
 def test_resolve_worker_id_preserves_configured_value() -> None:
@@ -308,16 +331,19 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
         llm_request_timeout_seconds=15,
         llm_transport_max_retries=2,
         llm_max_repair_attempts=0,
+        ticket_processing_workflow_version="ticket-classification-v1",
         worker_execution_timeout_seconds=50,
-        worker_lease_seconds=55,
+        worker_lease_seconds=65,
     )
     llm_runtime = FakeLLMRuntime(
         provider_name="openai",
         model="gpt-5-nano",
     )
+    controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
     _reset_capturing_cycle_runner()
     create_runtime = MagicMock(return_value=llm_runtime)
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     caplog.set_level(logging.INFO, logger="supportops.worker")
 
@@ -346,6 +372,7 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
         exit_code = await run_worker(
             settings=settings,
             engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
         )
 
     assert exit_code == 0
@@ -358,7 +385,9 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
         transport_max_retries=2,
         max_repair_attempts=0,
     )
+    create_controlled_runtime.assert_awaited_once_with(settings=settings)
     assert callable(_captured_cycle_runner_kwargs()["executor_factory"])
+    assert controlled_runtime.close_calls == 1
     assert llm_runtime.close_calls == 1
     assert engine.dispose_calls == 1
 
@@ -373,6 +402,7 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
     assert started["executor_registry"] == "versioned-workflow-registry"
     assert started["llm_provider"] == "openai"
     assert started["llm_model"] == "gpt-5-nano"
+    assert started["ticket_processing_workflow_version"] == ("ticket-classification-v1")
     assert "secret-openai-key" not in json.dumps(started)
     assert "openai_api_key" not in started
 
@@ -380,10 +410,12 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
 async def test_run_worker_executor_factory_builds_session_scoped_registry() -> None:
     settings = _create_settings()
     llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
     _reset_capturing_cycle_runner()
     registry = object()
     create_registry = MagicMock(return_value=registry)
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
         patch(
@@ -414,6 +446,7 @@ async def test_run_worker_executor_factory_builds_session_scoped_registry() -> N
         await run_worker(
             settings=settings,
             engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
         )
 
         executor_factory = _captured_cycle_runner_kwargs()["executor_factory"]
@@ -424,18 +457,24 @@ async def test_run_worker_executor_factory_builds_session_scoped_registry() -> N
         result = executor_factory(session, transaction_manager)
 
         assert result is registry
+        create_controlled_runtime.assert_awaited_once_with(settings=settings)
         create_registry.assert_called_once_with(
             session=session,
             transaction_manager=transaction_manager,
             gateway=llm_runtime.gateway,
+            provider=llm_runtime.provider,
             model=llm_runtime.model,
             request_timeout_seconds=settings.llm_request_timeout_seconds,
+            controlled_runtime=controlled_runtime,
+            embedding_timeout_seconds=(settings.embedding_request_timeout_seconds),
         )
 
 
-async def test_run_worker_closes_llm_runtime_when_engine_construction_fails() -> None:
+async def test_run_worker_closes_controlled_runtime_when_engine_construction_fails() -> None:
     settings = _create_settings()
     llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
         patch(
@@ -456,16 +495,94 @@ async def test_run_worker_closes_llm_runtime_when_engine_construction_fails() ->
         await run_worker(
             settings=settings,
             engine_factory=failing_engine_factory,
+            controlled_runtime_factory=create_controlled_runtime,
+        )
+
+    assert controlled_runtime.close_calls == 1
+    assert llm_runtime.close_calls == 1
+
+
+async def test_run_worker_closes_llm_runtime_when_controlled_runtime_creation_fails() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+
+    async def failing_controlled_runtime_factory(
+        *,
+        settings: Settings,
+    ) -> FakeControlledRuntime:
+        del settings
+        raise RuntimeError("controlled runtime unavailable")
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+        pytest.raises(RuntimeError, match="controlled runtime unavailable"),
+    ):
+        await run_worker(
+            settings=settings,
+            controlled_runtime_factory=cast(
+                Any,
+                failing_controlled_runtime_factory,
+            ),
         )
 
     assert llm_runtime.close_calls == 1
+
+
+async def test_run_worker_closes_controlled_runtime_when_worker_execution_fails() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
+    engine = FakeEngine()
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            FailingWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        exit_code = await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
+        )
+
+    assert exit_code == 1
+    assert controlled_runtime.close_calls == 1
+    assert llm_runtime.close_calls == 1
+    assert engine.dispose_calls == 1
 
 
 async def test_run_worker_disposes_engine_when_provider_close_fails() -> None:
     settings = _create_settings()
     llm_runtime = FakeLLMRuntime()
     llm_runtime.close_error = RuntimeError("provider close failed")
+    controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
         patch(
@@ -493,7 +610,9 @@ async def test_run_worker_disposes_engine_when_provider_close_fails() -> None:
         await run_worker(
             settings=settings,
             engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
         )
 
+    assert controlled_runtime.close_calls == 1
     assert llm_runtime.close_calls == 1
     assert engine.dispose_calls == 1
