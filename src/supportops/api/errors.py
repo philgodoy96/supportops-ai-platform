@@ -13,6 +13,11 @@ from supportops.knowledge_index.vector_store.contracts import (
     KnowledgeVectorStoreError,
 )
 from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
+from supportops.modules.controlled_support_inspection.application.errors import (
+    ControlledSupportInspectionInconsistentError,
+    ControlledSupportInspectionNotFoundError,
+    UnsupportedAgentRunInspectionError,
+)
 from supportops.modules.knowledge_documents.api.pagination import (
     InvalidKnowledgePaginationCursorError,
 )
@@ -131,6 +136,18 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         KnowledgeVectorStoreError,
         _knowledge_vector_store_error_handler,
+    )
+    app.add_exception_handler(
+        ControlledSupportInspectionNotFoundError,
+        _controlled_support_inspection_not_found_handler,
+    )
+    app.add_exception_handler(
+        UnsupportedAgentRunInspectionError,
+        _unsupported_agent_run_inspection_handler,
+    )
+    app.add_exception_handler(
+        ControlledSupportInspectionInconsistentError,
+        _controlled_support_inspection_inconsistent_handler,
     )
 
 
@@ -369,6 +386,48 @@ async def _knowledge_vector_store_error_handler(
         status_code=503,
         code="knowledge_retrieval_unavailable",
         message="Knowledge retrieval is temporarily unavailable.",
+    )
+
+
+async def _controlled_support_inspection_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="controlled_support_inspection_not_found",
+        message="The controlled support inspection was not found.",
+    )
+
+
+async def _unsupported_agent_run_inspection_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="unsupported_agent_run_inspection",
+        message="The AgentRun workflow does not support this inspection view.",
+    )
+
+
+async def _controlled_support_inspection_inconsistent_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=500,
+        code="controlled_support_inspection_inconsistent",
+        message="The controlled support inspection data is internally inconsistent.",
     )
 
 
