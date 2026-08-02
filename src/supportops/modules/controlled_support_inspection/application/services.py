@@ -43,11 +43,13 @@ from supportops.modules.controlled_support_inspection.domain.models import (
     RecommendationInspection,
     RecommendationPromptInspection,
     ServiceStatusSummary,
+    TerminalAnalysisInspection,
     ToolCallInspection,
     ToolResultSummary,
 )
 from supportops.modules.support_recommendations.domain.models import (
     SupportRecommendation,
+    SupportRecommendationAction,
     SupportRecommendationCitation,
 )
 from supportops.modules.ticket_classifications.domain.models import (
@@ -102,9 +104,11 @@ class GetControlledSupportInspection:
 def _validate_supported_workflow(
     data: ControlledSupportInspectionData,
 ) -> None:
+    agent_run = data.agent_run
+
     if (
-        data.agent_run.workflow_name != CONTROLLED_SUPPORT_WORKFLOW_NAME
-        or data.agent_run.workflow_version != CONTROLLED_SUPPORT_WORKFLOW_VERSION
+        agent_run.workflow_name != CONTROLLED_SUPPORT_WORKFLOW_NAME
+        or agent_run.workflow_version != CONTROLLED_SUPPORT_WORKFLOW_VERSION
     ):
         raise UnsupportedAgentRunInspectionError()
 
@@ -138,12 +142,15 @@ def _project_inspection(
         if data.recommendation is not None
         else None
     )
+    terminal_analysis = (
+        _project_terminal_analysis(data.recommendation) if data.recommendation is not None else None
+    )
 
     return ControlledSupportInspection(
         agent_run=AgentRunInspectionSummary.from_agent_run(data.agent_run),
         classification=classification,
         tool_calls=tool_calls,
-        terminal_analysis=None,
+        terminal_analysis=terminal_analysis,
         recommendation=recommendation,
         llm_usage=LLMUsageSummary.from_invocations(invocations),
         llm_invocations=invocations,
@@ -303,6 +310,20 @@ def _project_invocation(
         latency_ms=invocation.latency_ms,
         error_code=invocation.error_code,
         created_at=invocation.created_at,
+    )
+
+
+def _project_terminal_analysis(
+    recommendation: SupportRecommendation,
+) -> TerminalAnalysisInspection:
+    return TerminalAnalysisInspection(
+        recommended_action=(recommendation.recommended_action),
+        evidence_sufficient=(
+            recommendation.recommended_action
+            is not SupportRecommendationAction.REQUEST_MORE_INFORMATION
+        ),
+        requires_human_review=(recommendation.requires_human_review),
+        decision_summary=(recommendation.decision_summary),
     )
 
 
