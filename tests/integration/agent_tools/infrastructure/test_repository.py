@@ -15,6 +15,7 @@ from supportops.agent_tools.application.persistence import (
     AgentToolCallPersistenceResult,
     PersistAgentToolCallCommand,
 )
+from supportops.agent_tools.application.queries import AgentToolCallLookup
 from supportops.agent_tools.domain.audit import (
     AgentToolCall,
     AgentToolCallStatus,
@@ -24,6 +25,9 @@ from supportops.agent_tools.domain.contracts import (
 )
 from supportops.agent_tools.infrastructure.models import (
     AgentToolCallRecord,
+)
+from supportops.agent_tools.infrastructure.query_repository import (
+    SqlAlchemyAgentToolCallQueryRepository,
 )
 from supportops.agent_tools.infrastructure.repository import (
     SqlAlchemyAgentToolCallExecutionRepository,
@@ -378,3 +382,87 @@ async def test_returns_lease_lost_after_expiration(
 
     async with postgresql_session_factory() as session:
         assert await _count_records(session) == 0
+
+
+async def test_loads_terminal_audit_by_exact_attempt_sequence(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+
+        await _persist(
+            session,
+            _command(claim),
+        )
+
+        query = AgentToolCallLookup(
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_TICKET_ID,
+            agent_run_id=claim.agent_run.id,
+            agent_run_attempt_id=claim.attempt.id,
+            sequence=1,
+        )
+
+        async with SqlAlchemyTransactionManager(session).transaction():
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
+                query
+            )
+
+    assert loaded == _tool_call(claim)
+
+
+async def test_returns_none_for_cross_workspace_tool_audit_lookup(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+
+        await _persist(
+            session,
+            _command(claim),
+        )
+
+        query = AgentToolCallLookup(
+            workspace_id=UUID("a0000000-0000-4000-8000-000000000012"),
+            ticket_id=_TICKET_ID,
+            agent_run_id=claim.agent_run.id,
+            agent_run_attempt_id=claim.attempt.id,
+            sequence=1,
+        )
+
+        async with SqlAlchemyTransactionManager(session).transaction():
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
+                query
+            )
+
+    assert loaded is None
+
+
+async def test_returns_none_for_missing_tool_call_sequence(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+
+        await _persist(
+            session,
+            _command(claim),
+        )
+
+        query = AgentToolCallLookup(
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_TICKET_ID,
+            agent_run_id=claim.agent_run.id,
+            agent_run_attempt_id=claim.attempt.id,
+            sequence=2,
+        )
+
+        async with SqlAlchemyTransactionManager(session).transaction():
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
+                query
+            )
+
+    assert loaded is None
