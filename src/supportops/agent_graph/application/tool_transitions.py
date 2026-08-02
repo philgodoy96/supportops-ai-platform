@@ -1,25 +1,18 @@
 """Validated tool-outcome transitions for controlled graph state."""
 
 from collections.abc import Mapping
-from typing import (
-    Annotated,
-    Any,
-    Literal,
-    Self,
-)
+from typing import Any
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    StrictBool,
-    StringConstraints,
-    ValidationError,
-    model_validator,
-)
+from pydantic import JsonValue
 
+from supportops.agent_graph.application.tool_audit_schemas import (
+    PersistedSearchKnowledgeOutput,
+    PersistedServiceStatusOutput,
+    PersistedToolAuditOutputError,
+    parse_persisted_search_knowledge_output,
+    parse_persisted_service_status_output,
+)
 from supportops.agent_graph.domain.routing import (
     CONTROLLED_SUPPORT_RUNTIME_LIMITS,
     ControlledSupportRuntimeLimits,
@@ -40,7 +33,6 @@ from supportops.agent_tools.tools.search_knowledge import (
 from supportops.agent_tools.tools.service_status import (
     LOOKUP_SERVICE_STATUS_TOOL_NAME,
     LOOKUP_SERVICE_STATUS_TOOL_VERSION,
-    ServiceOperationalStatus,
 )
 
 
@@ -61,108 +53,6 @@ class ToolStateTransitionConflictError(ControlledSupportToolStateError):
         message: str,
     ) -> None:
         super().__init__(message)
-
-
-ContentSha256 = Annotated[
-    str,
-    StringConstraints(
-        pattern=r"^[0-9a-f]{64}$",
-    ),
-]
-
-
-class _SearchKnowledgeAuditEvidence(BaseModel):
-    """Strict safe-audit evidence projection."""
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        allow_inf_nan=False,
-    )
-
-    rank: Annotated[
-        int,
-        Field(
-            strict=True,
-            ge=1,
-        ),
-    ]
-    score: float
-    document_id: UUID
-    document_version_id: UUID
-    chunk_id: UUID
-    chunk_ordinal: Annotated[
-        int,
-        Field(
-            strict=True,
-            ge=0,
-        ),
-    ]
-    content_sha256: ContentSha256
-
-
-class _SearchKnowledgeAuditOutput(BaseModel):
-    """Strict persisted projection for a successful retrieval."""
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-        allow_inf_nan=False,
-    )
-
-    retrieval_query_id: UUID
-    searched_version_count: Annotated[
-        int,
-        Field(
-            strict=True,
-            ge=0,
-        ),
-    ]
-    result_count: Annotated[
-        int,
-        Field(
-            strict=True,
-            ge=0,
-        ),
-    ]
-    evidence: tuple[_SearchKnowledgeAuditEvidence, ...]
-
-    @model_validator(mode="after")
-    def validate_result_count(
-        self,
-    ) -> Self:
-        """Require the count to match the bounded evidence projection."""
-
-        if self.result_count != len(self.evidence):
-            raise ValueError("Search audit result_count must match evidence.")
-
-        return self
-
-
-class _ServiceStatusAuditOutput(BaseModel):
-    """Strict persisted projection for a service-status lookup."""
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=True,
-    )
-
-    service_name: str
-    status: ServiceOperationalStatus
-    incident_reference: str | None
-    has_incident: StrictBool
-    source: Literal["deterministic_catalog"]
-
-    @model_validator(mode="after")
-    def validate_incident_projection(
-        self,
-    ) -> Self:
-        """Require the derived incident flag to remain consistent."""
-
-        if self.has_incident != (self.incident_reference is not None):
-            raise ValueError("Service-status audit incident fields conflict.")
-
-        return self
 
 
 def record_persisted_tool_call(
@@ -392,10 +282,10 @@ def _require_active_state(
 
 def _parse_search_output(
     value: Mapping[str, JsonValue],
-) -> _SearchKnowledgeAuditOutput:
+) -> PersistedSearchKnowledgeOutput:
     try:
-        return _SearchKnowledgeAuditOutput.model_validate(dict(value))
-    except ValidationError as exc:
+        return parse_persisted_search_knowledge_output(value)
+    except PersistedToolAuditOutputError as exc:
         raise ControlledSupportToolStateError(
             "The persisted knowledge-search audit output is incompatible with graph state."
         ) from exc
@@ -403,10 +293,10 @@ def _parse_search_output(
 
 def _parse_service_status_output(
     value: Mapping[str, JsonValue],
-) -> _ServiceStatusAuditOutput:
+) -> PersistedServiceStatusOutput:
     try:
-        return _ServiceStatusAuditOutput.model_validate(dict(value))
-    except ValidationError as exc:
+        return parse_persisted_service_status_output(value)
+    except PersistedToolAuditOutputError as exc:
         raise ControlledSupportToolStateError(
             "The persisted service-status audit output is incompatible with graph state."
         ) from exc
