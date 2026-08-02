@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from supportops.core.settings import (
+    AgentGraphDurability,
     ApplicationEnvironment,
     EmbeddingProviderName,
     LLMProviderName,
@@ -33,6 +34,13 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_WORKER_RETRY_BASE_SECONDS",
     "SUPPORTOPS_WORKER_RETRY_MAX_SECONDS",
     "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
+    "SUPPORTOPS_AGENT_GRAPH_MAX_STEPS",
+    "SUPPORTOPS_AGENT_GRAPH_MAX_TOOL_CALLS",
+    "SUPPORTOPS_AGENT_GRAPH_MAX_DECISION_TURNS",
+    "SUPPORTOPS_AGENT_GRAPH_TOOL_TIMEOUT_SECONDS",
+    "SUPPORTOPS_AGENT_GRAPH_CHECKPOINT_DATABASE_URL",
+    "SUPPORTOPS_AGENT_GRAPH_DURABILITY",
+    "SUPPORTOPS_SUPPORT_WORKFLOW_VERSION",
     "SUPPORTOPS_LLM_PROVIDER",
     "SUPPORTOPS_OPENAI_API_KEY",
     "SUPPORTOPS_OPENAI_MODEL",
@@ -97,6 +105,13 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.worker_retry_base_seconds == 2.0
     assert settings.worker_retry_max_seconds == 60.0
     assert settings.ticket_processing_workflow_version == "ticket-classification-v1"
+    assert settings.agent_graph_max_steps == 16
+    assert settings.agent_graph_max_tool_calls == 3
+    assert settings.agent_graph_max_decision_turns == 4
+    assert settings.agent_graph_tool_timeout_seconds == 15.0
+    assert settings.agent_graph_checkpoint_database_url is None
+    assert settings.agent_graph_durability is AgentGraphDurability.SYNC
+    assert settings.support_workflow_version == "controlled-support-v1"
     assert settings.llm_provider is LLMProviderName.MOCK
     assert settings.openai_api_key is None
     assert settings.openai_model == "gpt-5-nano"
@@ -145,6 +160,51 @@ def test_settings_load_worker_configuration_from_environment(
     assert settings.worker_max_attempts == 5
     assert settings.worker_retry_base_seconds == 4.0
     assert settings.worker_retry_max_seconds == 120.0
+
+
+def test_settings_load_agent_graph_configuration_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_database_url = (
+        "postgresql://checkpoint-user:checkpoint-password@localhost:5432/supportops_checkpoints"
+    )
+    monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_MAX_STEPS", "24")
+    monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_MAX_TOOL_CALLS", "5")
+    monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_MAX_DECISION_TURNS", "7")
+    monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_TOOL_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv(
+        "SUPPORTOPS_AGENT_GRAPH_CHECKPOINT_DATABASE_URL",
+        checkpoint_database_url,
+    )
+    monkeypatch.setenv("SUPPORTOPS_AGENT_GRAPH_DURABILITY", "sync")
+    monkeypatch.setenv("SUPPORTOPS_SUPPORT_WORKFLOW_VERSION", "controlled-support-v1")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "65")
+
+    settings_type = cast(Any, Settings)
+    settings = cast(
+        Settings,
+        settings_type(
+            _env_file=None,
+            postgresql_url=(
+                "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+            ),
+            qdrant_url="http://localhost:6333",
+        ),
+    )
+
+    assert settings.agent_graph_max_steps == 24
+    assert settings.agent_graph_max_tool_calls == 5
+    assert settings.agent_graph_max_decision_turns == 7
+    assert settings.agent_graph_tool_timeout_seconds == 20.0
+    assert settings.agent_graph_checkpoint_database_url is not None
+    assert (
+        settings.agent_graph_checkpoint_database_url.get_secret_value() == checkpoint_database_url
+    )
+    assert settings.agent_graph_durability is AgentGraphDurability.SYNC
+    assert settings.support_workflow_version == "controlled-support-v1"
+    assert settings.worker_execution_timeout_seconds == 60.0
+    assert settings.worker_lease_seconds == 65.0
 
 
 def test_settings_load_llm_configuration_from_environment(
@@ -333,6 +393,82 @@ def test_settings_reject_unsupported_ticket_processing_workflow_version() -> Non
         )
 
 
+def test_settings_reject_controlled_support_as_ticket_processing_workflow_version() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(
+            ticket_processing_workflow_version="controlled-support-v1",
+        )
+
+
+def test_settings_reject_unsupported_agent_graph_durability() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(agent_graph_durability="async")
+
+
+def test_settings_reject_unsupported_support_workflow_version() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(support_workflow_version="unsupported-workflow")
+
+
+def test_settings_strip_agent_graph_checkpoint_database_url() -> None:
+    checkpoint_database_url = (
+        "postgresql://checkpoint-user:checkpoint-password@localhost:5432/supportops_checkpoints"
+    )
+    settings = create_required_settings(
+        agent_graph_checkpoint_database_url=f"  {checkpoint_database_url}  ",
+    )
+
+    assert settings.agent_graph_checkpoint_database_url is not None
+    assert (
+        settings.agent_graph_checkpoint_database_url.get_secret_value() == checkpoint_database_url
+    )
+
+
+def test_settings_blank_agent_graph_checkpoint_database_url_becomes_none() -> None:
+    settings = create_required_settings(agent_graph_checkpoint_database_url="   ")
+
+    assert settings.agent_graph_checkpoint_database_url is None
+
+
+def test_settings_agent_graph_checkpoint_database_url_absent_from_repr() -> None:
+    checkpoint_database_url = (
+        "postgresql://checkpoint-user:checkpoint-password@localhost:5432/supportops_checkpoints"
+    )
+    settings = create_required_settings(
+        agent_graph_checkpoint_database_url=checkpoint_database_url,
+    )
+
+    assert "checkpoint-password" not in repr(settings)
+    assert checkpoint_database_url not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_database_url",
+    [
+        "mysql://checkpoint-user:checkpoint-password@localhost:5432/supportops_checkpoints",
+        "postgresql://checkpoint-user:checkpoint-password@/supportops_checkpoints",
+        "postgresql://checkpoint-user:checkpoint-password@localhost:5432/",
+    ],
+)
+def test_settings_reject_invalid_agent_graph_checkpoint_database_url(
+    checkpoint_database_url: str,
+) -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"agent_graph_checkpoint_database_url must be a valid "
+            r"PostgreSQL connection URL\."
+        ),
+    ) as raised_error:
+        create_required_settings(
+            agent_graph_checkpoint_database_url=checkpoint_database_url,
+        )
+
+    error_text = str(raised_error.value)
+    assert "checkpoint-password" not in error_text
+    assert checkpoint_database_url not in error_text
+
+
 def test_settings_reject_empty_worker_id() -> None:
     with pytest.raises(ValidationError):
         create_required_settings(worker_id="")
@@ -426,6 +562,14 @@ def test_settings_reject_blank_required_strings(
         ("embedding_transport_max_retries", 3),
         ("dependency_health_timeout_seconds", 0),
         ("dependency_health_timeout_seconds", 31),
+        ("agent_graph_max_steps", 7),
+        ("agent_graph_max_steps", 65),
+        ("agent_graph_max_tool_calls", 0),
+        ("agent_graph_max_tool_calls", 11),
+        ("agent_graph_max_decision_turns", 1),
+        ("agent_graph_max_decision_turns", 12),
+        ("agent_graph_tool_timeout_seconds", 0),
+        ("agent_graph_tool_timeout_seconds", 61),
     ],
 )
 def test_settings_reject_invalid_numeric_configuration(
@@ -434,6 +578,83 @@ def test_settings_reject_invalid_numeric_configuration(
 ) -> None:
     with pytest.raises(ValidationError):
         create_required_settings(**{field_name: field_value})
+
+
+def test_settings_reject_max_steps_below_tool_loop_budget() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"agent_graph_max_steps must cover the configured maximum tool loop\.",
+    ):
+        create_required_settings(
+            agent_graph_max_tool_calls=3,
+            agent_graph_max_steps=11,
+        )
+
+
+def test_settings_accept_max_steps_equal_to_tool_loop_budget() -> None:
+    settings = create_required_settings(
+        agent_graph_max_tool_calls=3,
+        agent_graph_max_steps=12,
+    )
+
+    assert settings.agent_graph_max_tool_calls == 3
+    assert settings.agent_graph_max_steps == 12
+
+
+def test_settings_reject_decision_turns_without_terminal_decision() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"agent_graph_max_decision_turns must allow one terminal decision "
+            r"after all tool calls\."
+        ),
+    ):
+        create_required_settings(
+            agent_graph_max_tool_calls=3,
+            agent_graph_max_decision_turns=3,
+            agent_graph_max_steps=16,
+        )
+
+
+def test_settings_accept_decision_turns_with_terminal_decision() -> None:
+    settings = create_required_settings(
+        agent_graph_max_tool_calls=3,
+        agent_graph_max_decision_turns=4,
+        agent_graph_max_steps=16,
+    )
+
+    assert settings.agent_graph_max_tool_calls == 3
+    assert settings.agent_graph_max_decision_turns == 4
+
+
+def test_settings_reject_tool_timeout_equal_to_worker_execution_timeout() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"agent_graph_tool_timeout_seconds must be smaller than "
+            r"worker_execution_timeout_seconds\."
+        ),
+    ):
+        create_required_settings(
+            agent_graph_tool_timeout_seconds=30,
+            worker_execution_timeout_seconds=30,
+            worker_lease_seconds=35,
+            llm_request_timeout_seconds=12,
+            llm_max_repair_attempts=0,
+        )
+
+
+def test_settings_accept_tool_timeout_below_worker_execution_timeout() -> None:
+    settings = create_required_settings(
+        agent_graph_tool_timeout_seconds=29,
+        worker_execution_timeout_seconds=30,
+        worker_lease_seconds=35,
+        llm_request_timeout_seconds=12,
+        llm_max_repair_attempts=0,
+    )
+
+    assert settings.agent_graph_tool_timeout_seconds == 29.0
+    assert settings.worker_execution_timeout_seconds == 30.0
 
 
 def test_settings_reject_lease_shorter_than_execution_timeout_margin() -> None:

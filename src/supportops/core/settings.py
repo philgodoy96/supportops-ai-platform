@@ -3,6 +3,7 @@
 from enum import StrEnum
 from functools import lru_cache
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,12 +43,23 @@ class EmbeddingProviderName(StrEnum):
     OPENAI = "openai"
 
 
+class AgentGraphDurability(StrEnum):
+    """Supported controlled-agent checkpoint durability modes."""
+
+    SYNC = "sync"
+
+
 TicketProcessingWorkflowVersion = Literal[
     "deterministic-baseline-v1",
     "ticket-classification-v1",
 ]
 
+SupportWorkflowVersion = Literal["controlled-support-v1"]
+
 _WORKER_EXECUTION_SAFETY_MARGIN_SECONDS = 5.0
+_CHECKPOINT_URL_ERROR = (
+    "agent_graph_checkpoint_database_url must be a valid PostgreSQL connection URL."
+)
 
 
 class Settings(BaseSettings):
@@ -92,6 +104,13 @@ class Settings(BaseSettings):
     worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 
     ticket_processing_workflow_version: TicketProcessingWorkflowVersion = "ticket-classification-v1"
+    agent_graph_max_steps: int = Field(default=16, ge=8, le=64)
+    agent_graph_max_tool_calls: int = Field(default=3, ge=1, le=10)
+    agent_graph_max_decision_turns: int = Field(default=4, ge=2, le=11)
+    agent_graph_tool_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+    agent_graph_checkpoint_database_url: SecretStr | None = None
+    agent_graph_durability: AgentGraphDurability = AgentGraphDurability.SYNC
+    support_workflow_version: SupportWorkflowVersion = "controlled-support-v1"
     llm_provider: LLMProviderName = LLMProviderName.MOCK
     openai_api_key: SecretStr | None = None
     openai_model: str = Field(default="gpt-5-nano", min_length=1, max_length=128)
@@ -155,6 +174,46 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             normalized_value = value.strip()
             return normalized_value or None
+
+        return value
+
+    @field_validator("agent_graph_checkpoint_database_url", mode="before")
+    @classmethod
+    def normalize_agent_graph_checkpoint_database_url(cls, value: object) -> object:
+        """Normalize optional checkpoint URLs without exposing secret values."""
+
+        if value is None:
+            return None
+
+        if isinstance(value, SecretStr):
+            return value
+
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            return normalized_value or None
+
+        return value
+
+    @field_validator("agent_graph_checkpoint_database_url")
+    @classmethod
+    def validate_agent_graph_checkpoint_database_url(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        """Accept only PostgreSQL checkpoint URLs without disclosing credentials."""
+
+        if value is None:
+            return None
+
+        parsed_url = urlsplit(value.get_secret_value())
+        database_name = parsed_url.path.lstrip("/")
+
+        if (
+            parsed_url.scheme not in {"postgres", "postgresql"}
+            or not parsed_url.hostname
+            or not database_name
+        ):
+            raise ValueError(_CHECKPOINT_URL_ERROR)
 
         return value
 
@@ -232,6 +291,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "worker_execution_timeout_seconds must cover all configured LLM "
                 "invocations plus the safety margin."
+            )
+
+        minimum_graph_steps = 6 + (2 * self.agent_graph_max_tool_calls)
+        if self.agent_graph_max_steps < minimum_graph_steps:
+            raise ValueError("agent_graph_max_steps must cover the configured maximum tool loop.")
+
+        if self.agent_graph_max_decision_turns < self.agent_graph_max_tool_calls + 1:
+            raise ValueError(
+                "agent_graph_max_decision_turns must allow one terminal decision "
+                "after all tool calls."
+            )
+
+        if self.agent_graph_tool_timeout_seconds >= self.worker_execution_timeout_seconds:
+            raise ValueError(
+                "agent_graph_tool_timeout_seconds must be smaller than "
+                "worker_execution_timeout_seconds."
             )
 
         return self
