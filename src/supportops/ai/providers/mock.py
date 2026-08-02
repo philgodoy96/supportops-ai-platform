@@ -18,6 +18,15 @@ from supportops.ai.gateway.errors import (
     LLMRefusalError,
     LLMTimeoutError,
 )
+from supportops.ai.gateway.tool_decisions import (
+    LLMProviderFunctionCallResponse,
+    LLMProviderToolDecisionRequest,
+)
+from supportops.ai.providers.mock_tool_decisions import (
+    MockToolDecisionOutcome,
+    MockToolDecisionOutcomeKind,
+    MockToolDecisionOutcomeQueueExhaustedError,
+)
 from supportops.ai.schemas.ticket_classification import (
     TICKET_CLASSIFICATION_SCHEMA_VERSION,
     TicketCategory,
@@ -141,6 +150,8 @@ class MockLLMProvider:
         model: str = MOCK_TICKET_CLASSIFIER_MODEL,
         outcomes: Iterable[MockLLMOutcome] = (),
         default_outcome: MockLLMOutcome | None = None,
+        tool_decision_outcomes: Iterable[MockToolDecisionOutcome] = (),
+        default_tool_decision_outcome: MockToolDecisionOutcome | None = None,
     ) -> None:
         _validate_required_text(model, field_name="model")
 
@@ -149,6 +160,8 @@ class MockLLMProvider:
         self._default_outcome: MockLLMOutcome | None = (
             _default_success_outcome() if default_outcome is None else default_outcome
         )
+        self._tool_decision_outcomes = deque(tool_decision_outcomes)
+        self._default_tool_decision_outcome = default_tool_decision_outcome
         self._invocation_count = 0
         self._closed = False
 
@@ -167,6 +180,21 @@ class MockLLMProvider:
         )
         provider._default_outcome = None
         return provider
+
+    @classmethod
+    def with_strict_tool_decisions(
+        cls,
+        outcomes: Iterable[MockToolDecisionOutcome],
+        *,
+        model: str = MOCK_TICKET_CLASSIFIER_MODEL,
+    ) -> "MockLLMProvider":
+        """Create a provider with an explicit finite tool-decision script."""
+
+        return cls(
+            model=model,
+            tool_decision_outcomes=outcomes,
+            default_tool_decision_outcome=None,
+        )
 
     @property
     def provider_name(self) -> str:
@@ -247,6 +275,74 @@ class MockLLMProvider:
             f"Unsupported mock LLM outcome: {outcome.kind}.",
         )
 
+    async def decide(
+        self,
+        request: LLMProviderToolDecisionRequest,
+    ) -> LLMProviderFunctionCallResponse:
+        """Return one deterministic scripted tool decision without network access."""
+
+        if self._closed:
+            raise RuntimeError("Mock LLM provider is closed.")
+
+        if request.model != self._model:
+            raise LLMInvalidRequestError()
+
+        outcome = self._next_tool_decision_outcome()
+        self._invocation_count += 1
+
+        provider_request_id = f"mock-request-{self._invocation_count}"
+        provider_tool_call_id = f"mock-tool-call-{self._invocation_count}"
+
+        if outcome.kind is MockToolDecisionOutcomeKind.FUNCTION_CALL:
+            if (
+                outcome.function_name is None
+                or outcome.arguments_json is None
+                or outcome.finish_reason is None
+            ):
+                raise RuntimeError(
+                    "Function-call mock outcome is missing required fields.",
+                )
+
+            return LLMProviderFunctionCallResponse(
+                provider_tool_call_id=provider_tool_call_id,
+                function_name=outcome.function_name,
+                arguments_json=outcome.arguments_json,
+                provider=self.provider_name,
+                model=self._model,
+                provider_request_id=provider_request_id,
+                usage=outcome.usage,
+                finish_reason=outcome.finish_reason,
+            )
+
+        if outcome.kind is MockToolDecisionOutcomeKind.REFUSAL:
+            raise LLMRefusalError(
+                provider_request_id=provider_request_id,
+            )
+
+        if outcome.kind is MockToolDecisionOutcomeKind.TIMEOUT:
+            raise LLMTimeoutError(
+                provider_request_id=provider_request_id,
+            )
+
+        if outcome.kind is MockToolDecisionOutcomeKind.RETRYABLE_PROVIDER_ERROR:
+            raise LLMProviderUnavailableError(
+                provider_request_id=provider_request_id,
+            )
+
+        if outcome.kind is MockToolDecisionOutcomeKind.TERMINAL_PROVIDER_ERROR:
+            raise LLMInvalidRequestError(
+                provider_request_id=provider_request_id,
+            )
+
+        if outcome.kind is MockToolDecisionOutcomeKind.INCOMPLETE_RESPONSE:
+            raise LLMIncompleteResponseError(
+                provider_request_id=provider_request_id,
+            )
+
+        raise RuntimeError(
+            f"Unsupported mock tool-decision outcome: {outcome.kind}.",
+        )
+
     async def close(self) -> None:
         """Close the mock provider lifecycle idempotently."""
 
@@ -261,6 +357,17 @@ class MockLLMProvider:
 
         raise MockLLMOutcomeQueueExhaustedError(
             "The strict mock LLM outcome queue is exhausted.",
+        )
+
+    def _next_tool_decision_outcome(self) -> MockToolDecisionOutcome:
+        if self._tool_decision_outcomes:
+            return self._tool_decision_outcomes.popleft()
+
+        if self._default_tool_decision_outcome is not None:
+            return self._default_tool_decision_outcome
+
+        raise MockToolDecisionOutcomeQueueExhaustedError(
+            "The strict mock tool-decision outcome queue is exhausted.",
         )
 
 
