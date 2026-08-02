@@ -140,6 +140,13 @@ def render_support_tool_decision_prompt(
     )
 
     normalized_tool_names = _normalize_tool_names(available_tool_names)
+
+    if remaining_tool_calls == 0 and normalized_tool_names:
+        raise ValueError("available_tool_names must be empty when no tool calls remain.")
+
+    if remaining_tool_calls > 0 and not normalized_tool_names:
+        raise ValueError("available_tool_names must not be empty while tool calls remain.")
+
     definition = get_support_tool_decision_prompt(version=version)
     workflow_control_json = _dump_json(
         {
@@ -187,9 +194,6 @@ def render_support_tool_decision_prompt(
 def _normalize_tool_names(
     values: tuple[str, ...],
 ) -> tuple[str, ...]:
-    if not values:
-        raise ValueError("available_tool_names must not be empty.")
-
     for value in values:
         _validate_required_text(
             value,

@@ -138,6 +138,53 @@ def test_rejects_empty_tool_names() -> None:
         _render(available_tool_names=())
 
 
+def test_renders_terminal_only_turn_after_tool_exhaustion() -> None:
+    rendered = _render(
+        available_tool_names=(),
+        remaining_tool_calls=0,
+        remaining_decision_turns=1,
+    )
+
+    assert '"available_read_only_tools":[]' in rendered.input
+    assert '"remaining_tool_calls":0' in rendered.input
+    assert '"remaining_decision_turns":1' in rendered.input
+    assert '"terminal_control":"complete_support_analysis"' in rendered.input
+
+
+@pytest.mark.parametrize(
+    (
+        "available_tool_names",
+        "remaining_tool_calls",
+        "error_match",
+    ),
+    [
+        (
+            ("search_knowledge",),
+            0,
+            "must be empty when no tool calls remain",
+        ),
+        (
+            (),
+            1,
+            "must not be empty while tool calls remain",
+        ),
+    ],
+)
+def test_rejects_inconsistent_tool_visibility(
+    available_tool_names: tuple[str, ...],
+    remaining_tool_calls: int,
+    error_match: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=error_match,
+    ):
+        _render(
+            available_tool_names=available_tool_names,
+            remaining_tool_calls=remaining_tool_calls,
+        )
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [
