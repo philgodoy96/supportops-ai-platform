@@ -19,6 +19,7 @@ from openai import (
     RateLimitError,
     UnprocessableEntityError,
 )
+from openai.types.responses.function_tool_param import FunctionToolParam
 from pydantic import BaseModel, ValidationError
 
 from supportops.ai.gateway.contracts import (
@@ -37,6 +38,10 @@ from supportops.ai.gateway.errors import (
     LLMRefusalError,
     LLMTimeoutError,
     LLMUnexpectedProviderError,
+)
+from supportops.ai.gateway.tool_decisions import (
+    LLMProviderFunctionCallResponse,
+    LLMProviderToolDecisionRequest,
 )
 
 OPENAI_LLM_PROVIDER_NAME = "openai"
@@ -71,15 +76,33 @@ class _OpenAIResponseContent(Protocol):
     type: str
 
 
+class _OpenAIResponseOutputItem(Protocol):
+    type: str
+
+
 class _OpenAIResponseMessage(Protocol):
     type: str
     content: Sequence[_OpenAIResponseContent]
 
 
+class _OpenAIFunctionCallOutput(Protocol):
+    type: str
+    call_id: str
+    name: str
+    arguments: str
+
+
 class _ParsedOpenAIResponse(Protocol):
     _request_id: str | None
-    output: Sequence[_OpenAIResponseMessage]
+    output: Sequence[_OpenAIResponseOutputItem]
     output_parsed: object | None
+    status: str | None
+    usage: _OpenAIUsage | None
+
+
+class _ToolDecisionOpenAIResponse(Protocol):
+    _request_id: str | None
+    output: Sequence[_OpenAIResponseOutputItem]
     status: str | None
     usage: _OpenAIUsage | None
 
@@ -262,6 +285,167 @@ class OpenAILLMProvider:
             finish_reason=parsed_response.status,
         )
 
+    async def decide(
+        self,
+        request: LLMProviderToolDecisionRequest,
+    ) -> LLMProviderFunctionCallResponse:
+        """Select exactly one function through the Responses API."""
+
+        if self._closed:
+            raise RuntimeError("OpenAI LLM provider is closed.")
+
+        if request.model != self._model:
+            raise LLMInvalidRequestError()
+
+        tools: list[FunctionToolParam] = [
+            {
+                "type": "function",
+                "name": function.name,
+                "description": function.description,
+                "parameters": dict(function.input_schema),
+                "strict": True,
+            }
+            for function in request.functions
+        ]
+
+        try:
+            response = await self._client.responses.create(
+                model=request.model,
+                instructions=request.instructions,
+                input=request.input,
+                tools=tools,
+                tool_choice=request.tool_choice,
+                parallel_tool_calls=request.parallel_tool_calls,
+                metadata=dict(request.metadata),
+                store=False,
+                timeout=request.timeout_seconds,
+            )
+        except APITimeoutError as error:
+            raise LLMTimeoutError() from error
+        except AuthenticationError as error:
+            raise LLMAuthenticationError(
+                provider_request_id=error.request_id,
+            ) from error
+        except RateLimitError as error:
+            if _is_quota_error(error):
+                raise LLMQuotaError(
+                    provider_request_id=error.request_id,
+                ) from error
+
+            raise LLMRateLimitError(
+                provider_request_id=error.request_id,
+            ) from error
+        except (
+            BadRequestError,
+            NotFoundError,
+            PermissionDeniedError,
+            UnprocessableEntityError,
+        ) as error:
+            raise LLMInvalidRequestError(
+                provider_request_id=error.request_id,
+            ) from error
+        except ConflictError as error:
+            raise LLMProviderUnavailableError(
+                provider_request_id=error.request_id,
+            ) from error
+        except InternalServerError as error:
+            raise LLMProviderUnavailableError(
+                provider_request_id=error.request_id,
+            ) from error
+        except APIConnectionError as error:
+            raise LLMProviderUnavailableError() from error
+        except APIResponseValidationError as error:
+            raise LLMUnexpectedProviderError() from error
+        except APIStatusError as error:
+            raise _normalize_unclassified_status_error(error) from error
+        except OpenAIError as error:
+            raise LLMUnexpectedProviderError() from error
+
+        tool_response = cast(
+            _ToolDecisionOpenAIResponse,
+            response,
+        )
+
+        provider_request_id = tool_response._request_id
+
+        if _contains_refusal(tool_response):
+            raise LLMRefusalError(
+                provider_request_id=provider_request_id,
+            )
+
+        if tool_response.status == "incomplete":
+            raise LLMIncompleteResponseError(
+                provider_request_id=provider_request_id,
+            )
+
+        if tool_response.status != "completed":
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            )
+
+        function_calls = [
+            cast(_OpenAIFunctionCallOutput, item)
+            for item in tool_response.output
+            if item.type == "function_call"
+        ]
+
+        if not function_calls:
+            raise LLMIncompleteResponseError(
+                provider_request_id=provider_request_id,
+            )
+
+        if len(function_calls) > 1:
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            )
+
+        function_call = function_calls[0]
+
+        try:
+            call_id = function_call.call_id
+            name = function_call.name
+            arguments = function_call.arguments
+        except AttributeError as error:
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            ) from error
+
+        if (
+            not isinstance(call_id, str)
+            or not isinstance(name, str)
+            or not isinstance(arguments, str)
+        ):
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            )
+
+        if (
+            not call_id
+            or call_id != call_id.strip()
+            or not name
+            or name != name.strip()
+            or not arguments
+        ):
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            )
+
+        try:
+            return LLMProviderFunctionCallResponse(
+                provider_tool_call_id=call_id,
+                function_name=name,
+                arguments_json=arguments,
+                provider=self.provider_name,
+                model=request.model,
+                provider_request_id=provider_request_id,
+                usage=_map_usage(tool_response.usage),
+                finish_reason=tool_response.status,
+            )
+        except (TypeError, ValueError) as error:
+            raise LLMUnexpectedProviderError(
+                provider_request_id=provider_request_id,
+            ) from error
+
     async def close(self) -> None:
         """Close the process-scoped OpenAI SDK client idempotently."""
 
@@ -273,13 +457,15 @@ class OpenAILLMProvider:
 
 
 def _contains_refusal(
-    response: _ParsedOpenAIResponse,
+    response: _ParsedOpenAIResponse | _ToolDecisionOpenAIResponse,
 ) -> bool:
     for output in response.output:
         if output.type != "message":
             continue
 
-        for content in output.content:
+        message = cast(_OpenAIResponseMessage, output)
+
+        for content in message.content:
             if content.type == "refusal":
                 return True
 
