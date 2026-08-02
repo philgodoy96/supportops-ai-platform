@@ -13,6 +13,8 @@ class LLMOperation(StrEnum):
     """Supported application-owned LLM operations."""
 
     TICKET_CLASSIFICATION = "ticket_classification"
+    SUPPORT_ACTION_DECISION = "support_action_decision"
+    SUPPORT_RECOMMENDATION_DRAFT = "support_recommendation_draft"
 
 
 @dataclass(frozen=True, slots=True)

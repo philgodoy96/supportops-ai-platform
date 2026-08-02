@@ -16,6 +16,7 @@ from supportops.ai.gateway.errors import (
     LLMRateLimitError,
     LLMRefusalError,
     LLMTimeoutError,
+    LLMToolDecisionValidationError,
     LLMUnexpectedProviderError,
 )
 
@@ -29,6 +30,7 @@ LLM_ERROR_TYPES: tuple[type[LLMError], ...] = (
     LLMRefusalError,
     LLMIncompleteResponseError,
     LLMOutputValidationError,
+    LLMToolDecisionValidationError,
     LLMUnexpectedProviderError,
 )
 
@@ -104,6 +106,13 @@ LLM_ERROR_TYPES: tuple[type[LLMError], ...] = (
             False,
             True,
             True,
+        ),
+        (
+            LLMToolDecisionValidationError,
+            LLMErrorCode.TOOL_DECISION_VALIDATION_FAILED,
+            False,
+            True,
+            False,
         ),
         (
             LLMUnexpectedProviderError,
@@ -187,6 +196,16 @@ def test_output_validation_failure_is_repairable_but_terminal_after_exhaustion()
     assert error.repairable is True
     assert error.terminal is True
     assert error.retryable is False
+
+
+def test_tool_decision_validation_preserves_provider_request_id_outside_str() -> None:
+    error = LLMToolDecisionValidationError(
+        provider_request_id="provider-request-1",
+    )
+
+    assert error.provider_request_id == "provider-request-1"
+    assert str(error) == error.safe_summary
+    assert "provider-request-1" not in str(error)
 
 
 def test_incomplete_response_can_be_repaired_or_retried_operationally() -> None:
