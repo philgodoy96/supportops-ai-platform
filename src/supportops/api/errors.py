@@ -7,7 +7,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from supportops.ai.embeddings.errors import EmbeddingError
 from supportops.core.request_context import get_request_context
+from supportops.knowledge_index.vector_store.contracts import (
+    KnowledgeVectorStoreError,
+)
 from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
 from supportops.modules.knowledge_documents.api.pagination import (
     InvalidKnowledgePaginationCursorError,
@@ -119,6 +123,14 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         InvalidKnowledgePaginationCursorError,
         _invalid_knowledge_pagination_cursor_handler,
+    )
+    app.add_exception_handler(
+        EmbeddingError,
+        _embedding_error_handler,
+    )
+    app.add_exception_handler(
+        KnowledgeVectorStoreError,
+        _knowledge_vector_store_error_handler,
     )
 
 
@@ -329,6 +341,34 @@ async def _invalid_knowledge_pagination_cursor_handler(
         status_code=400,
         code="invalid_pagination_cursor",
         message="Pagination cursor is invalid.",
+    )
+
+
+async def _embedding_error_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=503,
+        code="knowledge_retrieval_unavailable",
+        message="Knowledge retrieval is temporarily unavailable.",
+    )
+
+
+async def _knowledge_vector_store_error_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=503,
+        code="knowledge_retrieval_unavailable",
+        message="Knowledge retrieval is temporarily unavailable.",
     )
 
 

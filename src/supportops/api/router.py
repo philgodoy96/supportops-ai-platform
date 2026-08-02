@@ -3,6 +3,9 @@
 from fastapi import APIRouter
 
 from supportops.api.health.router import router as health_router
+from supportops.knowledge_retrieval.api.router import (
+    router as knowledge_retrieval_router,
+)
 from supportops.modules.agent_runs.api.router import router as agent_runs_router
 from supportops.modules.knowledge_documents.api.router import (
     router as knowledge_documents_router,
@@ -17,6 +20,7 @@ api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(workspaces_router, prefix="/api/v1")
 api_router.include_router(knowledge_documents_router, prefix="/api/v1")
+api_router.include_router(knowledge_retrieval_router, prefix="/api/v1")
 api_router.include_router(tickets_router, prefix="/api/v1")
 api_router.include_router(agent_runs_router, prefix="/api/v1")
 api_router.include_router(
