@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from supportops.core.settings import (
     ApplicationEnvironment,
+    EmbeddingProviderName,
     LLMProviderName,
     LogLevel,
     Settings,
@@ -39,6 +40,11 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS",
     "SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES",
     "SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS",
+    "SUPPORTOPS_EMBEDDING_PROVIDER",
+    "SUPPORTOPS_EMBEDDING_MODEL",
+    "SUPPORTOPS_EMBEDDING_DIMENSIONS",
+    "SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS",
+    "SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES",
     "SUPPORTOPS_QDRANT_URL",
     "SUPPORTOPS_QDRANT_API_KEY",
     "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
@@ -98,6 +104,11 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.llm_request_timeout_seconds == 12.0
     assert settings.llm_transport_max_retries == 1
     assert settings.llm_max_repair_attempts == 1
+    assert settings.embedding_provider is EmbeddingProviderName.MOCK
+    assert settings.embedding_model == "mock-hashing-embedding-v1"
+    assert settings.embedding_dimensions == 64
+    assert settings.embedding_request_timeout_seconds == 12.0
+    assert settings.embedding_transport_max_retries == 1
     assert settings.qdrant_api_key is None
     assert settings.dependency_health_timeout_seconds == 2.0
 
@@ -177,6 +188,37 @@ def test_settings_load_llm_configuration_from_environment(
     assert settings.worker_execution_timeout_seconds == 50.0
 
 
+def test_settings_load_embedding_configuration_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPPORTOPS_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("SUPPORTOPS_EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("SUPPORTOPS_EMBEDDING_DIMENSIONS", "1536")
+    monkeypatch.setenv("SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES", "2")
+    monkeypatch.setenv("SUPPORTOPS_OPENAI_API_KEY", "test-openai-key")
+
+    settings_type = cast(Any, Settings)
+    settings = cast(
+        Settings,
+        settings_type(
+            _env_file=None,
+            postgresql_url=(
+                "postgresql+asyncpg://supportops:supportops-local@localhost:5432/supportops"
+            ),
+            qdrant_url="http://localhost:6333",
+        ),
+    )
+
+    assert settings.embedding_provider is EmbeddingProviderName.OPENAI
+    assert settings.embedding_model == "text-embedding-3-small"
+    assert settings.embedding_dimensions == 1536
+    assert settings.embedding_request_timeout_seconds == 20.0
+    assert settings.embedding_transport_max_retries == 2
+    assert settings.openai_api_key is not None
+    assert settings.openai_api_key.get_secret_value() == "test-openai-key"
+
+
 def test_settings_mock_provider_does_not_require_openai_api_key() -> None:
     settings = create_required_settings(llm_provider=LLMProviderName.MOCK)
 
@@ -184,8 +226,22 @@ def test_settings_mock_provider_does_not_require_openai_api_key() -> None:
     assert settings.openai_api_key is None
 
 
+def test_settings_mock_embedding_provider_does_not_require_openai_api_key() -> None:
+    settings = create_required_settings(
+        llm_provider=LLMProviderName.MOCK,
+        embedding_provider=EmbeddingProviderName.MOCK,
+    )
+
+    assert settings.llm_provider is LLMProviderName.MOCK
+    assert settings.embedding_provider is EmbeddingProviderName.MOCK
+    assert settings.openai_api_key is None
+
+
 def test_settings_reject_openai_provider_without_api_key() -> None:
-    with pytest.raises(ValidationError, match="openai_api_key is required"):
+    with pytest.raises(
+        ValidationError,
+        match=r"openai_api_key is required when an OpenAI provider is configured\.",
+    ):
         create_required_settings(
             llm_provider=LLMProviderName.OPENAI,
             openai_api_key=None,
@@ -195,13 +251,37 @@ def test_settings_reject_openai_provider_without_api_key() -> None:
 
 
 def test_settings_blank_openai_api_key_becomes_none_and_is_rejected_for_openai() -> None:
-    with pytest.raises(ValidationError, match="openai_api_key is required"):
+    with pytest.raises(
+        ValidationError,
+        match=r"openai_api_key is required when an OpenAI provider is configured\.",
+    ):
         create_required_settings(
             llm_provider=LLMProviderName.OPENAI,
             openai_api_key="   ",
             worker_execution_timeout_seconds=50,
             worker_lease_seconds=55,
         )
+
+
+def test_settings_reject_openai_embedding_provider_without_api_key() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"openai_api_key is required when an OpenAI provider is configured\.",
+    ):
+        create_required_settings(
+            embedding_provider=EmbeddingProviderName.OPENAI,
+            openai_api_key=None,
+        )
+
+
+def test_settings_reject_unsupported_embedding_provider() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(embedding_provider="unsupported-provider")
+
+
+def test_settings_reject_blank_embedding_model() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(embedding_model="   ")
 
 
 def test_settings_strip_surrounding_whitespace_from_openai_api_key() -> None:
@@ -338,6 +418,12 @@ def test_settings_reject_blank_required_strings(
         ("llm_transport_max_retries", 3),
         ("llm_max_repair_attempts", -1),
         ("llm_max_repair_attempts", 2),
+        ("embedding_dimensions", 0),
+        ("embedding_dimensions", 4097),
+        ("embedding_request_timeout_seconds", 0),
+        ("embedding_request_timeout_seconds", 301),
+        ("embedding_transport_max_retries", -1),
+        ("embedding_transport_max_retries", 3),
         ("dependency_health_timeout_seconds", 0),
         ("dependency_health_timeout_seconds", 31),
     ],

@@ -35,6 +35,13 @@ class LLMProviderName(StrEnum):
     OPENAI = "openai"
 
 
+class EmbeddingProviderName(StrEnum):
+    """Supported embedding provider adapters."""
+
+    MOCK = "mock"
+    OPENAI = "openai"
+
+
 TicketProcessingWorkflowVersion = Literal[
     "deterministic-baseline-v1",
     "ticket-classification-v1",
@@ -92,6 +99,23 @@ class Settings(BaseSettings):
     llm_request_timeout_seconds: float = Field(default=12.0, gt=0, le=300)
     llm_transport_max_retries: int = Field(default=1, ge=0, le=2)
     llm_max_repair_attempts: int = Field(default=1, ge=0, le=1)
+    embedding_provider: EmbeddingProviderName = EmbeddingProviderName.MOCK
+    embedding_model: str = Field(
+        default="mock-hashing-embedding-v1",
+        min_length=1,
+        max_length=128,
+    )
+    embedding_dimensions: int = Field(default=64, ge=1, le=4096)
+    embedding_request_timeout_seconds: float = Field(
+        default=12.0,
+        gt=0,
+        le=300,
+    )
+    embedding_transport_max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=2,
+    )
 
     qdrant_url: str = Field(min_length=1)
     qdrant_api_key: str | None = None
@@ -103,6 +127,7 @@ class Settings(BaseSettings):
         "application_version",
         "api_host",
         "openai_model",
+        "embedding_model",
         "qdrant_url",
     )
     @classmethod
@@ -189,8 +214,12 @@ class Settings(BaseSettings):
                 "worker_retry_max_seconds must not be smaller than worker_retry_base_seconds."
             )
 
-        if self.llm_provider is LLMProviderName.OPENAI and self.openai_api_key is None:
-            raise ValueError("openai_api_key is required when llm_provider is openai.")
+        openai_provider_configured = (
+            self.llm_provider is LLMProviderName.OPENAI
+            or self.embedding_provider is EmbeddingProviderName.OPENAI
+        )
+        if openai_provider_configured and self.openai_api_key is None:
+            raise ValueError("openai_api_key is required when an OpenAI provider is configured.")
 
         maximum_logical_invocation_count = 1 + self.llm_max_repair_attempts
         logical_llm_budget_seconds = (
