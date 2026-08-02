@@ -61,6 +61,10 @@ def _request() -> LLMRequest:
     )
 
 
+def test_support_recommendation_draft_operation_has_stable_value() -> None:
+    assert LLMOperation.SUPPORT_RECOMMENDATION_DRAFT.value == "support_recommendation_draft"
+
+
 def test_request_copies_and_freezes_metadata() -> None:
     metadata = {"correlation_id": "corr-1"}
     request = replace(_request(), metadata=metadata)
