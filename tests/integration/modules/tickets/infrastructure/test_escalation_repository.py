@@ -71,6 +71,8 @@ from supportops.modules.tickets.domain.escalation import (
 )
 from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationConsistencyError,
+    TicketEscalationListQuery,
+    TicketEscalationPageCursor,
     TicketEscalationPersistenceResult,
 )
 from supportops.modules.tickets.domain.models import Ticket, TicketStatus
@@ -97,13 +99,31 @@ _AGENT_RUN_ID = UUID("30000000-0000-4000-8000-000000000003")
 _LEASE_TOKEN = UUID("40000000-0000-4000-8000-000000000004")
 _EXECUTION_REQUEST_ID = UUID("50000000-0000-4000-8000-000000000005")
 _TOOL_CALL_ID = UUID("60000000-0000-4000-8000-000000000006")
+_SECOND_TOOL_CALL_ID = UUID("60000000-0000-4000-8000-000000000016")
+_THIRD_TOOL_CALL_ID = UUID("60000000-0000-4000-8000-000000000026")
+_FOURTH_TOOL_CALL_ID = UUID("60000000-0000-4000-8000-000000000036")
 _INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000008")
+_SECOND_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000018")
+_THIRD_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000028")
+_FOURTH_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000038")
 _APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000009")
+_SECOND_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000019")
+_THIRD_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000029")
+_FOURTH_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000039")
 _GRANT_ID = UUID("a0000000-0000-4000-8000-00000000000a")
+_SECOND_GRANT_ID = UUID("a0000000-0000-4000-8000-00000000001a")
+_THIRD_GRANT_ID = UUID("a0000000-0000-4000-8000-00000000002a")
+_FOURTH_GRANT_ID = UUID("a0000000-0000-4000-8000-00000000003a")
 _ESCALATION_ID = UUID("d0000000-0000-4000-8000-00000000000d")
 _SECOND_ESCALATION_ID = UUID("d0000000-0000-4000-8000-00000000000e")
+_THIRD_ESCALATION_ID = UUID("d0000000-0000-4000-8000-00000000000f")
+_FOURTH_ESCALATION_ID = UUID("d0000000-0000-4000-8000-00000000001d")
 _DECISION_REQUEST_ID = UUID("b0000000-0000-4000-8000-00000000000b")
 _DECISION_CORRELATION_ID = UUID("c0000000-0000-4000-8000-00000000000c")
+_SECOND_TICKET_ID = UUID("20000000-0000-4000-8000-000000000012")
+_SECOND_AGENT_RUN_ID = UUID("30000000-0000-4000-8000-000000000013")
+_SECOND_LEASE_TOKEN = UUID("40000000-0000-4000-8000-000000000014")
+_SECOND_EXECUTION_REQUEST_ID = UUID("50000000-0000-4000-8000-000000000015")
 
 _CREATED_AT = datetime(2026, 8, 3, 18, 30, tzinfo=UTC)
 _CLAIMED_AT = _CREATED_AT + timedelta(minutes=1)
@@ -181,8 +201,8 @@ def _pending_tool_call(
 ) -> AgentToolCall:
     return AgentToolCall.propose_for_approval(
         tool_call_id=tool_call_id,
-        workspace_id=_WORKSPACE_ID,
-        ticket_id=_TICKET_ID,
+        workspace_id=claim.agent_run.workspace_id,
+        ticket_id=claim.agent_run.ticket_id,
         agent_run_id=claim.agent_run.id,
         proposed_by_agent_run_attempt_id=claim.attempt.id,
         sequence=sequence,
@@ -207,8 +227,8 @@ def _invocation(
 ) -> LLMInvocation:
     return LLMInvocation.create(
         invocation_id=invocation_id,
-        workspace_id=_WORKSPACE_ID,
-        ticket_id=_TICKET_ID,
+        workspace_id=claim.agent_run.workspace_id,
+        ticket_id=claim.agent_run.ticket_id,
         agent_run_id=claim.agent_run.id,
         agent_run_attempt_id=claim.attempt.id,
         invocation_sequence=sequence,
@@ -241,14 +261,18 @@ async def _persist_tool_call(
     session: AsyncSession,
     claim: AgentRunClaim,
     tool_call: AgentToolCall,
+    *,
+    lease_token: UUID | None = None,
 ) -> None:
+    resolved_lease_token = lease_token or claim.agent_run.lease_token
+    assert resolved_lease_token is not None
     result = await SqlAlchemyAgentToolCallExecutionRepository(session).persist_fenced(
         PersistAgentToolCallCommand(
-            workspace_id=_WORKSPACE_ID,
-            ticket_id=_TICKET_ID,
+            workspace_id=claim.agent_run.workspace_id,
+            ticket_id=claim.agent_run.ticket_id,
             agent_run_id=claim.agent_run.id,
             agent_run_attempt_id=claim.attempt.id,
-            lease_token=_LEASE_TOKEN,
+            lease_token=resolved_lease_token,
             persisted_at=_APPROVAL_AT,
             tool_call=tool_call,
         )
@@ -804,3 +828,518 @@ async def test_fk_rejects_missing_tool_call(
                         "created_at": escalation.created_at,
                     },
                 )
+
+
+async def _seed_granted_chain(
+    session: AsyncSession,
+    claim: AgentRunClaim,
+    *,
+    tool_call_id: UUID,
+    sequence: int,
+    provider_tool_call_id: str,
+    input_fingerprint: str,
+    invocation_id: UUID,
+    approval_request_id: UUID,
+    grant_id: UUID,
+    decision_request_id: UUID,
+    decision_correlation_id: UUID,
+    reason: str,
+) -> SensitiveExecutionGrant:
+    tool_call = _pending_tool_call(
+        claim,
+        tool_call_id=tool_call_id,
+        sequence=sequence,
+        provider_tool_call_id=provider_tool_call_id,
+        input_fingerprint=input_fingerprint,
+        safe_input={
+            "target_queue": "engineering_support",
+            "reason": reason,
+        },
+    )
+    invocation = _invocation(
+        claim,
+        invocation_id=invocation_id,
+        sequence=sequence,
+    )
+    pending = ApprovalRequest.create_pending(
+        tool_call=tool_call,
+        requested_by_llm_invocation_id=invocation_id,
+        request_reason="Requires human review before escalation.",
+        expires_at=_EXPIRES_AT,
+        approval_request_id=approval_request_id,
+        now=_APPROVAL_AT,
+    )
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=decision_request_id,
+        correlation_id=decision_correlation_id,
+        decided_at=_DECIDED_AT,
+    )
+    grant = SensitiveExecutionGrant.create(
+        approval_request=approved,
+        tool_call=tool_call,
+        executed_by_agent_run_attempt_id=claim.attempt.id,
+        created_at=_GRANT_CREATED_AT,
+        grant_id=grant_id,
+    )
+
+    async with SqlAlchemyTransactionManager(session).transaction():
+        await _persist_invocation(session, invocation)
+        await _persist_tool_call(session, claim, tool_call)
+        result = await SqlAlchemyApprovalRequestRepository(session).persist_pending(
+            pending,
+        )
+        assert result is ApprovalRequestPersistenceResult.APPLIED
+        await SqlAlchemyApprovalRequestRepository(session).save(approved)
+        grant_result = await SqlAlchemySensitiveExecutionGrantRepository(session).persist(
+            grant,
+        )
+        assert grant_result is SensitiveExecutionGrantPersistenceResult.APPLIED
+
+    return grant
+
+
+async def _seed_listable_escalations(
+    session: AsyncSession,
+) -> tuple[TicketEscalation, ...]:
+    claim = await _create_running_claim(session)
+    chain_specs = (
+        (
+            _TOOL_CALL_ID,
+            1,
+            "provider-sensitive-1",
+            "b" * 64,
+            _INVOCATION_ID,
+            _APPROVAL_REQUEST_ID,
+            _GRANT_ID,
+            UUID("b0000000-0000-4000-8000-00000000001b"),
+            UUID("c0000000-0000-4000-8000-00000000001c"),
+            _ESCALATION_ID,
+            _ESCALATION_CREATED_AT,
+            "First escalation reason.",
+        ),
+        (
+            _SECOND_TOOL_CALL_ID,
+            2,
+            "provider-sensitive-2",
+            "e" * 64,
+            _SECOND_INVOCATION_ID,
+            _SECOND_APPROVAL_REQUEST_ID,
+            _SECOND_GRANT_ID,
+            UUID("b0000000-0000-4000-8000-00000000002b"),
+            UUID("c0000000-0000-4000-8000-00000000002c"),
+            _SECOND_ESCALATION_ID,
+            _ESCALATION_CREATED_AT,
+            "Second escalation reason.",
+        ),
+        (
+            _THIRD_TOOL_CALL_ID,
+            3,
+            "provider-sensitive-3",
+            "f" * 64,
+            _THIRD_INVOCATION_ID,
+            _THIRD_APPROVAL_REQUEST_ID,
+            _THIRD_GRANT_ID,
+            UUID("b0000000-0000-4000-8000-00000000003b"),
+            UUID("c0000000-0000-4000-8000-00000000003c"),
+            _THIRD_ESCALATION_ID,
+            _ESCALATION_CREATED_AT + timedelta(seconds=1),
+            "Third escalation reason.",
+        ),
+        (
+            _FOURTH_TOOL_CALL_ID,
+            4,
+            "provider-sensitive-4",
+            "c" * 64,
+            _FOURTH_INVOCATION_ID,
+            _FOURTH_APPROVAL_REQUEST_ID,
+            _FOURTH_GRANT_ID,
+            UUID("b0000000-0000-4000-8000-00000000004b"),
+            UUID("c0000000-0000-4000-8000-00000000004c"),
+            _FOURTH_ESCALATION_ID,
+            _ESCALATION_CREATED_AT + timedelta(seconds=2),
+            "Fourth escalation reason.",
+        ),
+    )
+
+    escalations: list[TicketEscalation] = []
+    for (
+        tool_call_id,
+        sequence,
+        provider_id,
+        fingerprint,
+        invocation_id,
+        approval_id,
+        grant_id,
+        decision_request_id,
+        decision_correlation_id,
+        escalation_id,
+        created_at,
+        reason,
+    ) in chain_specs:
+        grant = await _seed_granted_chain(
+            session,
+            claim,
+            tool_call_id=tool_call_id,
+            sequence=sequence,
+            provider_tool_call_id=provider_id,
+            input_fingerprint=fingerprint,
+            invocation_id=invocation_id,
+            approval_request_id=approval_id,
+            grant_id=grant_id,
+            decision_request_id=decision_request_id,
+            decision_correlation_id=decision_correlation_id,
+            reason=reason,
+        )
+        escalation = _escalation(
+            grant,
+            escalation_id=escalation_id,
+            created_at=created_at,
+        )
+        result = await _persist_escalation(session, escalation)
+        assert result is TicketEscalationPersistenceResult.APPLIED
+        escalations.append(escalation)
+
+    return tuple(escalations)
+
+
+async def test_list_page_returns_workspace_page_in_stable_order(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        escalations = await _seed_listable_escalations(session)
+        repository = SqlAlchemyTicketEscalationRepository(session)
+
+        page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+
+    expected_ids = [
+        _FOURTH_ESCALATION_ID,
+        _THIRD_ESCALATION_ID,
+        max(_ESCALATION_ID, _SECOND_ESCALATION_ID),
+        min(_ESCALATION_ID, _SECOND_ESCALATION_ID),
+    ]
+    assert [item.id for item in page.items] == expected_ids
+    assert page.next_cursor is None
+    assert {item.id for item in page.items} == {item.id for item in escalations}
+
+
+async def test_list_page_filters_by_ticket_and_excludes_other_tickets(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_escalations(session)
+
+        second_ticket = Ticket.create(
+            ticket_id=_SECOND_TICKET_ID,
+            workspace_id=_WORKSPACE_ID,
+            subject="Second ticket",
+            description="Another ticket in the same workspace.",
+            external_reference=None,
+            ingestion_request_id=UUID("81000000-0000-4000-8000-000000000018"),
+            correlation_id=UUID("82000000-0000-4000-8000-000000000019"),
+            now=_CREATED_AT,
+        )
+        second_agent_run = AgentRun.create_initial(
+            agent_run_id=_SECOND_AGENT_RUN_ID,
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_SECOND_TICKET_ID,
+            ingestion_request_id=second_ticket.ingestion_request_id,
+            correlation_id=second_ticket.correlation_id,
+            workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+            max_retryable_failures=3,
+            now=_CREATED_AT,
+        )
+
+        transaction_manager = SqlAlchemyTransactionManager(session)
+        async with transaction_manager.transaction():
+            await SqlAlchemyTicketRepository(session).add(second_ticket)
+            await SqlAlchemyAgentRunRepository(session).add(second_agent_run)
+
+        async with transaction_manager.transaction():
+            claim = await SqlAlchemyAgentRunRepository(session).claim_next_available(
+                ClaimAgentRunCommand(
+                    worker_id="escalation-worker-2",
+                    lease_token=_SECOND_LEASE_TOKEN,
+                    execution_request_id=_SECOND_EXECUTION_REQUEST_ID,
+                    claimed_at=_CLAIMED_AT,
+                    lease_expires_at=_LEASE_EXPIRES_AT,
+                )
+            )
+        assert claim is not None
+
+        other_tool_call_id = UUID("60000000-0000-4000-8000-000000000046")
+        other_invocation_id = UUID("80000000-0000-4000-8000-000000000048")
+        other_approval_id = UUID("90000000-0000-4000-8000-000000000049")
+        other_grant_id = UUID("a0000000-0000-4000-8000-00000000004a")
+        other_escalation_id = UUID("d0000000-0000-4000-8000-00000000002d")
+
+        grant = await _seed_granted_chain(
+            session,
+            claim,
+            tool_call_id=other_tool_call_id,
+            sequence=1,
+            provider_tool_call_id="provider-second-ticket",
+            input_fingerprint="1" * 64,
+            invocation_id=other_invocation_id,
+            approval_request_id=other_approval_id,
+            grant_id=other_grant_id,
+            decision_request_id=UUID("b0000000-0000-4000-8000-00000000005b"),
+            decision_correlation_id=UUID("c0000000-0000-4000-8000-00000000005c"),
+            reason="Escalation on the second ticket.",
+        )
+        other_escalation = _escalation(
+            grant,
+            escalation_id=other_escalation_id,
+            created_at=_ESCALATION_CREATED_AT + timedelta(seconds=3),
+        )
+        await _persist_escalation(session, other_escalation)
+
+        repository = SqlAlchemyTicketEscalationRepository(session)
+        filtered = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                page_size=20,
+            ),
+        )
+        other_ticket_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_SECOND_TICKET_ID,
+                page_size=20,
+            ),
+        )
+        workspace_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+
+    assert other_escalation_id not in {item.id for item in filtered.items}
+    assert len(filtered.items) == 4
+    assert [item.id for item in other_ticket_page.items] == [other_escalation_id]
+    assert len(workspace_page.items) == 5
+
+
+async def test_list_page_emits_cursor_and_second_page_has_no_duplicates(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_escalations(session)
+        repository = SqlAlchemyTicketEscalationRepository(session)
+
+        first_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=2,
+            ),
+        )
+        assert first_page.next_cursor is not None
+
+        second_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=first_page.next_cursor,
+                page_size=2,
+            ),
+        )
+
+    first_ids = [item.id for item in first_page.items]
+    second_ids = [item.id for item in second_page.items]
+    assert len(first_ids) == 2
+    assert len(second_ids) == 2
+    assert not set(first_ids) & set(second_ids)
+    assert second_page.next_cursor is None
+    assert first_page.next_cursor == TicketEscalationPageCursor(
+        created_at=first_page.items[-1].created_at,
+        ticket_escalation_id=first_page.items[-1].id,
+    )
+
+
+async def test_list_page_uses_id_tie_breaker_for_identical_created_at(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_escalations(session)
+        repository = SqlAlchemyTicketEscalationRepository(session)
+
+        page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=1,
+            ),
+        )
+        assert page.next_cursor is not None
+        second = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=page.next_cursor,
+                page_size=1,
+            ),
+        )
+        third = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=second.next_cursor,
+                page_size=1,
+            ),
+        )
+        fourth = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=third.next_cursor,
+                page_size=1,
+            ),
+        )
+
+    ordered_ids = [
+        page.items[0].id,
+        second.items[0].id,
+        third.items[0].id,
+        fourth.items[0].id,
+    ]
+    assert ordered_ids == [
+        _FOURTH_ESCALATION_ID,
+        _THIRD_ESCALATION_ID,
+        max(_ESCALATION_ID, _SECOND_ESCALATION_ID),
+        min(_ESCALATION_ID, _SECOND_ESCALATION_ID),
+    ]
+    assert third.items[0].created_at == fourth.items[0].created_at == (_ESCALATION_CREATED_AT)
+    assert third.items[0].id > fourth.items[0].id
+
+
+async def test_list_page_excludes_cross_workspace_records(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    other_ticket_id = UUID("20000000-0000-4000-8000-000000000092")
+    other_agent_run_id = UUID("30000000-0000-4000-8000-000000000093")
+    other_lease_token = UUID("40000000-0000-4000-8000-000000000094")
+    other_execution_request_id = UUID("50000000-0000-4000-8000-000000000095")
+    other_tool_call_id = UUID("60000000-0000-4000-8000-000000000096")
+    other_invocation_id = UUID("80000000-0000-4000-8000-000000000098")
+    other_approval_id = UUID("90000000-0000-4000-8000-000000000099")
+    other_grant_id = UUID("a0000000-0000-4000-8000-00000000009a")
+    other_escalation_id = UUID("d0000000-0000-4000-8000-00000000009d")
+
+    async with postgresql_session_factory() as session:
+        await _seed_listable_escalations(session)
+
+        other_workspace = Workspace(
+            id=_OTHER_WORKSPACE_ID,
+            name="Other Escalation Workspace",
+            slug="other-escalation-workspace",
+            created_at=_CREATED_AT,
+            updated_at=_CREATED_AT,
+        )
+        other_ticket = Ticket.create(
+            ticket_id=other_ticket_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            subject="Other workspace ticket",
+            description="Cross-workspace fixture.",
+            external_reference=None,
+            ingestion_request_id=UUID("81000000-0000-4000-8000-000000000098"),
+            correlation_id=UUID("82000000-0000-4000-8000-000000000099"),
+            now=_CREATED_AT,
+        )
+        other_agent_run = AgentRun.create_initial(
+            agent_run_id=other_agent_run_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            ticket_id=other_ticket_id,
+            ingestion_request_id=other_ticket.ingestion_request_id,
+            correlation_id=other_ticket.correlation_id,
+            workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+            max_retryable_failures=3,
+            now=_CREATED_AT,
+        )
+
+        transaction_manager = SqlAlchemyTransactionManager(session)
+        async with transaction_manager.transaction():
+            await SqlAlchemyWorkspaceRepository(session).add(other_workspace)
+            await SqlAlchemyTicketRepository(session).add(other_ticket)
+            await SqlAlchemyAgentRunRepository(session).add(other_agent_run)
+
+        async with transaction_manager.transaction():
+            claim = await SqlAlchemyAgentRunRepository(session).claim_next_available(
+                ClaimAgentRunCommand(
+                    worker_id="escalation-worker-other",
+                    lease_token=other_lease_token,
+                    execution_request_id=other_execution_request_id,
+                    claimed_at=_CLAIMED_AT,
+                    lease_expires_at=_LEASE_EXPIRES_AT,
+                )
+            )
+        assert claim is not None
+
+        grant = await _seed_granted_chain(
+            session,
+            claim,
+            tool_call_id=other_tool_call_id,
+            sequence=1,
+            provider_tool_call_id="provider-other-1",
+            input_fingerprint="2" * 64,
+            invocation_id=other_invocation_id,
+            approval_request_id=other_approval_id,
+            grant_id=other_grant_id,
+            decision_request_id=UUID("b0000000-0000-4000-8000-00000000009b"),
+            decision_correlation_id=UUID("c0000000-0000-4000-8000-00000000009c"),
+            reason="Cross-workspace escalation.",
+        )
+        other_escalation = _escalation(
+            grant,
+            escalation_id=other_escalation_id,
+            created_at=_ESCALATION_CREATED_AT + timedelta(seconds=4),
+        )
+        await _persist_escalation(session, other_escalation)
+
+        repository = SqlAlchemyTicketEscalationRepository(session)
+        home_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+        other_page = await repository.list_page(
+            TicketEscalationListQuery(
+                workspace_id=_OTHER_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+        by_id = await repository.get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            escalation_id=_ESCALATION_ID,
+        )
+        by_approval = await repository.get_by_approval_request_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+        by_tool_call = await repository.get_by_agent_tool_call_id(
+            workspace_id=_WORKSPACE_ID,
+            agent_tool_call_id=_TOOL_CALL_ID,
+        )
+        cross_get = await repository.get_by_id(
+            workspace_id=_OTHER_WORKSPACE_ID,
+            escalation_id=_ESCALATION_ID,
+        )
+
+    assert other_escalation_id not in {item.id for item in home_page.items}
+    assert len(home_page.items) == 4
+    assert [item.id for item in other_page.items] == [other_escalation_id]
+    assert by_id is not None
+    assert by_id.id == _ESCALATION_ID
+    assert by_approval is not None
+    assert by_approval.id == _ESCALATION_ID
+    assert by_tool_call is not None
+    assert by_tool_call.id == _ESCALATION_ID
+    assert cross_get is None

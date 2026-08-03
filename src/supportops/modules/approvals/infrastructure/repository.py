@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import literal, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,9 @@ from supportops.modules.approvals.domain.models import (
 )
 from supportops.modules.approvals.domain.repositories import (
     ApprovalRequestConsistencyError,
+    ApprovalRequestListPage,
+    ApprovalRequestListQuery,
+    ApprovalRequestPageCursor,
     ApprovalRequestPersistenceResult,
     ApprovalRequestRepository,
 )
@@ -85,6 +88,57 @@ class SqlAlchemyApprovalRequestRepository(ApprovalRequestRepository):
             ) from error
 
         return ApprovalRequestPersistenceResult.APPLIED
+
+    async def list_page(
+        self,
+        query: ApprovalRequestListQuery,
+    ) -> ApprovalRequestListPage:
+        """Return one workspace-scoped approval page."""
+
+        statement = select(ApprovalRequestRecord).where(
+            ApprovalRequestRecord.workspace_id == query.workspace_id,
+        )
+
+        if query.status is not None:
+            statement = statement.where(
+                ApprovalRequestRecord.status == query.status.value,
+            )
+
+        if query.cursor is not None:
+            statement = statement.where(
+                tuple_(
+                    ApprovalRequestRecord.created_at,
+                    ApprovalRequestRecord.id,
+                )
+                < tuple_(
+                    literal(query.cursor.created_at),
+                    literal(query.cursor.approval_request_id),
+                ),
+            )
+
+        statement = statement.order_by(
+            ApprovalRequestRecord.created_at.desc(),
+            ApprovalRequestRecord.id.desc(),
+        ).limit(query.page_size + 1)
+        result = await self._session.execute(statement)
+        records = list(result.scalars().all())
+
+        has_next_page = len(records) > query.page_size
+        page_records = records[: query.page_size]
+        items = tuple(record.to_domain() for record in page_records)
+
+        next_cursor: ApprovalRequestPageCursor | None = None
+        if has_next_page and items:
+            last_item = items[-1]
+            next_cursor = ApprovalRequestPageCursor(
+                created_at=last_item.created_at,
+                approval_request_id=last_item.id,
+            )
+
+        return ApprovalRequestListPage(
+            items=items,
+            next_cursor=next_cursor,
+        )
 
     async def get_by_id(
         self,
