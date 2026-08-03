@@ -45,9 +45,14 @@ from supportops.modules.agent_runs.domain.models import (
 from supportops.modules.agent_runs.infrastructure.repository import (
     SqlAlchemyAgentRunRepository,
 )
-from supportops.modules.approvals.domain.models import ApprovalRequest
+from supportops.modules.approvals.domain.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+)
 from supportops.modules.approvals.domain.repositories import (
     ApprovalRequestConsistencyError,
+    ApprovalRequestListQuery,
+    ApprovalRequestPageCursor,
     ApprovalRequestPersistenceResult,
 )
 from supportops.modules.approvals.infrastructure.models import (
@@ -1149,3 +1154,447 @@ async def test_concurrent_conflicting_persist_pending_fails_closed(
         first_approval.request_reason,
         conflicting.request_reason,
     }
+
+
+async def _seed_listable_approvals(
+    session: AsyncSession,
+) -> tuple[ApprovalRequest, ...]:
+    claim = await _create_running_claim(session)
+    tool_specs = (
+        (_TOOL_CALL_ID, 1, "provider-sensitive-1", "b" * 64, "one"),
+        (_SECOND_TOOL_CALL_ID, 2, "provider-sensitive-2", "e" * 64, "two"),
+        (_THIRD_TOOL_CALL_ID, 3, "provider-sensitive-3", "f" * 64, "three"),
+        (_FOURTH_TOOL_CALL_ID, 4, "provider-sensitive-4", "c" * 64, "four"),
+    )
+    invocation_ids = (
+        _INVOCATION_ID,
+        _SECOND_INVOCATION_ID,
+        _THIRD_INVOCATION_ID,
+        _FOURTH_INVOCATION_ID,
+    )
+    approval_ids = (
+        _APPROVAL_REQUEST_ID,
+        _SECOND_APPROVAL_REQUEST_ID,
+        _THIRD_APPROVAL_REQUEST_ID,
+        _FOURTH_APPROVAL_REQUEST_ID,
+    )
+    # Same created_at for the first two rows forces the ID tie-breaker.
+    created_ats = (
+        _APPROVAL_AT,
+        _APPROVAL_AT,
+        _APPROVAL_AT + timedelta(seconds=1),
+        _APPROVAL_AT + timedelta(seconds=2),
+    )
+
+    approvals: list[ApprovalRequest] = []
+    for index, (
+        tool_call_id,
+        sequence,
+        provider_id,
+        fingerprint,
+        reason,
+    ) in enumerate(tool_specs):
+        tool_call = _pending_tool_call(
+            claim,
+            tool_call_id=tool_call_id,
+            sequence=sequence,
+            provider_tool_call_id=provider_id,
+            input_fingerprint=fingerprint,
+            safe_input={"reason_code": reason},
+        )
+        invocation = _invocation(
+            claim,
+            invocation_id=invocation_ids[index],
+            sequence=sequence,
+        )
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await _persist_invocation(session, invocation)
+            await _persist_tool_call(session, claim, tool_call)
+
+        approval = _approval_request(
+            tool_call,
+            invocation_id=invocation_ids[index],
+            approval_request_id=approval_ids[index],
+            now=created_ats[index],
+            request_reason=f"List fixture {reason}.",
+        )
+        await _persist_approval(session, approval)
+        approvals.append(approval)
+
+    return tuple(approvals)
+
+
+async def test_list_page_returns_workspace_page_in_stable_order(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        approvals = await _seed_listable_approvals(session)
+        repository = SqlAlchemyApprovalRequestRepository(session)
+
+        page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+
+    expected_ids = [
+        _FOURTH_APPROVAL_REQUEST_ID,
+        _THIRD_APPROVAL_REQUEST_ID,
+        max(_APPROVAL_REQUEST_ID, _SECOND_APPROVAL_REQUEST_ID),
+        min(_APPROVAL_REQUEST_ID, _SECOND_APPROVAL_REQUEST_ID),
+    ]
+    assert [item.id for item in page.items] == expected_ids
+    assert page.next_cursor is None
+    assert {item.id for item in page.items} == {item.id for item in approvals}
+
+
+async def test_list_page_filters_by_status_and_preserves_terminals(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        approvals = await _seed_listable_approvals(session)
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        decided_at = _APPROVAL_AT + timedelta(minutes=5)
+
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save(
+                approvals[0].approve(
+                    actor_reference="operator:alice",
+                    comment=None,
+                    request_id=UUID("88888888-8888-4888-8888-888888888881"),
+                    correlation_id=UUID("99999999-9999-4999-8999-999999999991"),
+                    decided_at=decided_at,
+                ),
+            )
+            await repository.save(
+                approvals[1].reject(
+                    actor_reference="operator:bob",
+                    comment="Not appropriate.",
+                    request_id=UUID("88888888-8888-4888-8888-888888888882"),
+                    correlation_id=UUID("99999999-9999-4999-8999-999999999992"),
+                    decided_at=decided_at,
+                ),
+            )
+
+        pending_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                status=ApprovalRequestStatus.PENDING,
+                page_size=20,
+            ),
+        )
+        approved_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                status=ApprovalRequestStatus.APPROVED,
+                page_size=20,
+            ),
+        )
+        rejected_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                status=ApprovalRequestStatus.REJECTED,
+                page_size=20,
+            ),
+        )
+        all_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+
+    assert [item.id for item in pending_page.items] == [
+        _FOURTH_APPROVAL_REQUEST_ID,
+        _THIRD_APPROVAL_REQUEST_ID,
+    ]
+    assert [item.status for item in pending_page.items] == [
+        ApprovalRequestStatus.PENDING,
+        ApprovalRequestStatus.PENDING,
+    ]
+    assert [item.id for item in approved_page.items] == [_APPROVAL_REQUEST_ID]
+    assert approved_page.items[0].status is ApprovalRequestStatus.APPROVED
+    assert [item.id for item in rejected_page.items] == [_SECOND_APPROVAL_REQUEST_ID]
+    assert rejected_page.items[0].status is ApprovalRequestStatus.REJECTED
+    assert len(all_page.items) == 4
+
+
+async def test_list_page_emits_cursor_and_second_page_has_no_duplicates(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_approvals(session)
+        repository = SqlAlchemyApprovalRequestRepository(session)
+
+        first_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=2,
+            ),
+        )
+        assert first_page.next_cursor is not None
+
+        second_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=first_page.next_cursor,
+                page_size=2,
+            ),
+        )
+
+    first_ids = [item.id for item in first_page.items]
+    second_ids = [item.id for item in second_page.items]
+    assert len(first_ids) == 2
+    assert len(second_ids) == 2
+    assert not set(first_ids) & set(second_ids)
+    assert second_page.next_cursor is None
+    assert first_page.next_cursor == ApprovalRequestPageCursor(
+        created_at=first_page.items[-1].created_at,
+        approval_request_id=first_page.items[-1].id,
+    )
+
+
+async def test_list_page_uses_id_tie_breaker_for_identical_created_at(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_approvals(session)
+        repository = SqlAlchemyApprovalRequestRepository(session)
+
+        page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=1,
+            ),
+        )
+        assert page.next_cursor is not None
+
+        second = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=page.next_cursor,
+                page_size=1,
+            ),
+        )
+        third = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=second.next_cursor,
+                page_size=1,
+            ),
+        )
+        fourth = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                cursor=third.next_cursor,
+                page_size=1,
+            ),
+        )
+
+    ordered_ids = [
+        page.items[0].id,
+        second.items[0].id,
+        third.items[0].id,
+        fourth.items[0].id,
+    ]
+    assert ordered_ids == [
+        _FOURTH_APPROVAL_REQUEST_ID,
+        _THIRD_APPROVAL_REQUEST_ID,
+        max(_APPROVAL_REQUEST_ID, _SECOND_APPROVAL_REQUEST_ID),
+        min(_APPROVAL_REQUEST_ID, _SECOND_APPROVAL_REQUEST_ID),
+    ]
+    assert third.items[0].created_at == fourth.items[0].created_at == _APPROVAL_AT
+    assert third.items[0].id > fourth.items[0].id
+
+
+async def test_list_page_accepts_page_size_bounds(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        await _seed_listable_approvals(session)
+        repository = SqlAlchemyApprovalRequestRepository(session)
+
+        size_one = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=1,
+            ),
+        )
+        size_hundred = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=100,
+            ),
+        )
+
+    assert len(size_one.items) == 1
+    assert size_one.next_cursor is not None
+    assert len(size_hundred.items) == 4
+    assert size_hundred.next_cursor is None
+
+
+async def test_list_page_excludes_cross_workspace_records(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    other_ticket_id = UUID("20000000-0000-4000-8000-000000000092")
+    other_agent_run_id = UUID("30000000-0000-4000-8000-000000000093")
+    other_lease_token = UUID("40000000-0000-4000-8000-000000000094")
+    other_execution_request_id = UUID("50000000-0000-4000-8000-000000000095")
+    other_tool_call_id = UUID("60000000-0000-4000-8000-000000000096")
+    other_invocation_id = UUID("80000000-0000-4000-8000-000000000098")
+    other_approval_id = UUID("90000000-0000-4000-8000-000000000099")
+
+    async with postgresql_session_factory() as session:
+        await _seed_listable_approvals(session)
+
+        other_workspace = Workspace(
+            id=_OTHER_WORKSPACE_ID,
+            name="Other Approval Workspace",
+            slug="other-approval-workspace",
+            created_at=_CREATED_AT,
+            updated_at=_CREATED_AT,
+        )
+        other_ticket = Ticket.create(
+            ticket_id=other_ticket_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            subject="Other workspace ticket",
+            description="Cross-workspace fixture.",
+            external_reference=None,
+            ingestion_request_id=UUID("81000000-0000-4000-8000-000000000098"),
+            correlation_id=UUID("82000000-0000-4000-8000-000000000099"),
+            now=_CREATED_AT,
+        )
+        other_agent_run = AgentRun.create_initial(
+            agent_run_id=other_agent_run_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            ticket_id=other_ticket_id,
+            ingestion_request_id=other_ticket.ingestion_request_id,
+            correlation_id=other_ticket.correlation_id,
+            workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+            max_retryable_failures=3,
+            now=_CREATED_AT,
+        )
+
+        transaction_manager = SqlAlchemyTransactionManager(session)
+        async with transaction_manager.transaction():
+            await SqlAlchemyWorkspaceRepository(session).add(other_workspace)
+            await SqlAlchemyTicketRepository(session).add(other_ticket)
+            await SqlAlchemyAgentRunRepository(session).add(other_agent_run)
+
+        async with transaction_manager.transaction():
+            claim = await SqlAlchemyAgentRunRepository(session).claim_next_available(
+                ClaimAgentRunCommand(
+                    worker_id="approval-worker-other",
+                    lease_token=other_lease_token,
+                    execution_request_id=other_execution_request_id,
+                    claimed_at=_CLAIMED_AT,
+                    lease_expires_at=_LEASE_EXPIRES_AT,
+                )
+            )
+        assert claim is not None
+
+        other_tool_call = AgentToolCall.propose_for_approval(
+            tool_call_id=other_tool_call_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            ticket_id=other_ticket_id,
+            agent_run_id=claim.agent_run.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
+            sequence=1,
+            provider_tool_call_id="provider-other-1",
+            tool_name="escalate_ticket",
+            tool_version=1,
+            input_fingerprint="a" * 64,
+            safe_input={"reason_code": "other"},
+            proposed_at=_TOOL_PROPOSED_AT,
+        )
+        other_invocation = LLMInvocation.create(
+            invocation_id=other_invocation_id,
+            workspace_id=_OTHER_WORKSPACE_ID,
+            ticket_id=other_ticket_id,
+            agent_run_id=claim.agent_run.id,
+            agent_run_attempt_id=claim.attempt.id,
+            invocation_sequence=1,
+            status=LLMInvocationStatus.TIMED_OUT,
+            provider="mock",
+            model="mock-support-v1",
+            provider_request_id="mock-request-other",
+            prompt_id="controlled-support",
+            prompt_version=1,
+            prompt_content_hash="d" * 64,
+            schema_version=TICKET_CLASSIFICATION_SCHEMA_VERSION,
+            input_tokens=None,
+            cached_input_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+            total_tokens=None,
+            pricing_catalog_version=PRICING_CATALOG_VERSION,
+            pricing_found=True,
+            estimated_input_cost_usd=None,
+            estimated_cached_input_cost_usd=None,
+            estimated_output_cost_usd=None,
+            estimated_total_cost_usd=None,
+            latency_ms=12_000,
+            error_code=LLMErrorCode.TIMEOUT,
+            now=_INVOCATION_AT,
+        )
+
+        async with transaction_manager.transaction():
+            await _persist_invocation(session, other_invocation)
+            result = await SqlAlchemyAgentToolCallExecutionRepository(session).persist_fenced(
+                PersistAgentToolCallCommand(
+                    workspace_id=_OTHER_WORKSPACE_ID,
+                    ticket_id=other_ticket_id,
+                    agent_run_id=claim.agent_run.id,
+                    agent_run_attempt_id=claim.attempt.id,
+                    lease_token=other_lease_token,
+                    persisted_at=_APPROVAL_AT,
+                    tool_call=other_tool_call,
+                )
+            )
+            assert result is AgentToolCallPersistenceResult.APPLIED
+
+        other_approval = ApprovalRequest.create_pending(
+            tool_call=other_tool_call,
+            requested_by_llm_invocation_id=other_invocation_id,
+            request_reason="Cross-workspace approval.",
+            expires_at=_EXPIRES_AT,
+            approval_request_id=other_approval_id,
+            now=_APPROVAL_AT + timedelta(seconds=5),
+        )
+        await _persist_approval(session, other_approval)
+
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        home_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+        other_page = await repository.list_page(
+            ApprovalRequestListQuery(
+                workspace_id=_OTHER_WORKSPACE_ID,
+                page_size=20,
+            ),
+        )
+        by_id = await repository.get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+        cross_get = await repository.get_by_id(
+            workspace_id=_OTHER_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+
+    assert other_approval_id not in {item.id for item in home_page.items}
+    assert len(home_page.items) == 4
+    assert [item.id for item in other_page.items] == [other_approval_id]
+    assert by_id is not None
+    assert by_id.id == _APPROVAL_REQUEST_ID
+    assert cross_get is None

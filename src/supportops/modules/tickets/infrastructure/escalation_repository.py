@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, literal, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,9 @@ from supportops.modules.tickets.domain.escalation import (
 )
 from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationConsistencyError,
+    TicketEscalationListPage,
+    TicketEscalationListQuery,
+    TicketEscalationPageCursor,
     TicketEscalationPersistenceResult,
     TicketEscalationRepository,
 )
@@ -89,6 +92,57 @@ class SqlAlchemyTicketEscalationRepository(TicketEscalationRepository):
             return _resolve_existing(existing, escalation)
 
         return TicketEscalationPersistenceResult.APPLIED
+
+    async def list_page(
+        self,
+        query: TicketEscalationListQuery,
+    ) -> TicketEscalationListPage:
+        """Return one workspace-scoped escalation page."""
+
+        statement = select(TicketEscalationRecord).where(
+            TicketEscalationRecord.workspace_id == query.workspace_id,
+        )
+
+        if query.ticket_id is not None:
+            statement = statement.where(
+                TicketEscalationRecord.ticket_id == query.ticket_id,
+            )
+
+        if query.cursor is not None:
+            statement = statement.where(
+                tuple_(
+                    TicketEscalationRecord.created_at,
+                    TicketEscalationRecord.id,
+                )
+                < tuple_(
+                    literal(query.cursor.created_at),
+                    literal(query.cursor.ticket_escalation_id),
+                ),
+            )
+
+        statement = statement.order_by(
+            TicketEscalationRecord.created_at.desc(),
+            TicketEscalationRecord.id.desc(),
+        ).limit(query.page_size + 1)
+        result = await self._session.execute(statement)
+        records = list(result.scalars().all())
+
+        has_next_page = len(records) > query.page_size
+        page_records = records[: query.page_size]
+        items = tuple(record.to_domain() for record in page_records)
+
+        next_cursor: TicketEscalationPageCursor | None = None
+        if has_next_page and items:
+            last_item = items[-1]
+            next_cursor = TicketEscalationPageCursor(
+                created_at=last_item.created_at,
+                ticket_escalation_id=last_item.id,
+            )
+
+        return TicketEscalationListPage(
+            items=items,
+            next_cursor=next_cursor,
+        )
 
     async def get_by_id(
         self,
