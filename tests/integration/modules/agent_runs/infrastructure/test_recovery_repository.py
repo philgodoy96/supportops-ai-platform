@@ -78,7 +78,7 @@ async def persist_ticket_and_run(
     *,
     ticket_id: UUID,
     run_id: UUID,
-    max_attempts: int = 3,
+    max_retryable_failures: int = 3,
     created_at: datetime = _BASE_TIMESTAMP,
 ) -> AgentRun:
     """Persist one queued AgentRun and its ticket."""
@@ -104,7 +104,7 @@ async def persist_ticket_and_run(
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         now=created_at,
     )
 
@@ -137,13 +137,15 @@ def create_claim_command(
 def create_recovery_command(
     *,
     recovered_at: datetime,
-    retry_delay_seconds: float = 2.0,
+    retry_base_delay_seconds: float = 2.0,
+    retry_maximum_delay_seconds: float = 60.0,
 ) -> RecoverExpiredAgentRunCommand:
     """Create deterministic recovery values."""
 
     return RecoverExpiredAgentRunCommand(
         recovered_at=recovered_at,
-        retry_delay_seconds=retry_delay_seconds,
+        retry_base_delay_seconds=retry_base_delay_seconds,
+        retry_maximum_delay_seconds=retry_maximum_delay_seconds,
         error_code="worker_lease_expired",
         error_summary=("The worker lease expired before execution completed."),
     )
@@ -455,7 +457,7 @@ async def test_exhausted_expired_run_is_marked_failed(
                 "41000000-0000-4000-8000-000000000004",
             ),
             run_id=run_id,
-            max_attempts=1,
+            max_retryable_failures=1,
         )
 
     async with postgresql_session_factory() as claim_session:
@@ -474,7 +476,7 @@ async def test_exhausted_expired_run_is_marked_failed(
         )
 
     assert claim.agent_run.attempt_count == 1
-    assert claim.agent_run.max_attempts == 1
+    assert claim.agent_run.max_retryable_failures == 1
 
     async with postgresql_session_factory() as recovery_session:
         result = await recover_and_commit(

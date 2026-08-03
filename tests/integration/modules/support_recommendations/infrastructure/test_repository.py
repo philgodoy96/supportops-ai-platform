@@ -153,7 +153,7 @@ async def _create_running_claim(
         ingestion_request_id=(ticket.ingestion_request_id),
         correlation_id=ticket.correlation_id,
         workflow_version=(TICKET_CLASSIFICATION_WORKFLOW_VERSION),
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_BASE_TIMESTAMP,
     )
 

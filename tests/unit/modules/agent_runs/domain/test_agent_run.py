@@ -22,7 +22,7 @@ def create_agent_run(
     *,
     now: datetime | None = None,
     workflow_version: str = TICKET_CLASSIFICATION_WORKFLOW_VERSION,
-    max_attempts: int = 3,
+    max_retryable_failures: int = 3,
 ) -> AgentRun:
     return AgentRun.create_initial(
         workspace_id=UUID(
@@ -38,7 +38,7 @@ def create_agent_run(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=workflow_version,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         now=now,
     )
 
@@ -55,7 +55,8 @@ def test_create_initial_agent_run_assigns_supplied_workflow_contract() -> None:
     assert run.status is AgentRunStatus.QUEUED
     assert run.available_at == now
     assert run.attempt_count == 0
-    assert run.max_attempts == 3
+    assert run.retryable_failure_count == 0
+    assert run.max_retryable_failures == 3
     assert run.lease_owner is None
     assert run.lease_token is None
     assert run.lease_expires_at is None
@@ -66,7 +67,31 @@ def test_create_initial_agent_run_assigns_supplied_workflow_contract() -> None:
     assert run.created_at == now
     assert run.updated_at == now
     assert not run.is_terminal
-    assert run.attempts_remaining == 3
+    assert run.retryable_failures_remaining == 3
+
+
+def test_retryable_failures_remaining_tracks_failure_budget() -> None:
+    run = replace(
+        create_agent_run(),
+        retryable_failure_count=1,
+    )
+
+    assert run.retryable_failures_remaining == 2
+
+
+def test_attempt_count_may_exceed_max_retryable_failures() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    run = replace(
+        create_agent_run(now=now),
+        attempt_count=5,
+        retryable_failure_count=2,
+        first_started_at=now + timedelta(minutes=1),
+        updated_at=now + timedelta(minutes=1),
+    )
+
+    assert run.attempt_count == 5
+    assert run.max_retryable_failures == 3
+    assert run.retryable_failure_count == 2
 
 
 def test_create_initial_accepts_deterministic_baseline_workflow_version() -> None:
@@ -116,16 +141,43 @@ def test_agent_run_ownership_is_immutable() -> None:
 
 
 @pytest.mark.parametrize(
-    ("attempt_count", "max_attempts", "expected_message"),
+    (
+        "attempt_count",
+        "retryable_failure_count",
+        "max_retryable_failures",
+        "expected_message",
+    ),
     [
-        (-1, 3, "attempt_count must not be negative."),
-        (0, 0, "max_attempts must be at least one."),
-        (4, 3, "attempt_count must not exceed max_attempts."),
+        (
+            -1,
+            0,
+            3,
+            "attempt_count must not be negative.",
+        ),
+        (
+            0,
+            -1,
+            3,
+            "retryable_failure_count must not be negative.",
+        ),
+        (
+            0,
+            0,
+            0,
+            "max_retryable_failures must be at least one.",
+        ),
+        (
+            0,
+            4,
+            3,
+            ("retryable_failure_count must not exceed max_retryable_failures."),
+        ),
     ],
 )
-def test_agent_run_rejects_invalid_attempt_counts(
+def test_agent_run_rejects_invalid_retry_budget(
     attempt_count: int,
-    max_attempts: int,
+    retryable_failure_count: int,
+    max_retryable_failures: int,
     expected_message: str,
 ) -> None:
     run = create_agent_run()
@@ -137,7 +189,11 @@ def test_agent_run_rejects_invalid_attempt_counts(
         replace(
             run,
             attempt_count=attempt_count,
-            max_attempts=max_attempts,
+            retryable_failure_count=retryable_failure_count,
+            max_retryable_failures=max_retryable_failures,
+            first_started_at=(
+                datetime(2026, 7, 31, 12, 1, tzinfo=UTC) if attempt_count > 0 else None
+            ),
         )
 
 
@@ -416,4 +472,4 @@ def test_terminal_status_is_reported_by_domain_property() -> None:
     )
 
     assert succeeded_run.is_terminal
-    assert succeeded_run.attempts_remaining == 2
+    assert succeeded_run.retryable_failures_remaining == 3

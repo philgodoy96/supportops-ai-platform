@@ -50,7 +50,7 @@ def create_initial_run() -> AgentRun:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_RECOVERED_AT - timedelta(minutes=5),
     )
 
@@ -70,6 +70,7 @@ def create_recovered_run(
             else initial_run.available_at
         ),
         attempt_count=1,
+        retryable_failure_count=1,
         lease_owner=None,
         lease_token=None,
         lease_expires_at=None,
@@ -84,13 +85,15 @@ def create_recovered_run(
 def test_recovery_command_preserves_explicit_values() -> None:
     command = RecoverExpiredAgentRunCommand(
         recovered_at=_RECOVERED_AT,
-        retry_delay_seconds=2.0,
+        retry_base_delay_seconds=2.0,
+        retry_maximum_delay_seconds=60.0,
         error_code="worker_lease_expired",
         error_summary=("The worker lease expired before execution completed."),
     )
 
     assert command.recovered_at == _RECOVERED_AT
-    assert command.retry_delay_seconds == 2.0
+    assert command.retry_base_delay_seconds == 2.0
+    assert command.retry_maximum_delay_seconds == 60.0
     assert command.error_code == "worker_lease_expired"
 
 
@@ -119,33 +122,58 @@ def test_recovery_command_requires_utc_timestamp(
     ):
         RecoverExpiredAgentRunCommand(
             recovered_at=timestamp,
-            retry_delay_seconds=2.0,
+            retry_base_delay_seconds=2.0,
+            retry_maximum_delay_seconds=60.0,
             error_code="worker_lease_expired",
             error_summary=("The worker lease expired before execution completed."),
         )
 
 
 @pytest.mark.parametrize(
-    "retry_delay_seconds",
+    ("field_name", "value", "expected_message"),
     [
-        0.0,
-        -1.0,
+        (
+            "retry_base_delay_seconds",
+            0.0,
+            "retry_base_delay_seconds must be greater than zero.",
+        ),
+        (
+            "retry_base_delay_seconds",
+            -1.0,
+            "retry_base_delay_seconds must be greater than zero.",
+        ),
+        (
+            "retry_maximum_delay_seconds",
+            0.0,
+            "retry_maximum_delay_seconds must be greater than zero.",
+        ),
+        (
+            "retry_maximum_delay_seconds",
+            1.0,
+            ("retry_maximum_delay_seconds must not be smaller than retry_base_delay_seconds."),
+        ),
     ],
 )
-def test_recovery_command_requires_positive_retry_delay(
-    retry_delay_seconds: float,
+def test_recovery_command_requires_valid_retry_delay_bounds(
+    field_name: str,
+    value: float,
+    expected_message: str,
 ) -> None:
+    values = {
+        "retry_base_delay_seconds": 2.0,
+        "retry_maximum_delay_seconds": 60.0,
+    }
+    values[field_name] = value
+
     with pytest.raises(
         ValueError,
-        match=escape(
-            "retry_delay_seconds must be greater than zero.",
-        ),
+        match=escape(expected_message),
     ):
         RecoverExpiredAgentRunCommand(
             recovered_at=_RECOVERED_AT,
-            retry_delay_seconds=retry_delay_seconds,
             error_code="worker_lease_expired",
             error_summary=("The worker lease expired before execution completed."),
+            **values,
         )
 
 
@@ -191,7 +219,8 @@ def test_recovery_command_rejects_invalid_error_text(
     ):
         RecoverExpiredAgentRunCommand(
             recovered_at=_RECOVERED_AT,
-            retry_delay_seconds=2.0,
+            retry_base_delay_seconds=2.0,
+            retry_maximum_delay_seconds=60.0,
             **values,
         )
 

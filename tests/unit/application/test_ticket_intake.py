@@ -196,7 +196,7 @@ def create_service(
     agent_run_repository: FakeAgentRunRepository | None = None,
     transaction_manager: FakeTransactionManager | None = None,
     workflow_version: str = TICKET_CLASSIFICATION_WORKFLOW_VERSION,
-    max_attempts: int = 3,
+    max_retryable_failures: int = 3,
 ) -> tuple[
     CreateTicketWithInitialRun,
     FakeWorkspaceRepository,
@@ -215,7 +215,7 @@ def create_service(
         agent_run_repository=agent_run_repository,
         transaction_manager=transaction_manager,
         workflow_version=workflow_version,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         utc_now=lambda: _TIMESTAMP,
     )
 
@@ -261,7 +261,7 @@ async def test_ticket_intake_persists_ticket_and_run_atomically() -> None:
 
 
 async def test_ticket_intake_creates_expected_initial_run() -> None:
-    service, _, _, _, _ = create_service(max_attempts=4)
+    service, _, _, _, _ = create_service(max_retryable_failures=4)
 
     result = await execute_ticket_intake(service)
 
@@ -276,7 +276,8 @@ async def test_ticket_intake_creates_expected_initial_run() -> None:
     assert processing_run.status is AgentRunStatus.QUEUED
     assert processing_run.available_at == _TIMESTAMP
     assert processing_run.attempt_count == 0
-    assert processing_run.max_attempts == 4
+    assert processing_run.max_retryable_failures == 4
+    assert processing_run.retryable_failure_count == 0
 
 
 async def test_ticket_intake_schedules_deterministic_baseline_when_configured() -> None:
@@ -387,10 +388,10 @@ async def test_agent_run_insertion_failure_rolls_back_transaction() -> None:
     assert not transaction_manager.completed
 
 
-def test_ticket_intake_rejects_invalid_max_attempts() -> None:
+def test_ticket_intake_rejects_invalid_max_retryable_failures() -> None:
     with pytest.raises(
         ValueError,
-        match=r"max_attempts must be at least one\.",
+        match=r"max_retryable_failures must be at least one\.",
     ):
         CreateTicketWithInitialRun(
             workspace_repository=FakeWorkspaceRepository(),
@@ -398,6 +399,6 @@ def test_ticket_intake_rejects_invalid_max_attempts() -> None:
             agent_run_repository=FakeAgentRunRepository(),
             transaction_manager=FakeTransactionManager(),
             workflow_version=TICKET_CLASSIFICATION_WORKFLOW_VERSION,
-            max_attempts=0,
+            max_retryable_failures=0,
             utc_now=lambda: _TIMESTAMP,
         )

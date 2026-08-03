@@ -87,7 +87,7 @@ def create_claim() -> AgentRunClaim:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW - timedelta(minutes=1),
     )
     running_run = replace(
@@ -276,7 +276,7 @@ async def test_cycle_can_recover_and_process_in_same_iteration() -> None:
     processor.execute.assert_awaited_once()
 
 
-async def test_recovery_uses_safe_error_and_base_delay() -> None:
+async def test_recovery_uses_safe_error_and_policy_bounds() -> None:
     worker, repository, _, _ = create_worker()
 
     await worker.execute()
@@ -284,7 +284,8 @@ async def test_recovery_uses_safe_error_and_base_delay() -> None:
     command = repository.recover_next_expired.await_args.args[0]
 
     assert command.recovered_at == _NOW
-    assert command.retry_delay_seconds == 2.0
+    assert command.retry_base_delay_seconds == 2.0
+    assert command.retry_maximum_delay_seconds == 60.0
     assert command.error_code == "worker_lease_expired"
     assert command.error_summary == ("The worker lease expired before execution completed.")
 

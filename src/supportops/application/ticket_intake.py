@@ -47,18 +47,18 @@ class CreateTicketWithInitialRun:
         agent_run_repository: AgentRunRepository,
         transaction_manager: TransactionManager,
         workflow_version: str,
-        max_attempts: int,
+        max_retryable_failures: int,
         utc_now: UtcNowProvider | None = None,
     ) -> None:
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be at least one.")
+        if max_retryable_failures < 1:
+            raise ValueError("max_retryable_failures must be at least one.")
 
         self._workspace_repository = workspace_repository
         self._ticket_repository = ticket_repository
         self._agent_run_repository = agent_run_repository
         self._transaction_manager = transaction_manager
         self._workflow_version = workflow_version
-        self._max_attempts = max_attempts
+        self._max_retryable_failures = max_retryable_failures
         self._utc_now = utc_now or _utc_now
 
     async def execute(
@@ -90,7 +90,7 @@ class CreateTicketWithInitialRun:
             ingestion_request_id=ingestion_request_id,
             correlation_id=correlation_id,
             workflow_version=self._workflow_version,
-            max_attempts=self._max_attempts,
+            max_retryable_failures=self._max_retryable_failures,
             now=now,
         )
 

@@ -72,7 +72,7 @@ def create_initial_run() -> AgentRun:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_CREATED_AT,
     )
 
@@ -282,5 +282,5 @@ async def test_claim_query_uses_postgresql_skip_locked_ordering() -> None:
         "agent_runs.created_at ASC, agent_runs.id ASC" in normalized
     )
     assert "agent_runs.available_at <=" in normalized
-    assert "agent_runs.attempt_count < agent_runs.max_attempts" in normalized
+    assert "agent_runs.retryable_failure_count < agent_runs.max_retryable_failures" in normalized
     assert "LIMIT 1" in normalized

@@ -156,15 +156,15 @@ class ProcessClaimedAgentRun:
     ) -> AgentRunTransitionResult:
         run = claim.agent_run
 
-        retry_allowed = retryable and self._retry_policy.can_retry(
-            attempt_count=run.attempt_count,
-            max_attempts=run.max_attempts,
+        retry_allowed = retryable and self._retry_policy.can_retry_after_failure(
+            retryable_failure_count=run.retryable_failure_count,
+            max_retryable_failures=run.max_retryable_failures,
         )
 
         if retry_allowed:
             disposition = AgentRunFailureDisposition.RETRY_SCHEDULED
-            delay_seconds = self._retry_policy.delay_seconds_for_attempt(
-                attempt_number=run.attempt_count,
+            delay_seconds = self._retry_policy.delay_seconds_for_failure(
+                failure_number=run.retryable_failure_count + 1,
             )
             retry_available_at = finished_at + timedelta(
                 seconds=delay_seconds,

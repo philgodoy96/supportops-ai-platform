@@ -87,7 +87,8 @@ class AgentRunInspectionSummary:
     workflow_version: str
     status: ControlledSupportInspectionStatus
     attempt_count: int
-    max_attempts: int
+    retryable_failure_count: int
+    max_retryable_failures: int
     created_at: datetime
     first_started_at: datetime | None
     completed_at: datetime | None
@@ -121,11 +122,16 @@ class AgentRunInspectionSummary:
         if self.attempt_count < 0:
             raise ValueError("attempt_count must not be negative.")
 
-        if self.max_attempts < 1:
-            raise ValueError("max_attempts must be at least one.")
+        if self.retryable_failure_count < 0:
+            raise ValueError("retryable_failure_count must not be negative.")
 
-        if self.attempt_count > self.max_attempts:
-            raise ValueError("attempt_count must not exceed max_attempts.")
+        if self.max_retryable_failures < 1:
+            raise ValueError("max_retryable_failures must be at least one.")
+
+        if self.retryable_failure_count > self.max_retryable_failures:
+            raise ValueError(
+                "retryable_failure_count must not exceed max_retryable_failures.",
+            )
 
         _validate_utc_timestamp(
             self.created_at,
@@ -198,7 +204,8 @@ class AgentRunInspectionSummary:
             workflow_version=agent_run.workflow_version,
             status=map_agent_run_inspection_status(agent_run.status),
             attempt_count=agent_run.attempt_count,
-            max_attempts=agent_run.max_attempts,
+            retryable_failure_count=agent_run.retryable_failure_count,
+            max_retryable_failures=agent_run.max_retryable_failures,
             created_at=agent_run.created_at,
             first_started_at=agent_run.first_started_at,
             completed_at=agent_run.completed_at,

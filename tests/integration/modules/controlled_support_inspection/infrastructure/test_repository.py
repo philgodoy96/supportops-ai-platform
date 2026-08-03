@@ -103,7 +103,7 @@ def _failed_run(
         ingestion_request_id=(ticket.ingestion_request_id),
         correlation_id=ticket.correlation_id,
         workflow_version=(CONTROLLED_SUPPORT_WORKFLOW_VERSION),
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_CREATED_AT,
     )
 

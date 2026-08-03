@@ -141,7 +141,7 @@ def create_agent_run() -> AgentRun:
         ingestion_request_id=_INGESTION_REQUEST_ID,
         correlation_id=_CORRELATION_ID,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
 
@@ -332,7 +332,7 @@ async def test_list_attempts_only_returns_requested_run_history(
         ingestion_request_id=other_ingestion_request_id,
         correlation_id=other_correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
     await repository.add(other_run)

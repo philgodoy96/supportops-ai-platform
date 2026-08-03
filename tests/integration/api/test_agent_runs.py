@@ -170,7 +170,9 @@ async def test_get_agent_run_returns_scheduled_processing_state(
         "trigger_key": "initial-ticket-processing",
     }
     assert payload["attempt_count"] == 0
-    assert payload["max_attempts"] == 3
+    assert payload["retryable_failure_count"] == 0
+    assert payload["max_retryable_failures"] == 3
+    assert "max_attempts" not in payload
     assert payload["first_started_at"] is None
     assert payload["completed_at"] is None
     assert payload["last_error"] is None
@@ -204,6 +206,7 @@ async def test_get_agent_run_omits_internal_runtime_fields(
     assert "lease_owner" not in payload
     assert "lease_token" not in payload
     assert "lease_expires_at" not in payload
+    assert "max_attempts" not in payload
     assert "ingestion_request_id" not in payload
 
 

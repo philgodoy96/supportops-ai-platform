@@ -374,7 +374,7 @@ def _agent_run() -> AgentRun:
         ingestion_request_id=_INGESTION_REQUEST_ID,
         correlation_id=_CORRELATION_ID,
         workflow_version=(TICKET_CLASSIFICATION_WORKFLOW_VERSION),
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
 

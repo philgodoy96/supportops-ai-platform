@@ -69,7 +69,8 @@ class AgentRunResponse(BaseModel):
     workflow: AgentRunWorkflowResponse
     classification: AgentRunClassificationReferenceResponse | None
     attempt_count: int
-    max_attempts: int
+    retryable_failure_count: int
+    max_retryable_failures: int
     available_at: datetime
     first_started_at: datetime | None
     completed_at: datetime | None
@@ -113,7 +114,8 @@ class AgentRunResponse(BaseModel):
                 else None
             ),
             attempt_count=agent_run.attempt_count,
-            max_attempts=agent_run.max_attempts,
+            retryable_failure_count=agent_run.retryable_failure_count,
+            max_retryable_failures=agent_run.max_retryable_failures,
             available_at=agent_run.available_at,
             first_started_at=agent_run.first_started_at,
             completed_at=agent_run.completed_at,

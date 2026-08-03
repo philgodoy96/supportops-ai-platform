@@ -57,7 +57,8 @@ def create_recovery_command() -> RecoverExpiredAgentRunCommand:
 
     return RecoverExpiredAgentRunCommand(
         recovered_at=_RECOVERED_AT,
-        retry_delay_seconds=2.0,
+        retry_base_delay_seconds=2.0,
+        retry_maximum_delay_seconds=60.0,
         error_code="worker_lease_expired",
         error_summary=("The worker lease expired before execution completed."),
     )
@@ -66,7 +67,8 @@ def create_recovery_command() -> RecoverExpiredAgentRunCommand:
 def create_expired_run_record(
     *,
     attempt_count: int = 1,
-    max_attempts: int = 3,
+    retryable_failure_count: int = 0,
+    max_retryable_failures: int = 3,
 ) -> AgentRunRecord:
     """Create an expired actively leased AgentRun record."""
 
@@ -85,7 +87,7 @@ def create_expired_run_record(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         now=_STARTED_AT - timedelta(minutes=1),
     )
 
@@ -99,7 +101,8 @@ def create_expired_run_record(
         status=AgentRunStatus.RUNNING,
         available_at=initial_run.available_at,
         attempt_count=attempt_count,
-        max_attempts=max_attempts,
+        retryable_failure_count=retryable_failure_count,
+        max_retryable_failures=max_retryable_failures,
         lease_owner="worker-a",
         lease_token=_EXPIRED_LEASE_TOKEN,
         lease_expires_at=_RECOVERED_AT - timedelta(seconds=1),
@@ -186,7 +189,7 @@ async def test_recover_next_expired_returns_none_when_none_exists() -> None:
 async def test_recover_next_expired_schedules_retry() -> None:
     run_record = create_expired_run_record(
         attempt_count=1,
-        max_attempts=3,
+        max_retryable_failures=3,
     )
     attempt_record = create_active_attempt_record(
         attempt_number=1,
@@ -209,6 +212,7 @@ async def test_recover_next_expired_schedules_retry() -> None:
     assert run_record.available_at == _RECOVERED_AT + timedelta(seconds=2)
     assert run_record.completed_at is None
     assert run_record.attempt_count == 1
+    assert run_record.retryable_failure_count == 1
     assert run_record.first_started_at == _STARTED_AT
     assert run_record.lease_owner is None
     assert run_record.lease_token is None
@@ -229,12 +233,13 @@ async def test_recover_next_expired_schedules_retry() -> None:
 
 async def test_recover_next_expired_marks_exhausted_run_failed() -> None:
     run_record = create_expired_run_record(
-        attempt_count=3,
-        max_attempts=3,
+        attempt_count=5,
+        retryable_failure_count=2,
+        max_retryable_failures=3,
     )
     original_available_at = run_record.available_at
     attempt_record = create_active_attempt_record(
-        attempt_number=3,
+        attempt_number=5,
     )
     session = create_session(
         run_record=run_record,
@@ -253,7 +258,8 @@ async def test_recover_next_expired_marks_exhausted_run_failed() -> None:
     assert run_record.status == AgentRunStatus.FAILED.value
     assert run_record.completed_at == _RECOVERED_AT
     assert run_record.available_at == original_available_at
-    assert run_record.attempt_count == 3
+    assert run_record.attempt_count == 5
+    assert run_record.retryable_failure_count == 3
     assert run_record.lease_owner is None
     assert run_record.lease_token is None
     assert run_record.lease_expires_at is None
@@ -268,7 +274,7 @@ async def test_recover_next_expired_marks_exhausted_run_failed() -> None:
 async def test_recovery_does_not_create_or_increment_attempt() -> None:
     run_record = create_expired_run_record(
         attempt_count=2,
-        max_attempts=3,
+        max_retryable_failures=3,
     )
     attempt_record = create_active_attempt_record(
         attempt_number=2,

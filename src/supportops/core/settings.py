@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     worker_lease_seconds: float = Field(default=150.0, gt=0, le=3600)
     worker_execution_timeout_seconds: float = Field(default=135.0, gt=0, le=1800)
     worker_shutdown_grace_seconds: float = Field(default=10.0, ge=0, le=300)
-    worker_max_attempts: int = Field(default=3, ge=1, le=100)
+    worker_max_retryable_failures: int = Field(default=3, ge=1, le=100)
     worker_retry_base_seconds: float = Field(default=2.0, gt=0, le=3600)
     worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 

@@ -68,7 +68,7 @@ def create_running_run() -> AgentRun:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_CLAIMED_AT - timedelta(minutes=1),
     )
 

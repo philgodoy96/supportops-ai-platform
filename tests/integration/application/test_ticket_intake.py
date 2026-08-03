@@ -108,7 +108,7 @@ def create_ticket_intake_service(
         agent_run_repository=(agent_run_repository or SqlAlchemyAgentRunRepository(session)),
         transaction_manager=SqlAlchemyTransactionManager(session),
         workflow_version=workflow_version,
-        max_attempts=3,
+        max_retryable_failures=3,
         utc_now=lambda: _BASE_TIMESTAMP,
     )
 
@@ -214,7 +214,7 @@ async def test_initial_agent_run_persists_approved_contract(
     assert persisted_run.trigger_key == INITIAL_TICKET_PROCESSING_TRIGGER_KEY
     assert persisted_run.available_at == _BASE_TIMESTAMP
     assert persisted_run.attempt_count == 0
-    assert persisted_run.max_attempts == 3
+    assert persisted_run.max_retryable_failures == 3
     assert persisted_run.lease_owner is None
     assert persisted_run.lease_token is None
     assert persisted_run.lease_expires_at is None
