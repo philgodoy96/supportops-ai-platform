@@ -225,6 +225,10 @@ def test_approved_invariants() -> None:
 
     assert approved.is_terminal is True
     assert approved.decision_comment is None
+    assert approved.decision_actor_reference == "operator:alice"
+    assert approved.decision_request_id == DECISION_REQUEST_ID
+    assert approved.decision_correlation_id == DECISION_CORRELATION_ID
+    assert approved.decided_at == DECIDED_AT
 
     with pytest.raises(ValueError, match="decision_actor_reference"):
         replace(
@@ -236,6 +240,18 @@ def test_approved_invariants() -> None:
         replace(
             approved,
             decision_request_id=None,
+        )
+
+    with pytest.raises(ValueError, match="decision_correlation_id"):
+        replace(
+            approved,
+            decision_correlation_id=None,
+        )
+
+    with pytest.raises(ValueError, match="decided_at"):
+        replace(
+            approved,
+            decided_at=None,
         )
 
 
@@ -252,11 +268,40 @@ def test_rejected_invariants() -> None:
     )
 
     assert rejected.is_terminal is True
+    assert rejected.decision_actor_reference == "operator:bob"
+    assert rejected.decision_comment == "Not warranted."
+    assert rejected.decision_request_id == DECISION_REQUEST_ID
+    assert rejected.decision_correlation_id == DECISION_CORRELATION_ID
+    assert rejected.decided_at == DECIDED_AT
+
+    with pytest.raises(ValueError, match="decision_actor_reference"):
+        replace(
+            rejected,
+            decision_actor_reference=None,
+        )
 
     with pytest.raises(ValueError, match="decision_comment"):
         replace(
             rejected,
             decision_comment=None,
+        )
+
+    with pytest.raises(ValueError, match="decision_request_id"):
+        replace(
+            rejected,
+            decision_request_id=None,
+        )
+
+    with pytest.raises(ValueError, match="decision_correlation_id"):
+        replace(
+            rejected,
+            decision_correlation_id=None,
+        )
+
+    with pytest.raises(ValueError, match="decided_at"):
+        replace(
+            rejected,
+            decided_at=None,
         )
 
 
@@ -270,6 +315,11 @@ def test_expired_invariants() -> None:
     )
 
     assert expired.is_terminal is True
+    assert expired.decision_actor_reference == (APPROVAL_EXPIRATION_ACTOR_REFERENCE)
+    assert expired.decision_comment is None
+    assert expired.decision_request_id is None
+    assert expired.decision_correlation_id is None
+    assert expired.decided_at == DECIDED_AT
 
     with pytest.raises(ValueError, match="system expiration actor"):
         replace(
@@ -289,6 +339,39 @@ def test_expired_invariants() -> None:
             decision_request_id=DECISION_REQUEST_ID,
         )
 
+    with pytest.raises(ValueError, match="decision_correlation_id"):
+        replace(
+            expired,
+            decision_correlation_id=DECISION_CORRELATION_ID,
+        )
+
+    with pytest.raises(ValueError, match="decided_at"):
+        replace(
+            expired,
+            decided_at=None,
+        )
+
+
+def _assert_proposal_fields_preserved(
+    original: ApprovalRequest,
+    decided: ApprovalRequest,
+) -> None:
+    assert decided.id == original.id
+    assert decided.workspace_id == original.workspace_id
+    assert decided.ticket_id == original.ticket_id
+    assert decided.agent_run_id == original.agent_run_id
+    assert decided.agent_tool_call_id == original.agent_tool_call_id
+    assert decided.requested_by_llm_invocation_id == (original.requested_by_llm_invocation_id)
+    assert decided.tool_name == original.tool_name
+    assert decided.tool_version == original.tool_version
+    assert decided.safety_level is original.safety_level
+    assert decided.input_fingerprint == original.input_fingerprint
+    assert decided.proposed_input == original.proposed_input
+    assert isinstance(decided.proposed_input, MappingProxyType)
+    assert decided.request_reason == original.request_reason
+    assert decided.created_at == original.created_at
+    assert decided.expires_at == original.expires_at
+
 
 def test_approve_transition_persists_decision_fields() -> None:
     pending = create_pending_approval()
@@ -301,17 +384,17 @@ def test_approve_transition_persists_decision_fields() -> None:
     )
 
     assert approved.status is ApprovalRequestStatus.APPROVED
+    assert approved.is_terminal is True
     assert approved.decision_actor_reference == "operator:alice"
     assert approved.decision_comment is None
     assert approved.decision_request_id == DECISION_REQUEST_ID
     assert approved.decision_correlation_id == DECISION_CORRELATION_ID
     assert approved.decided_at == DECIDED_AT
     assert approved.updated_at == DECIDED_AT
-    assert approved.created_at == CREATED_AT
-    assert approved.expires_at == EXPIRES_AT
-    assert approved.proposed_input == pending.proposed_input
-    assert approved.request_reason == pending.request_reason
-    assert approved.input_fingerprint == pending.input_fingerprint
+    _assert_proposal_fields_preserved(pending, approved)
+
+    with pytest.raises(TypeError):
+        approved.proposed_input["reason_code"] = "x"  # type: ignore[index]
 
 
 def test_approve_transition_allows_optional_comment() -> None:
@@ -347,8 +430,13 @@ def test_reject_transition_requires_comment() -> None:
     )
 
     assert rejected.status is ApprovalRequestStatus.REJECTED
+    assert rejected.is_terminal is True
     assert rejected.decision_comment == "Not warranted."
     assert rejected.updated_at == DECIDED_AT
+    _assert_proposal_fields_preserved(pending, rejected)
+
+    with pytest.raises(TypeError):
+        rejected.proposed_input["reason_code"] = "x"  # type: ignore[index]
 
 
 def test_expire_transition_requires_overdue_request() -> None:
@@ -357,15 +445,54 @@ def test_expire_transition_requires_overdue_request() -> None:
     with pytest.raises(ValueError, match="expires_at"):
         pending.expire(decided_at=DECIDED_AT)
 
+    with pytest.raises(ValueError, match="expires_at"):
+        pending.expire(decided_at=EXPIRES_AT - timedelta(microseconds=1))
+
     expired = pending.expire(decided_at=EXPIRES_AT)
 
     assert expired.status is ApprovalRequestStatus.EXPIRED
+    assert expired.is_terminal is True
     assert expired.decision_actor_reference == (APPROVAL_EXPIRATION_ACTOR_REFERENCE)
     assert expired.decision_comment is None
     assert expired.decision_request_id is None
     assert expired.decision_correlation_id is None
     assert expired.decided_at == EXPIRES_AT
     assert expired.updated_at == EXPIRES_AT
+    _assert_proposal_fields_preserved(pending, expired)
+
+    with pytest.raises(TypeError):
+        expired.proposed_input["reason_code"] = "x"  # type: ignore[index]
+
+
+def test_approve_and_reject_fail_at_expires_at() -> None:
+    pending = create_pending_approval()
+
+    with pytest.raises(ValueError, match="expires_at"):
+        pending.approve(
+            actor_reference="operator:alice",
+            comment=None,
+            request_id=DECISION_REQUEST_ID,
+            correlation_id=DECISION_CORRELATION_ID,
+            decided_at=EXPIRES_AT,
+        )
+
+    with pytest.raises(ValueError, match="expires_at"):
+        pending.reject(
+            actor_reference="operator:bob",
+            comment="Too late.",
+            request_id=DECISION_REQUEST_ID,
+            correlation_id=DECISION_CORRELATION_ID,
+            decided_at=EXPIRES_AT,
+        )
+
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=DECISION_REQUEST_ID,
+        correlation_id=DECISION_CORRELATION_ID,
+        decided_at=EXPIRES_AT - timedelta(microseconds=1),
+    )
+    assert approved.status is ApprovalRequestStatus.APPROVED
 
 
 def test_decision_transitions_only_from_pending() -> None:
@@ -397,6 +524,26 @@ def test_decision_transitions_only_from_pending() -> None:
 
     with pytest.raises(ValueError, match="pending"):
         approved.expire(decided_at=EXPIRES_AT)
+
+    rejected = create_pending_approval().reject(
+        actor_reference="operator:bob",
+        comment="Denied.",
+        request_id=DECISION_REQUEST_ID,
+        correlation_id=DECISION_CORRELATION_ID,
+        decided_at=DECIDED_AT,
+    )
+    with pytest.raises(ValueError, match="pending"):
+        rejected.expire(decided_at=EXPIRES_AT)
+
+    expired = create_pending_approval().expire(decided_at=EXPIRES_AT)
+    with pytest.raises(ValueError, match="pending"):
+        expired.approve(
+            actor_reference="operator:alice",
+            comment=None,
+            request_id=DECISION_REQUEST_ID,
+            correlation_id=DECISION_CORRELATION_ID,
+            decided_at=DECIDED_AT,
+        )
 
 
 def test_decision_timestamps_must_be_utc_aware() -> None:

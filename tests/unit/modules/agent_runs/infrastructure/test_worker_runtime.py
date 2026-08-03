@@ -263,3 +263,8 @@ def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager
     assert cycle._expire_pending_approvals._approval_request_repository._session is session
     assert cycle._expire_pending_approvals._agent_run_repository._session is session
     assert cycle._expire_pending_approvals._agent_tool_call_repository._session is session
+    assert cycle._expire_pending_approvals._transaction_manager is (cycle._transaction_manager)
+    assert isinstance(
+        cycle._expire_pending_approvals._transaction_manager,
+        SqlAlchemyTransactionManager,
+    )

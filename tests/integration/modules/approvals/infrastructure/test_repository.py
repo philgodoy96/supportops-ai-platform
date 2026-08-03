@@ -81,10 +81,16 @@ _LEASE_TOKEN = UUID("40000000-0000-4000-8000-000000000004")
 _EXECUTION_REQUEST_ID = UUID("50000000-0000-4000-8000-000000000005")
 _TOOL_CALL_ID = UUID("60000000-0000-4000-8000-000000000006")
 _SECOND_TOOL_CALL_ID = UUID("70000000-0000-4000-8000-000000000007")
+_THIRD_TOOL_CALL_ID = UUID("70000000-0000-4000-8000-000000000017")
+_FOURTH_TOOL_CALL_ID = UUID("70000000-0000-4000-8000-000000000027")
 _INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000008")
 _SECOND_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000018")
+_THIRD_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000028")
+_FOURTH_INVOCATION_ID = UUID("80000000-0000-4000-8000-000000000038")
 _APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000009")
 _SECOND_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000019")
+_THIRD_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000029")
+_FOURTH_APPROVAL_REQUEST_ID = UUID("90000000-0000-4000-8000-000000000039")
 
 _CREATED_AT = datetime(2026, 8, 2, 22, 0, tzinfo=UTC)
 _CLAIMED_AT = _CREATED_AT + timedelta(minutes=1)
@@ -882,3 +888,264 @@ async def test_save_does_not_commit(
     assert loaded is not None
     assert loaded.status.value == "pending"
     assert loaded.decided_at is None
+
+
+async def test_get_next_expired_pending_ignores_future_and_terminal_rows(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    now = _APPROVAL_AT + timedelta(hours=25)
+    overdue_expires_at = _APPROVAL_AT + timedelta(hours=1)
+    decision_ids = (
+        (
+            UUID("88888888-8888-4888-8888-888888888881"),
+            UUID("99999999-9999-4999-8999-999999999991"),
+        ),
+        (
+            UUID("88888888-8888-4888-8888-888888888882"),
+            UUID("99999999-9999-4999-8999-999999999992"),
+        ),
+    )
+
+    async with postgresql_session_factory() as setup_session:
+        claim = await _create_running_claim(setup_session)
+        tool_specs = (
+            (_TOOL_CALL_ID, 1, "provider-sensitive-1", "b" * 64, "one"),
+            (_SECOND_TOOL_CALL_ID, 2, "provider-sensitive-2", "e" * 64, "two"),
+            (_THIRD_TOOL_CALL_ID, 3, "provider-sensitive-3", "f" * 64, "three"),
+            (_FOURTH_TOOL_CALL_ID, 4, "provider-sensitive-4", "c" * 64, "four"),
+        )
+        invocation_ids = (
+            _INVOCATION_ID,
+            _SECOND_INVOCATION_ID,
+            _THIRD_INVOCATION_ID,
+            _FOURTH_INVOCATION_ID,
+        )
+        approval_ids = (
+            _APPROVAL_REQUEST_ID,
+            _SECOND_APPROVAL_REQUEST_ID,
+            _THIRD_APPROVAL_REQUEST_ID,
+            _FOURTH_APPROVAL_REQUEST_ID,
+        )
+
+        tool_calls = []
+        for index, (
+            tool_call_id,
+            sequence,
+            provider_id,
+            fingerprint,
+            reason,
+        ) in enumerate(tool_specs):
+            tool_call = _pending_tool_call(
+                claim,
+                tool_call_id=tool_call_id,
+                sequence=sequence,
+                provider_tool_call_id=provider_id,
+                input_fingerprint=fingerprint,
+                safe_input={"reason_code": reason},
+            )
+            tool_calls.append(tool_call)
+            invocation = _invocation(
+                claim,
+                invocation_id=invocation_ids[index],
+                sequence=sequence,
+            )
+            async with SqlAlchemyTransactionManager(setup_session).transaction():
+                await _persist_invocation(setup_session, invocation)
+                await _persist_tool_call(setup_session, claim, tool_call)
+
+        approved = _approval_request(
+            tool_calls[0],
+            approval_request_id=approval_ids[0],
+            expires_at=overdue_expires_at,
+        )
+        rejected = _approval_request(
+            tool_calls[1],
+            invocation_id=invocation_ids[1],
+            approval_request_id=approval_ids[1],
+            expires_at=overdue_expires_at,
+            request_reason="Rejected proposal.",
+        )
+        expired = _approval_request(
+            tool_calls[2],
+            invocation_id=invocation_ids[2],
+            approval_request_id=approval_ids[2],
+            expires_at=overdue_expires_at,
+            request_reason="Expired proposal.",
+        )
+        future = _approval_request(
+            tool_calls[3],
+            invocation_id=invocation_ids[3],
+            approval_request_id=approval_ids[3],
+            expires_at=_APPROVAL_AT + timedelta(hours=48),
+            request_reason="Still within TTL.",
+        )
+
+        for pending in (approved, rejected, expired, future):
+            await _persist_approval(setup_session, pending)
+
+        repository = SqlAlchemyApprovalRequestRepository(setup_session)
+        decided_at = _APPROVAL_AT + timedelta(minutes=5)
+        async with SqlAlchemyTransactionManager(setup_session).transaction():
+            await repository.save(
+                approved.approve(
+                    actor_reference="operator:alice",
+                    comment=None,
+                    request_id=decision_ids[0][0],
+                    correlation_id=decision_ids[0][1],
+                    decided_at=decided_at,
+                ),
+            )
+            await repository.save(
+                rejected.reject(
+                    actor_reference="operator:bob",
+                    comment="Not warranted.",
+                    request_id=decision_ids[1][0],
+                    correlation_id=decision_ids[1][1],
+                    decided_at=decided_at,
+                ),
+            )
+            await repository.save(
+                expired.expire(decided_at=overdue_expires_at),
+            )
+
+    async with postgresql_session_factory() as session:
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            selected = await repository.get_next_expired_pending_for_update(
+                now=now,
+            )
+
+    assert selected is None
+
+
+async def test_get_next_expired_pending_orders_by_expires_at_then_id(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    now = _APPROVAL_AT + timedelta(hours=25)
+    shared_expiry = _APPROVAL_AT + timedelta(hours=1)
+
+    async with postgresql_session_factory() as setup_session:
+        claim = await _create_running_claim(setup_session)
+        first_tool_call = _pending_tool_call(claim)
+        second_tool_call = _pending_tool_call(
+            claim,
+            tool_call_id=_SECOND_TOOL_CALL_ID,
+            sequence=2,
+            provider_tool_call_id="provider-sensitive-2",
+            input_fingerprint="e" * 64,
+            safe_input={"reason_code": "alternate"},
+        )
+        first_invocation = _invocation(claim)
+        second_invocation = _invocation(
+            claim,
+            invocation_id=_SECOND_INVOCATION_ID,
+            sequence=2,
+        )
+
+        async with SqlAlchemyTransactionManager(setup_session).transaction():
+            await _persist_invocation(setup_session, first_invocation)
+            await _persist_invocation(setup_session, second_invocation)
+            await _persist_tool_call(setup_session, claim, first_tool_call)
+            await _persist_tool_call(setup_session, claim, second_tool_call)
+
+        higher_id = _approval_request(
+            first_tool_call,
+            approval_request_id=_THIRD_APPROVAL_REQUEST_ID,
+            expires_at=shared_expiry,
+        )
+        lower_id = _approval_request(
+            second_tool_call,
+            invocation_id=_SECOND_INVOCATION_ID,
+            approval_request_id=_SECOND_APPROVAL_REQUEST_ID,
+            expires_at=shared_expiry,
+            request_reason="Alternate escalation path.",
+        )
+        await _persist_approval(setup_session, higher_id)
+        await _persist_approval(setup_session, lower_id)
+
+    async with postgresql_session_factory() as session:
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            first = await repository.get_next_expired_pending_for_update(
+                now=now,
+            )
+
+    assert first is not None
+    assert first.id == _SECOND_APPROVAL_REQUEST_ID
+
+
+async def test_concurrent_conflicting_persist_pending_fails_closed(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as setup_session:
+        _, tool_call, _ = await _seed_pending_context(setup_session)
+
+    ready = 0
+    ready_lock = asyncio.Lock()
+    release_inserts = asyncio.Event()
+    first_approval = _approval_request(tool_call)
+    conflicting = _approval_request(
+        tool_call,
+        approval_request_id=_SECOND_APPROVAL_REQUEST_ID,
+        request_reason="Conflicting proposal reason.",
+        now=_APPROVAL_AT + timedelta(seconds=1),
+    )
+    outcomes: list[object] = []
+
+    async def persist(
+        approval: ApprovalRequest,
+    ) -> ApprovalRequestPersistenceResult | Exception:
+        nonlocal ready
+
+        async with postgresql_session_factory() as session:
+            repository = SqlAlchemyApprovalRequestRepository(session)
+
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    release_inserts.set()
+
+            await release_inserts.wait()
+
+            try:
+                async with SqlAlchemyTransactionManager(session).transaction():
+                    result = await repository.persist_pending(approval)
+                # Session must remain usable after the conflict/savepoint path.
+                await session.execute(select(func.count()).select_from(ApprovalRequestRecord))
+                return result
+            except Exception as exc:
+                await session.execute(select(func.count()).select_from(ApprovalRequestRecord))
+                return exc
+
+    outcomes = list(
+        await asyncio.gather(
+            persist(first_approval),
+            persist(conflicting),
+        ),
+    )
+
+    applied = [item for item in outcomes if item is ApprovalRequestPersistenceResult.APPLIED]
+    conflicts = [item for item in outcomes if isinstance(item, ApprovalRequestConsistencyError)]
+    assert len(applied) == 1
+    assert len(conflicts) == 1
+
+    async with postgresql_session_factory() as session:
+        assert await _count_approvals(session) == 1
+        first_loaded = await SqlAlchemyApprovalRequestRepository(session).get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+        second_loaded = await SqlAlchemyApprovalRequestRepository(session).get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_SECOND_APPROVAL_REQUEST_ID,
+        )
+
+    winners = [row for row in (first_loaded, second_loaded) if row is not None]
+    assert len(winners) == 1
+    assert winners[0].request_reason in {
+        first_approval.request_reason,
+        conflicting.request_reason,
+    }

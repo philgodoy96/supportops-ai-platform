@@ -1,5 +1,6 @@
 """Integration tests for fenced PostgreSQL tool-call persistence."""
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -632,8 +633,16 @@ async def test_save_approval_outcome_rejects_pending_to_rejected(
     assert loaded.status is AgentToolCallStatus.REJECTED
     assert loaded.finished_at == decided_at
     assert loaded.tool_name == tool_call.tool_name
+    assert loaded.tool_version == tool_call.tool_version
     assert loaded.input_fingerprint == tool_call.input_fingerprint
     assert dict(loaded.safe_input) == dict(tool_call.safe_input)
+    assert loaded.proposed_by_agent_run_attempt_id == (tool_call.proposed_by_agent_run_attempt_id)
+    assert loaded.executed_by_agent_run_attempt_id is None
+    assert loaded.proposed_at == tool_call.proposed_at
+    assert loaded.execution_started_at is None
+    assert loaded.safe_output is None
+    assert loaded.latency_ms is None
+    assert loaded.error_code is None
 
 
 async def test_save_approval_outcome_expires_pending_proposal(
@@ -660,6 +669,14 @@ async def test_save_approval_outcome_expires_pending_proposal(
     assert loaded is not None
     assert loaded.status is AgentToolCallStatus.EXPIRED
     assert loaded.finished_at == decided_at
+    assert loaded.tool_name == tool_call.tool_name
+    assert loaded.input_fingerprint == tool_call.input_fingerprint
+    assert dict(loaded.safe_input) == dict(tool_call.safe_input)
+    assert loaded.proposed_by_agent_run_attempt_id == (tool_call.proposed_by_agent_run_attempt_id)
+    assert loaded.executed_by_agent_run_attempt_id is None
+    assert loaded.proposed_at == tool_call.proposed_at
+    assert loaded.execution_started_at is None
+    assert loaded.safe_output is None
 
 
 async def test_get_by_id_for_update_is_workspace_scoped(
@@ -727,3 +744,96 @@ async def test_save_approval_outcome_rejects_immutable_mismatch(
         with pytest.raises(RuntimeError, match="immutable"):
             async with SqlAlchemyTransactionManager(session).transaction():
                 await repository.save_approval_outcome(rejected)
+
+
+async def test_concurrent_reject_and_expire_produce_one_terminal_state(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    decided_at = _TOOL_STARTED_AT + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as setup_session:
+        claim = await _create_running_claim(setup_session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(setup_session, _command(claim, tool_call=tool_call))
+
+    ready = 0
+    ready_lock = asyncio.Lock()
+    release = asyncio.Event()
+    outcomes: list[object] = []
+
+    async def finalize(kind: str) -> str | Exception:
+        nonlocal ready
+
+        async with postgresql_session_factory() as session:
+            repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+            terminal = (
+                tool_call.reject_for_approval(decided_at=decided_at)
+                if kind == "reject"
+                else tool_call.expire_for_approval(decided_at=decided_at)
+            )
+
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    release.set()
+            await release.wait()
+
+            try:
+                async with SqlAlchemyTransactionManager(session).transaction():
+                    await repository.save_approval_outcome(terminal)
+                return kind
+            except Exception as exc:
+                return exc
+
+    outcomes = list(
+        await asyncio.gather(
+            finalize("reject"),
+            finalize("expire"),
+        ),
+    )
+
+    successes = [item for item in outcomes if item in {"reject", "expire"}]
+    failures = [item for item in outcomes if isinstance(item, Exception)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+
+    async with postgresql_session_factory() as session:
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            loaded = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert loaded is not None
+    assert loaded.status in {
+        AgentToolCallStatus.REJECTED,
+        AgentToolCallStatus.EXPIRED,
+    }
+    assert loaded.finished_at == decided_at
+
+    conflicting = (
+        tool_call.expire_for_approval(decided_at=decided_at + timedelta(minutes=1))
+        if loaded.status is AgentToolCallStatus.REJECTED
+        else tool_call.reject_for_approval(
+            decided_at=decided_at + timedelta(minutes=1),
+        )
+    )
+    async with postgresql_session_factory() as session:
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        with pytest.raises(RuntimeError, match="pending_approval"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_approval_outcome(conflicting)
+
+    async with postgresql_session_factory() as session:
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            final = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert final is not None
+    assert final.status is loaded.status
+    assert final.finished_at == decided_at
