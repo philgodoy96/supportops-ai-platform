@@ -30,6 +30,9 @@ from supportops.agent_graph.application.resume_planning import (
 from supportops.agent_graph.application.sensitive_proposal import (
     SensitiveProposalService,
 )
+from supportops.agent_graph.application.sensitive_tool_execution import (
+    SensitiveToolExecutionNode,
+)
 from supportops.agent_graph.application.tool_execution import (
     ControlledToolDecisionExecutor,
 )
@@ -59,6 +62,12 @@ from supportops.agent_tools.application.execution import (
 )
 from supportops.agent_tools.application.sensitive_bindings import (
     SensitiveToolRegistry,
+)
+from supportops.agent_tools.application.sensitive_execution import (
+    ExecuteApprovedTicketEscalation,
+)
+from supportops.agent_tools.infrastructure.grant_repository import (
+    SqlAlchemySensitiveExecutionGrantRepository,
 )
 from supportops.agent_tools.infrastructure.query_repository import (
     SqlAlchemyAgentToolCallQueryRepository,
@@ -179,6 +188,9 @@ from supportops.modules.ticket_classifications.domain.repositories import (
 from supportops.modules.ticket_classifications.infrastructure.repository import (
     SqlAlchemyClassificationPersistenceRepository,
     SqlAlchemyTicketClassificationQueryRepository,
+)
+from supportops.modules.tickets.infrastructure.escalation_repository import (
+    SqlAlchemyTicketEscalationRepository,
 )
 
 MOCK_LLM_PROVIDER_NAME = "mock"
@@ -845,6 +857,22 @@ def create_session_scoped_executor_registry(
         approval_request_repository=(approval_request_repository),
         approval_ttl_seconds=(controlled_runtime.approval_ttl_seconds),
     )
+    grant_repository = SqlAlchemySensitiveExecutionGrantRepository(
+        session,
+    )
+    escalation_repository = SqlAlchemyTicketEscalationRepository(
+        session,
+    )
+    approved_escalation_executor = ExecuteApprovedTicketEscalation(
+        transaction_manager=transaction_manager,
+        approval_request_repository=(approval_request_repository),
+        tool_call_repository=tool_call_execution_repository,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+    )
+    sensitive_tool_execution = SensitiveToolExecutionNode(
+        executor=approved_escalation_executor,
+    )
     human_approved_nodes = HumanApprovedSupportWorkflowNodes(
         transaction_manager=transaction_manager,
         classification_repository=cast(
@@ -855,6 +883,7 @@ def create_session_scoped_executor_registry(
         decision_executor=human_approved_decision_executor,
         sensitive_tool_registry=sensitive_tool_registry,
         sensitive_proposal_service=sensitive_proposal_service,
+        sensitive_tool_execution=sensitive_tool_execution,
     )
     human_approved_graph = compile_human_approved_support_graph(
         nodes=human_approved_nodes,

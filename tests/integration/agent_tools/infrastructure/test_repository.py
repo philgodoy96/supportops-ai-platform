@@ -837,3 +837,188 @@ async def test_concurrent_reject_and_expire_produce_one_terminal_state(
     assert final is not None
     assert final.status is loaded.status
     assert final.finished_at == decided_at
+
+
+async def test_save_granted_execution_success_applies(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    executed_at = _TOOL_STARTED_AT + timedelta(minutes=5)
+    resume_attempt_id: UUID
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        resume_attempt_id = claim.attempt.id
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        completed = tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=resume_attempt_id,
+            execution_started_at=executed_at,
+            finished_at=executed_at,
+            safe_output={
+                "escalation_id": str(_SECOND_TOOL_CALL_ID),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save_granted_execution_success(
+                tool_call=completed,
+            )
+            loaded = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert loaded is not None
+    assert loaded.status is AgentToolCallStatus.SUCCEEDED
+    assert loaded.executed_by_agent_run_attempt_id == (resume_attempt_id)
+    assert loaded.proposed_by_agent_run_attempt_id == (tool_call.proposed_by_agent_run_attempt_id)
+    assert loaded.latency_ms == 0
+    assert loaded.error_code is None
+    assert dict(loaded.safe_output or {})["status"] == "escalated"
+    assert loaded.execution_started_at == executed_at
+    assert loaded.finished_at == executed_at
+
+
+async def test_save_granted_execution_success_rejects_repeat(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    executed_at = _TOOL_STARTED_AT + timedelta(minutes=5)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+        completed = tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=claim.attempt.id,
+            execution_started_at=executed_at,
+            finished_at=executed_at,
+            safe_output={
+                "escalation_id": str(_SECOND_TOOL_CALL_ID),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save_granted_execution_success(
+                tool_call=completed,
+            )
+
+        with pytest.raises(RuntimeError, match="pending_approval"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_granted_execution_success(
+                    tool_call=completed,
+                )
+
+
+async def test_save_granted_execution_success_is_workspace_scoped(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    executed_at = _TOOL_STARTED_AT + timedelta(minutes=5)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+        completed = tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=claim.attempt.id,
+            execution_started_at=executed_at,
+            finished_at=executed_at,
+            safe_output={
+                "escalation_id": str(_SECOND_TOOL_CALL_ID),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+        wrong_workspace = replace(
+            completed,
+            workspace_id=UUID("10000000-0000-4000-8000-000000000099"),
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        with pytest.raises(RuntimeError, match="does not exist"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_granted_execution_success(
+                    tool_call=wrong_workspace,
+                )
+
+
+async def test_save_granted_execution_success_rejects_immutable_mismatch(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    executed_at = _TOOL_STARTED_AT + timedelta(minutes=5)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+        completed = tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=claim.attempt.id,
+            execution_started_at=executed_at,
+            finished_at=executed_at,
+            safe_output={
+                "escalation_id": str(_SECOND_TOOL_CALL_ID),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+        mismatched = replace(
+            completed,
+            input_fingerprint="c" * 64,
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        with pytest.raises(RuntimeError, match="proposal identity"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_granted_execution_success(
+                    tool_call=mismatched,
+                )
+
+
+async def test_save_granted_execution_success_caller_owns_commit(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    executed_at = _TOOL_STARTED_AT + timedelta(minutes=5)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+        completed = tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=claim.attempt.id,
+            execution_started_at=executed_at,
+            finished_at=executed_at,
+            safe_output={
+                "escalation_id": str(_SECOND_TOOL_CALL_ID),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        with pytest.raises(RuntimeError, match="force rollback"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_granted_execution_success(
+                    tool_call=completed,
+                )
+                raise RuntimeError("force rollback")
+
+        async with SqlAlchemyTransactionManager(session).transaction():
+            loaded = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert loaded is not None
+    assert loaded.status is AgentToolCallStatus.PENDING_APPROVAL
+    assert loaded.executed_by_agent_run_attempt_id is None

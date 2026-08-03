@@ -369,6 +369,127 @@ def test_expire_from_non_pending_is_rejected() -> None:
         terminal.expire_for_approval(decided_at=DECIDED_AT)
 
 
+def test_granted_execution_success_transition() -> None:
+    pending = create_pending_proposal()
+    resume_attempt_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    started_at = DECIDED_AT
+    finished_at = DECIDED_AT + timedelta(milliseconds=40)
+    safe_output: dict[str, JsonValue] = {
+        "escalation_id": str(UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")),
+        "ticket_id": str(TICKET_ID),
+        "target_queue": "engineering_support",
+        "status": "escalated",
+    }
+
+    completed = pending.complete_granted_execution_success(
+        executed_by_agent_run_attempt_id=resume_attempt_id,
+        execution_started_at=started_at,
+        finished_at=finished_at,
+        safe_output=safe_output,
+    )
+
+    assert completed.status is AgentToolCallStatus.SUCCEEDED
+    assert completed.executed_by_agent_run_attempt_id == (resume_attempt_id)
+    assert completed.proposed_by_agent_run_attempt_id == ATTEMPT_ID
+    assert resume_attempt_id != ATTEMPT_ID
+    assert completed.execution_started_at == started_at
+    assert completed.finished_at == finished_at
+    assert completed.latency_ms == 40
+    assert completed.error_code is None
+    assert dict(completed.safe_output or {}) == safe_output
+    assert completed.id == pending.id
+    assert completed.workspace_id == pending.workspace_id
+    assert completed.ticket_id == pending.ticket_id
+    assert completed.agent_run_id == pending.agent_run_id
+    assert completed.sequence == pending.sequence
+    assert completed.provider_tool_call_id == (pending.provider_tool_call_id)
+    assert completed.tool_name == pending.tool_name
+    assert completed.tool_version == pending.tool_version
+    assert completed.safety_level is pending.safety_level
+    assert completed.input_fingerprint == pending.input_fingerprint
+    assert completed.safe_input == pending.safe_input
+    assert completed.proposed_at == pending.proposed_at
+    assert isinstance(completed.safe_output, MappingProxyType)
+
+
+def test_granted_execution_success_requires_utc_timestamps() -> None:
+    pending = create_pending_proposal()
+
+    with pytest.raises(
+        ValueError,
+        match="execution_started_at must be a UTC-aware timestamp",
+    ):
+        pending.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=ATTEMPT_ID,
+            execution_started_at=DECIDED_AT.replace(tzinfo=None),
+            finished_at=DECIDED_AT,
+            safe_output={"status": "escalated"},
+        )
+
+
+def test_granted_execution_success_rejects_finished_before_started() -> None:
+    pending = create_pending_proposal()
+
+    with pytest.raises(
+        ValueError,
+        match="finished_at must not precede execution_started_at",
+    ):
+        pending.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=ATTEMPT_ID,
+            execution_started_at=DECIDED_AT,
+            finished_at=DECIDED_AT - timedelta(milliseconds=1),
+            safe_output={
+                "escalation_id": str(TOOL_CALL_ID),
+                "ticket_id": str(TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        AgentToolCallStatus.REJECTED,
+        AgentToolCallStatus.EXPIRED,
+        AgentToolCallStatus.SUCCEEDED,
+        AgentToolCallStatus.FAILED,
+        AgentToolCallStatus.TIMED_OUT,
+    ],
+)
+def test_granted_execution_success_rejects_non_pending(
+    status: AgentToolCallStatus,
+) -> None:
+    if status in {
+        AgentToolCallStatus.REJECTED,
+        AgentToolCallStatus.EXPIRED,
+    }:
+        pending = create_pending_proposal()
+        tool_call = (
+            pending.reject_for_approval(decided_at=DECIDED_AT)
+            if status is AgentToolCallStatus.REJECTED
+            else pending.expire_for_approval(decided_at=DECIDED_AT)
+        )
+    else:
+        tool_call = create_terminal_tool_call(status=status)
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending approval proposals can complete",
+    ):
+        tool_call.complete_granted_execution_success(
+            executed_by_agent_run_attempt_id=ATTEMPT_ID,
+            execution_started_at=DECIDED_AT,
+            finished_at=DECIDED_AT,
+            safe_output={
+                "escalation_id": str(TOOL_CALL_ID),
+                "ticket_id": str(TICKET_ID),
+                "target_queue": "engineering_support",
+                "status": "escalated",
+            },
+        )
+
+
 def test_rejects_execution_started_before_proposed() -> None:
     with pytest.raises(
         ValueError,

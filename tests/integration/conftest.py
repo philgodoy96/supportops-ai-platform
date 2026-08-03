@@ -6,6 +6,8 @@ import asyncio
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -19,12 +21,73 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from supportops.agent_tools.application.persistence import (
+    AgentToolCallPersistenceResult,
+    PersistAgentToolCallCommand,
+)
+from supportops.agent_tools.application.sensitive_execution import (
+    ExecuteApprovedTicketEscalation,
+)
+from supportops.agent_tools.domain.audit import AgentToolCall
+from supportops.agent_tools.infrastructure.grant_repository import (
+    SqlAlchemySensitiveExecutionGrantRepository,
+)
+from supportops.agent_tools.infrastructure.repository import (
+    SqlAlchemyAgentToolCallExecutionRepository,
+)
+from supportops.ai.gateway.errors import LLMErrorCode
+from supportops.ai.gateway.results import LLMInvocationStatus
+from supportops.ai.pricing.catalog import PRICING_CATALOG_VERSION
+from supportops.ai.schemas.ticket_classification import (
+    TICKET_CLASSIFICATION_SCHEMA_VERSION,
+)
 from supportops.api.application import create_application
 from supportops.core.settings import Settings
 from supportops.infrastructure.postgresql import (
     create_postgresql_engine,
     create_postgresql_session_factory,
     dispose_postgresql_engine,
+)
+from supportops.infrastructure.postgresql.transaction import (
+    SqlAlchemyTransactionManager,
+)
+from supportops.modules.agent_runs.application.execution import (
+    AgentRunExecutionContext,
+)
+from supportops.modules.agent_runs.domain.claiming import (
+    AgentRunClaim,
+    ClaimAgentRunCommand,
+)
+from supportops.modules.agent_runs.domain.models import (
+    DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+    AgentRun,
+)
+from supportops.modules.agent_runs.infrastructure.repository import (
+    SqlAlchemyAgentRunRepository,
+)
+from supportops.modules.approvals.domain.models import ApprovalRequest
+from supportops.modules.approvals.domain.repositories import (
+    ApprovalRequestPersistenceResult,
+)
+from supportops.modules.approvals.infrastructure.repository import (
+    SqlAlchemyApprovalRequestRepository,
+)
+from supportops.modules.ticket_classifications.domain.models import (
+    LLMInvocation,
+)
+from supportops.modules.ticket_classifications.infrastructure.models import (
+    LLMInvocationRecord,
+)
+from supportops.modules.tickets.domain.models import Ticket
+from supportops.modules.tickets.infrastructure.escalation_repository import (
+    SqlAlchemyTicketEscalationRepository,
+)
+from supportops.modules.tickets.infrastructure.repository import (
+    SqlAlchemyTicketRepository,
+)
+from supportops.modules.workspaces.domain.models import Workspace
+from supportops.modules.workspaces.infrastructure.repository import (
+    SqlAlchemyWorkspaceRepository,
 )
 
 if sys.platform == "win32":
@@ -235,3 +298,329 @@ async def clean_business_tables(
         )
         await lock_connection.commit()
         await lock_connection.close()
+
+
+# --- Approved ticket-escalation execution fixtures ---
+
+_APPROVED_ESCALATION_WORKSPACE_ID = UUID(
+    "11000000-0000-4000-8000-000000000001",
+)
+_APPROVED_ESCALATION_TICKET_ID = UUID(
+    "21000000-0000-4000-8000-000000000002",
+)
+_APPROVED_ESCALATION_AGENT_RUN_ID = UUID(
+    "31000000-0000-4000-8000-000000000003",
+)
+_APPROVED_ESCALATION_LEASE_TOKEN = UUID(
+    "41000000-0000-4000-8000-000000000004",
+)
+_APPROVED_ESCALATION_EXECUTION_REQUEST_ID = UUID(
+    "51000000-0000-4000-8000-000000000005",
+)
+_APPROVED_ESCALATION_TOOL_CALL_ID = UUID(
+    "61000000-0000-4000-8000-000000000006",
+)
+_APPROVED_ESCALATION_INVOCATION_ID = UUID(
+    "81000000-0000-4000-8000-000000000008",
+)
+_APPROVED_ESCALATION_APPROVAL_REQUEST_ID = UUID(
+    "91000000-0000-4000-8000-000000000009",
+)
+_APPROVED_ESCALATION_DECISION_REQUEST_ID = UUID(
+    "b1000000-0000-4000-8000-00000000000b",
+)
+_APPROVED_ESCALATION_DECISION_CORRELATION_ID = UUID(
+    "c1000000-0000-4000-8000-00000000000c",
+)
+
+_APPROVED_ESCALATION_CREATED_AT = datetime(
+    2026,
+    8,
+    3,
+    19,
+    0,
+    tzinfo=UTC,
+)
+_APPROVED_ESCALATION_CLAIMED_AT = _APPROVED_ESCALATION_CREATED_AT + timedelta(
+    minutes=1,
+)
+_APPROVED_ESCALATION_LEASE_EXPIRES_AT = _APPROVED_ESCALATION_CLAIMED_AT + timedelta(
+    seconds=45,
+)
+_APPROVED_ESCALATION_TOOL_PROPOSED_AT = _APPROVED_ESCALATION_CLAIMED_AT + timedelta(
+    seconds=1,
+)
+_APPROVED_ESCALATION_INVOCATION_AT = _APPROVED_ESCALATION_CLAIMED_AT + timedelta(
+    seconds=2,
+)
+_APPROVED_ESCALATION_APPROVAL_AT = _APPROVED_ESCALATION_CLAIMED_AT + timedelta(
+    seconds=3,
+)
+_APPROVED_ESCALATION_EXPIRES_AT = _APPROVED_ESCALATION_APPROVAL_AT + timedelta(
+    hours=24,
+)
+_APPROVED_ESCALATION_DECIDED_AT = _APPROVED_ESCALATION_APPROVAL_AT + timedelta(
+    minutes=5,
+)
+
+
+async def _seed_approved_ticket_escalation(
+    session: AsyncSession,
+) -> tuple[AgentRunClaim, Ticket, AgentToolCall, ApprovalRequest]:
+    workspace = Workspace(
+        id=_APPROVED_ESCALATION_WORKSPACE_ID,
+        name="Approved Escalation Workspace",
+        slug="approved-escalation-workspace",
+        created_at=_APPROVED_ESCALATION_CREATED_AT,
+        updated_at=_APPROVED_ESCALATION_CREATED_AT,
+    )
+    ticket = Ticket.create(
+        ticket_id=_APPROVED_ESCALATION_TICKET_ID,
+        workspace_id=_APPROVED_ESCALATION_WORKSPACE_ID,
+        subject="Needs approved escalation",
+        description=("The customer requested a policy-sensitive escalation."),
+        external_reference=None,
+        ingestion_request_id=UUID("81100000-0000-4000-8000-000000000008"),
+        correlation_id=UUID("82100000-0000-4000-8000-000000000009"),
+        now=_APPROVED_ESCALATION_CREATED_AT,
+    )
+    agent_run = AgentRun.create_initial(
+        agent_run_id=_APPROVED_ESCALATION_AGENT_RUN_ID,
+        workspace_id=_APPROVED_ESCALATION_WORKSPACE_ID,
+        ticket_id=_APPROVED_ESCALATION_TICKET_ID,
+        ingestion_request_id=ticket.ingestion_request_id,
+        correlation_id=ticket.correlation_id,
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+        max_retryable_failures=3,
+        now=_APPROVED_ESCALATION_CREATED_AT,
+    )
+    transaction_manager = SqlAlchemyTransactionManager(session)
+
+    async with transaction_manager.transaction():
+        await SqlAlchemyWorkspaceRepository(session).add(workspace)
+        await SqlAlchemyTicketRepository(session).add(ticket)
+        await SqlAlchemyAgentRunRepository(session).add(agent_run)
+
+    async with transaction_manager.transaction():
+        claim = await SqlAlchemyAgentRunRepository(session).claim_next_available(
+            ClaimAgentRunCommand(
+                worker_id="approved-escalation-worker-1",
+                lease_token=_APPROVED_ESCALATION_LEASE_TOKEN,
+                execution_request_id=(_APPROVED_ESCALATION_EXECUTION_REQUEST_ID),
+                claimed_at=_APPROVED_ESCALATION_CLAIMED_AT,
+                lease_expires_at=(_APPROVED_ESCALATION_LEASE_EXPIRES_AT),
+            )
+        )
+
+    assert claim is not None
+
+    tool_call = AgentToolCall.propose_for_approval(
+        tool_call_id=_APPROVED_ESCALATION_TOOL_CALL_ID,
+        workspace_id=_APPROVED_ESCALATION_WORKSPACE_ID,
+        ticket_id=_APPROVED_ESCALATION_TICKET_ID,
+        agent_run_id=claim.agent_run.id,
+        proposed_by_agent_run_attempt_id=claim.attempt.id,
+        sequence=1,
+        provider_tool_call_id="approved-escalation-call-1",
+        tool_name="escalate_ticket",
+        tool_version=1,
+        input_fingerprint="b" * 64,
+        safe_input={
+            "target_queue": "engineering_support",
+            "reason": "A product defect requires review.",
+        },
+        proposed_at=_APPROVED_ESCALATION_TOOL_PROPOSED_AT,
+    )
+    invocation = LLMInvocation.create(
+        invocation_id=_APPROVED_ESCALATION_INVOCATION_ID,
+        workspace_id=_APPROVED_ESCALATION_WORKSPACE_ID,
+        ticket_id=_APPROVED_ESCALATION_TICKET_ID,
+        agent_run_id=claim.agent_run.id,
+        agent_run_attempt_id=claim.attempt.id,
+        invocation_sequence=1,
+        status=LLMInvocationStatus.TIMED_OUT,
+        provider="mock",
+        model="mock-support-v1",
+        provider_request_id="mock-request-1",
+        prompt_id="controlled-support",
+        prompt_version=1,
+        prompt_content_hash="d" * 64,
+        schema_version=TICKET_CLASSIFICATION_SCHEMA_VERSION,
+        input_tokens=None,
+        cached_input_tokens=None,
+        output_tokens=None,
+        reasoning_tokens=None,
+        total_tokens=None,
+        pricing_catalog_version=PRICING_CATALOG_VERSION,
+        pricing_found=True,
+        estimated_input_cost_usd=None,
+        estimated_cached_input_cost_usd=None,
+        estimated_output_cost_usd=None,
+        estimated_total_cost_usd=None,
+        latency_ms=12_000,
+        error_code=LLMErrorCode.TIMEOUT,
+        now=_APPROVED_ESCALATION_INVOCATION_AT,
+    )
+    pending = ApprovalRequest.create_pending(
+        tool_call=tool_call,
+        requested_by_llm_invocation_id=(_APPROVED_ESCALATION_INVOCATION_ID),
+        request_reason="Requires human review before escalation.",
+        expires_at=_APPROVED_ESCALATION_EXPIRES_AT,
+        approval_request_id=(_APPROVED_ESCALATION_APPROVAL_REQUEST_ID),
+        now=_APPROVED_ESCALATION_APPROVAL_AT,
+    )
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=_APPROVED_ESCALATION_DECISION_REQUEST_ID,
+        correlation_id=(_APPROVED_ESCALATION_DECISION_CORRELATION_ID),
+        decided_at=_APPROVED_ESCALATION_DECIDED_AT,
+    )
+
+    async with transaction_manager.transaction():
+        session.add(LLMInvocationRecord.from_domain(invocation))
+        await session.flush()
+        tool_result = await SqlAlchemyAgentToolCallExecutionRepository(
+            session,
+        ).persist_fenced(
+            PersistAgentToolCallCommand(
+                workspace_id=_APPROVED_ESCALATION_WORKSPACE_ID,
+                ticket_id=_APPROVED_ESCALATION_TICKET_ID,
+                agent_run_id=claim.agent_run.id,
+                agent_run_attempt_id=claim.attempt.id,
+                lease_token=_APPROVED_ESCALATION_LEASE_TOKEN,
+                persisted_at=_APPROVED_ESCALATION_APPROVAL_AT,
+                tool_call=tool_call,
+            )
+        )
+        assert tool_result is AgentToolCallPersistenceResult.APPLIED
+        approval_result = await SqlAlchemyApprovalRequestRepository(
+            session,
+        ).persist_pending(pending)
+        assert approval_result is ApprovalRequestPersistenceResult.APPLIED
+        await SqlAlchemyApprovalRequestRepository(session).save(approved)
+
+    return claim, ticket, tool_call, approved
+
+
+@pytest.fixture
+async def approved_ticket_escalation_seed(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> AsyncIterator[
+    tuple[
+        async_sessionmaker[AsyncSession],
+        AgentRunClaim,
+        Ticket,
+        AgentToolCall,
+        ApprovalRequest,
+    ]
+]:
+    """Seed one approved escalate_ticket proposal for execution tests."""
+
+    async with postgresql_session_factory() as session:
+        claim, ticket, tool_call, approval = await _seed_approved_ticket_escalation(
+            session,
+        )
+
+    yield (
+        postgresql_session_factory,
+        claim,
+        ticket,
+        tool_call,
+        approval,
+    )
+
+
+@pytest.fixture
+def approved_ticket_escalation_tool_call(
+    approved_ticket_escalation_seed: tuple[
+        async_sessionmaker[AsyncSession],
+        AgentRunClaim,
+        Ticket,
+        AgentToolCall,
+        ApprovalRequest,
+    ],
+) -> AgentToolCall:
+    """Return the pending approved-path AgentToolCall."""
+
+    return approved_ticket_escalation_seed[3]
+
+
+@pytest.fixture
+def approved_ticket_escalation_approval(
+    approved_ticket_escalation_seed: tuple[
+        async_sessionmaker[AsyncSession],
+        AgentRunClaim,
+        Ticket,
+        AgentToolCall,
+        ApprovalRequest,
+    ],
+) -> ApprovalRequest:
+    """Return the durable approved ApprovalRequest."""
+
+    return approved_ticket_escalation_seed[4]
+
+
+@pytest.fixture
+def approved_ticket_escalation_context(
+    approved_ticket_escalation_seed: tuple[
+        async_sessionmaker[AsyncSession],
+        AgentRunClaim,
+        Ticket,
+        AgentToolCall,
+        ApprovalRequest,
+    ],
+) -> AgentRunExecutionContext:
+    """Return resume AgentRun execution context for granted escalation."""
+
+    _factory, claim, ticket, _tool_call, _approval = approved_ticket_escalation_seed
+    return AgentRunExecutionContext(
+        agent_run=claim.agent_run,
+        attempt=claim.attempt,
+        ticket=ticket,
+    )
+
+
+@pytest.fixture
+def approved_ticket_escalation_executor(
+    approved_ticket_escalation_seed: tuple[
+        async_sessionmaker[AsyncSession],
+        AgentRunClaim,
+        Ticket,
+        AgentToolCall,
+        ApprovalRequest,
+    ],
+) -> ExecuteApprovedTicketEscalation:
+    """Compose session-scoped granted escalation executor."""
+
+    session_factory, *_rest = approved_ticket_escalation_seed
+
+    class _SessionScopedExecutor:
+        def __init__(self) -> None:
+            self._session_factory = session_factory
+
+        async def execute(
+            self,
+            *,
+            context: AgentRunExecutionContext,
+            approval_request_id: UUID,
+            agent_tool_call_id: UUID,
+        ) -> object:
+            async with self._session_factory() as session:
+                executor = ExecuteApprovedTicketEscalation(
+                    transaction_manager=SqlAlchemyTransactionManager(
+                        session,
+                    ),
+                    approval_request_repository=(SqlAlchemyApprovalRequestRepository(session)),
+                    tool_call_repository=(SqlAlchemyAgentToolCallExecutionRepository(session)),
+                    grant_repository=(SqlAlchemySensitiveExecutionGrantRepository(session)),
+                    escalation_repository=(SqlAlchemyTicketEscalationRepository(session)),
+                )
+                return await executor.execute(
+                    context=context,
+                    approval_request_id=approval_request_id,
+                    agent_tool_call_id=agent_tool_call_id,
+                )
+
+    return _SessionScopedExecutor()  # type: ignore[return-value]

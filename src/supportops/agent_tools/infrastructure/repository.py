@@ -179,6 +179,83 @@ class SqlAlchemyAgentToolCallExecutionRepository(AgentToolCallExecutionRepositor
 
         await self._session.flush()
 
+    async def save_granted_execution_success(
+        self,
+        *,
+        tool_call: AgentToolCall,
+    ) -> None:
+        """Persist one granted sensitive execution success under row lock."""
+
+        if tool_call.status is not AgentToolCallStatus.SUCCEEDED:
+            raise RuntimeError(
+                "Granted execution success requires a succeeded tool call.",
+            )
+
+        if tool_call.executed_by_agent_run_attempt_id is None:
+            raise RuntimeError(
+                "Granted execution success requires executed_by_agent_run_attempt_id.",
+            )
+
+        if tool_call.safety_level is not ToolSafetyLevel.SENSITIVE_WRITE:
+            raise RuntimeError(
+                "Granted execution success requires sensitive_write.",
+            )
+
+        statement = (
+            select(AgentToolCallRecord)
+            .where(
+                AgentToolCallRecord.workspace_id == tool_call.workspace_id,
+                AgentToolCallRecord.id == tool_call.id,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            raise RuntimeError(
+                "The AgentToolCall does not exist in this workspace.",
+            )
+
+        if record.status != AgentToolCallStatus.PENDING_APPROVAL.value:
+            raise RuntimeError(
+                "Only pending_approval AgentToolCall rows can receive granted execution success.",
+            )
+
+        existing = record.to_domain()
+        if (
+            existing.id != tool_call.id
+            or existing.workspace_id != tool_call.workspace_id
+            or existing.ticket_id != tool_call.ticket_id
+            or existing.agent_run_id != tool_call.agent_run_id
+            or existing.proposed_by_agent_run_attempt_id
+            != tool_call.proposed_by_agent_run_attempt_id
+            or existing.sequence != tool_call.sequence
+            or existing.provider_tool_call_id != tool_call.provider_tool_call_id
+            or existing.tool_name != tool_call.tool_name
+            or existing.tool_version != tool_call.tool_version
+            or existing.safety_level is not tool_call.safety_level
+            or existing.input_fingerprint != tool_call.input_fingerprint
+            or dict(existing.safe_input) != dict(tool_call.safe_input)
+            or existing.proposed_at != tool_call.proposed_at
+        ):
+            raise RuntimeError(
+                "The AgentToolCall proposal identity does not match the "
+                "persisted immutable fields.",
+            )
+
+        record.status = tool_call.status.value
+        record.executed_by_agent_run_attempt_id = tool_call.executed_by_agent_run_attempt_id
+        record.safe_output = (
+            dict(tool_call.safe_output) if tool_call.safe_output is not None else None
+        )
+        record.latency_ms = tool_call.latency_ms
+        record.error_code = tool_call.error_code
+        record.execution_started_at = tool_call.execution_started_at
+        record.finished_at = tool_call.finished_at
+
+        await self._session.flush()
+
     async def _resolve_sensitive_proposal_replay(
         self,
         tool_call: AgentToolCall,
