@@ -328,13 +328,14 @@ these values for identity, polling, claiming, execution timeout, retry
 scheduling, and cooperative shutdown. Ticket intake copies
 `SUPPORTOPS_WORKER_MAX_ATTEMPTS` into newly scheduled `AgentRun` records.
 
-The worker always composes a versioned executor registry containing three exact
-workflow versions: `deterministic-baseline-v1`, `ticket-classification-v1`, and
-`controlled-support-v1`. Executor selection is not deployment configuration.
-Each AgentRun's stored workflow version controls dispatch. The local default
-configured version is `controlled-support-v1`. The worker may compose embedding
-and Qdrant resources for controlled workflow knowledge search in addition to its
-LLM and checkpoint runtimes.
+The worker always composes a versioned executor registry containing four exact
+workflow versions: `deterministic-baseline-v1`, `ticket-classification-v1`,
+`controlled-support-v1`, and `human-approved-support-v1`. Executor selection is
+not deployment configuration. Each AgentRun's stored workflow version controls
+dispatch. The local default configured version is `controlled-support-v1`. The
+worker may compose embedding and Qdrant resources for controlled and
+human-approved workflow knowledge search in addition to its LLM and checkpoint
+runtimes.
 
 Cross-field invariants:
 
@@ -724,6 +725,105 @@ Example safe value:
 60.0
 ```
 
+## Human approval configuration
+
+Human-approved workflow interrupt and expiration reuse existing shared approval
+settings. No additional secret is required for the durable approval boundary.
+Approval decision and inspection HTTP APIs are introduced in a separate
+operational API slice and are not configured here.
+
+### `SUPPORTOPS_APPROVAL_TTL_SECONDS`
+
+TTL applied when a durable pending approval is created for a sensitive proposal.
+
+Settings field:
+
+```text
+approval_ttl_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+86400.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 2592000
+```
+
+Applies to:
+
+```text
+worker sensitive proposal persistence
+```
+
+Purpose:
+
+- bounds how long a pending approval remains eligible before expiration;
+- is copied into `ApprovalRequest.expires_at` at proposal time;
+- is reused by the human-approved workflow without a separate secret.
+
+Example safe value:
+
+```text
+86400.0
+```
+
+### `SUPPORTOPS_APPROVAL_EXPIRATION_BATCH_SIZE`
+
+Maximum number of overdue pending approvals processed in one worker-cycle
+expiration pass.
+
+Settings field:
+
+```text
+approval_expiration_batch_size
+```
+
+Type:
+
+```text
+integer
+```
+
+Default:
+
+```text
+100
+```
+
+Accepted range:
+
+```text
+1 through 1000
+```
+
+Applies to:
+
+```text
+worker cycle approval expiration
+```
+
+Purpose:
+
+- bounds expiration work per cycle after lease recovery and before claim;
+- keeps expiration batches short and independent from claim transactions.
+
+Example safe value:
+
+```text
+100
+```
+
 ## AI runtime configuration
 
 LLM provider and embedding provider selections are independent. Local
@@ -770,6 +870,7 @@ Accepted values:
 deterministic-baseline-v1
 ticket-classification-v1
 controlled-support-v1
+human-approved-support-v1
 ```
 
 Applies to:
@@ -783,11 +884,13 @@ Purpose:
 - assigns the workflow version persisted on newly created AgentRuns;
 - keeps workflow version independent from provider, model, prompt version, and
   schema version;
-- allows deterministic and classification historical runs to remain supported;
+- allows deterministic, classification, and human-approved historical or
+  explicit runs to remain supported;
 - requires the worker registry to contain the stored version for dispatch.
 
 This setting does not select provider or model. Historical runs retain their
-stored versions after configuration changes.
+stored versions after configuration changes. The local default remains
+`controlled-support-v1`.
 
 Example safe value:
 
@@ -1622,6 +1725,8 @@ Examples of invalid configuration include:
 - worker maximum attempts outside the accepted range;
 - worker lease duration that does not exceed execution timeout by at least 15 seconds;
 - worker retry maximum smaller than retry base;
+- approval TTL outside the accepted range;
+- approval expiration batch size outside the accepted range;
 - non-positive pool timeout;
 - non-positive dependency health timeout;
 - unsupported environment value;

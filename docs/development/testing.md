@@ -577,6 +577,81 @@ calls are required. PostgreSQL and Qdrant are required for integration tests.
 Tests that create checkpoint threads clean their own checkpoint rows. Shared
 business cleanup does not delete framework checkpoint tables.
 
+## Human-approved support workflow
+
+Human-approved coverage validates durable interrupt and resume, grant-gated
+sensitive execution, immutable escalation, AgentRun waiting lifecycle, crash
+recovery, concurrency convergence, and historical controlled-support
+regressions. Approval decision and inspection HTTP APIs remain outside this
+suite and are introduced in a separate operational API slice.
+
+### Unit coverage
+
+Focused unit groups include:
+
+- human-approved identity, state, and routing;
+- safe interrupt payload validation;
+- resume planner taxonomy and fail-closed mismatch handling;
+- approval decision handling for approved, rejected, and expired outcomes;
+- sensitive proposal persistence before interrupt;
+- human-approved workflow resume across approved, rejected, expired, and pending paths;
+- grant-gated sensitive execution without external side effects;
+- AgentRun processor transitions into and out of `waiting_for_approval`.
+
+```powershell
+uv run pytest `
+  tests/unit/agent_graph/domain/test_human_approved_identity.py `
+  tests/unit/agent_graph/domain/test_human_approved_state.py `
+  tests/unit/agent_graph/domain/test_human_approved_routing.py `
+  tests/unit/agent_graph/domain/test_resume_planning.py `
+  tests/unit/agent_graph/application/test_approval_interrupt.py `
+  tests/unit/agent_graph/application/test_resume_planning.py `
+  tests/unit/agent_graph/application/test_approval_decision_handling.py `
+  tests/unit/agent_graph/application/test_sensitive_proposal.py `
+  tests/unit/agent_graph/application/test_human_approved_workflow_resume.py `
+  tests/unit/agent_graph/application/test_human_approved_recommendation.py `
+  tests/unit/agent_tools/application/test_sensitive_execution.py `
+  tests/unit/agent_tools/domain/test_grants.py `
+  tests/unit/modules/agent_runs/application/test_processor.py
+```
+
+### Integration coverage
+
+Integration tests require live PostgreSQL. They cover granted escalation
+execution, concurrent duplicate execution convergence, crash recovery after
+grant or escalation persistence, and durable approval repository behavior.
+
+```powershell
+uv run pytest -m integration `
+  tests/integration/agent_tools/application/test_granted_escalation.py `
+  tests/integration/agent_tools/infrastructure/test_grant_repository.py `
+  tests/integration/modules/approvals/infrastructure/test_repository.py
+```
+
+Historical controlled-support regression:
+
+```powershell
+uv run pytest `
+  tests/integration/application/test_controlled_support_workflow.py
+```
+
+### Migration head
+
+Current Alembic head for the human-approved escalation tables:
+
+```text
+b8d3f6a1c9e4
+```
+
+```powershell
+uv run alembic heads
+uv run alembic check
+```
+
+Default automated tests use mock providers and make no paid provider calls.
+External side-effect tools intentionally remain unavailable and are not
+exercised by the suite.
+
 ## Full test suite
 
 Run all tests:
@@ -967,7 +1042,9 @@ The current migration head creates the `workspaces`, `tickets`, `agent_runs`,
 `agent_run_attempts`, `llm_invocations`, `ticket_classifications`,
 `agent_tool_calls`, `support_recommendations`,
 `support_recommendation_citations`, `knowledge_documents`,
-`knowledge_document_versions`, and `knowledge_document_chunks` tables.
+`knowledge_document_versions`, `knowledge_document_chunks`,
+`approval_requests`, `sensitive_execution_grants`, and `ticket_escalations`
+tables.
 Framework-owned LangGraph checkpoint tables are created by checkpointer setup
 and are excluded by exact name from Alembic comparison.
 
@@ -1169,8 +1246,8 @@ Later implementation phases are expected to add tests for:
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
 - retrieval quality scoring and reranking;
-- write-capable tool authorization;
-- approval enforcement;
+- write-capable tool authorization beyond grant-gated internal escalation;
+- approval decision and inspection HTTP APIs;
 - prompt version 2 regression comparison;
 - scheduled evaluation and evaluation history persistence;
 - retrieval and generation evaluation beyond structured classification;

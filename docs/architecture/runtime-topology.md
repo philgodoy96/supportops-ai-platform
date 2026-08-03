@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, durable ticket classification, explicit knowledge indexing, semantic knowledge retrieval, and the controlled support workflow.
+This document describes the runtime topology of SupportOps AI Platform for the current foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, PostgreSQL worker, application-owned LLM Gateway, durable ticket classification, explicit knowledge indexing, semantic knowledge retrieval, the controlled support workflow, and the separately versioned human-approved support workflow.
 
 The topology is intentionally small. It provides the operational foundation required for reliable local development, testing, and controlled asynchronous processing without introducing premature distributed infrastructure.
 
-Controlled workflow behavior is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md).
+Controlled workflow behavior is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). Human-approved interrupt, resume, and grant-gated execution semantics are documented in [`human-approved-workflow.md`](human-approved-workflow.md).
 
 ## Current runtime components
 
@@ -104,8 +104,8 @@ The worker process owns:
 - building one immutable knowledge index profile;
 - creating one Qdrant knowledge vector store and search adapter;
 - resolving configured or generated worker identity;
-- composing a session-scoped executor registry with three registered workflow versions, plus classification, tool, and recommendation repositories per cycle;
-- running continuous recovery, claim, and processing cycles;
+- composing a session-scoped executor registry with four registered workflow versions, plus classification, tool, approval, grant, escalation, and recommendation repositories per cycle;
+- running continuous recovery, approval expiration, claim, and processing cycles;
 - emitting structured operational cycle logs;
 - cooperative SIGINT and SIGTERM shutdown;
 - closing the controlled runtime, closing the LLM runtime, and disposing the SQLAlchemy engine on exit.
@@ -146,11 +146,10 @@ Repository operations use request-scoped async sessions for business HTTP routes
 
 Each API request receives one async SQLAlchemy session. Route dependencies construct repositories and application services explicitly from that session. Command use cases, including `CreateTicketWithInitialRun`, commit through the application-owned transaction adapter. Semantic search constructs a request-scoped retrieval service over the same session while reusing the process-scoped embedding provider, Qdrant client, and immutable retrieval profile.
 
-PostgreSQL remains authoritative for retrieval content and active-version scope. Future phases may extend PostgreSQL ownership for:
+PostgreSQL remains authoritative for retrieval content and active-version scope. It also owns durable approval requests, sensitive execution grants, and immutable ticket escalations for the human-approved workflow. Future phases may extend PostgreSQL ownership for:
 
-- approvals;
-- audit records;
-- operational cost reporting.
+- operational cost reporting;
+- additional audit projections.
 
 ## Session and transaction lifetimes
 
@@ -224,18 +223,28 @@ Each worker cycle:
 
 1. opens one scoped session;
 2. attempts expired lease recovery;
-3. attempts to claim one available AgentRun;
-4. if no claim is available, reports an idle cycle and sleeps interruptibly;
-5. if a claim succeeds, processes the claimed run outside the claim transaction;
-6. emits a structured cycle completion log;
-7. closes the session.
+3. expires overdue pending approvals and requeues waiting AgentRuns;
+4. attempts to claim one available AgentRun;
+5. if no claim is available, reports an idle cycle and sleeps interruptibly;
+6. if a claim succeeds, processes the claimed run outside the claim transaction;
+7. emits a structured cycle completion log;
+8. closes the session.
 
 The worker processes at most one claimed run per cycle. It sleeps only after an idle cycle. Delivery semantics are at-least-once execution.
+
+Cycle ordering is fixed:
+
+```text
+lease recovery
+→ approval expiration
+→ claim
+```
 
 ```mermaid
 flowchart TD
     Start[Begin cycle with scoped session]
     Recover[Recover one expired running lease]
+    Expire[Expire overdue pending approvals]
     Claim[Claim one available AgentRun]
     Idle[Idle cycle]
     Process[Dispatch claimed run outside transactions]
@@ -244,7 +253,8 @@ flowchart TD
     Close[Close session]
 
     Start --> Recover
-    Recover --> Claim
+    Recover --> Expire
+    Expire --> Claim
     Claim -->|No eligible run| Idle
     Claim -->|Claim committed| Process
     Idle --> Log
@@ -287,12 +297,13 @@ A successful claim:
 
 The worker dispatches exact workflow name and version through the session-scoped executor registry. No version fallback and no provider fallback exist.
 
-The registry contains exactly three versions:
+The registry contains exactly four versions:
 
 ```text
 ticket-processing / deterministic-baseline-v1
 ticket-processing / ticket-classification-v1
 ticket-processing / controlled-support-v1
+ticket-processing / human-approved-support-v1
 ```
 
 The persisted initial workflow contract is:
@@ -303,7 +314,7 @@ workflow_version = configured value
 trigger_key = initial-ticket-processing
 ```
 
-The local default configured value is `controlled-support-v1`. The classification workflow and the deterministic baseline remain supported for historical or explicitly scheduled runs; the deterministic baseline performs no external I/O, LLM call, retrieval, or ticket classification.
+The local default configured value is `controlled-support-v1`. The human-approved workflow is versioned separately and may be scheduled explicitly. The classification workflow and the deterministic baseline remain supported for historical or explicitly scheduled runs; the deterministic baseline performs no external I/O, LLM call, retrieval, or ticket classification.
 
 After the claim transaction commits:
 
@@ -320,6 +331,32 @@ After the claim transaction commits:
 A controlled run additionally executes the compiled LangGraph graph with the process-scoped checkpointer. The graph ensures the durable classification, recovers committed tool outcomes before requesting another decision, requests bounded decisions, executes validated read-only tools outside transactions, persists tool audits under lease fencing, drafts the recommendation, and persists the recommendation and citations atomically. An attempt retry may resume the same graph thread instead of repeating completed nodes. The graph never transitions the AgentRun; the processor still owns the fenced completion transaction, and success requires a persisted recommendation identity in validated graph state.
 
 Unknown workflow or version values are terminal.
+
+## Human-approved support runtime sequence
+
+When an AgentRun is scheduled as `ticket-processing` / `human-approved-support-v1`, the runtime sequence is:
+
+1. the worker claims the AgentRun;
+2. the graph persists the sensitive proposal as `AgentToolCall.pending_approval` and a durable `ApprovalRequest`;
+3. the graph interrupts after those records and checkpoint identifiers are durable;
+4. the processor transitions the AgentRun to `waiting_for_approval` and closes the attempt as `awaiting_approval`;
+5. an approval decision or expiration service requeues the AgentRun to `queued`;
+6. the worker claims a new attempt;
+7. the resume planner validates the LangGraph checkpoint against PostgreSQL ownership and proposal state;
+8. the graph resumes on the same thread identity;
+9. on the approved path, sensitive execution creates a `SensitiveExecutionGrant` and immutable `TicketEscalation` inside one short application transaction;
+10. the graph persists the grounded recommendation and the processor completes the AgentRun.
+
+Rejected and expired decisions produce no grant, no escalation, and no sensitive execution. Pending approvals cannot resume execution.
+
+## Transaction boundaries
+
+The runtime keeps two durability stores distinct:
+
+- the checkpoint store uses LangGraph PostgreSQL infrastructure through the worker checkpoint pool;
+- business state uses application-owned SQLAlchemy transactions for AgentRun lifecycle, approvals, tool audits, grants, escalations, and recommendations.
+
+No application transaction spans an LLM call and sensitive execution. No application lock spans checkpoint I/O. Approval decision handling requeues the waiting AgentRun; it does not execute the sensitive action. Granted sensitive execution uses one short transaction that locks the approval and tool-call rows, validates ownership and proposal identity, persists or reuses the grant and escalation, marks the tool call succeeded, and commits.
 
 ## Fenced completion transaction
 
