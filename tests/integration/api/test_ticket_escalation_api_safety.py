@@ -1,12 +1,15 @@
-"""Integration tests for ticket escalation inspection."""
+"""Integration coverage for ticket escalation API safety boundaries."""
+
+from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from supportops.agent_tools.application.grant_persistence import (
@@ -20,6 +23,9 @@ from supportops.agent_tools.domain.audit import AgentToolCall
 from supportops.agent_tools.domain.grants import SensitiveExecutionGrant
 from supportops.agent_tools.infrastructure.grant_repository import (
     SqlAlchemySensitiveExecutionGrantRepository,
+)
+from supportops.agent_tools.infrastructure.models import (
+    AgentToolCallRecord,
 )
 from supportops.agent_tools.infrastructure.repository import (
     SqlAlchemyAgentToolCallExecutionRepository,
@@ -43,12 +49,18 @@ from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     AgentRun,
 )
+from supportops.modules.agent_runs.infrastructure.models import (
+    AgentRunRecord,
+)
 from supportops.modules.agent_runs.infrastructure.repository import (
     SqlAlchemyAgentRunRepository,
 )
 from supportops.modules.approvals.domain.models import ApprovalRequest
 from supportops.modules.approvals.domain.repositories import (
     ApprovalRequestPersistenceResult,
+)
+from supportops.modules.approvals.infrastructure.models import (
+    ApprovalRequestRecord,
 )
 from supportops.modules.approvals.infrastructure.repository import (
     SqlAlchemyApprovalRequestRepository,
@@ -64,9 +76,13 @@ from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationPersistenceResult,
 )
 from supportops.modules.tickets.domain.models import Ticket
+from supportops.modules.tickets.infrastructure.escalation_models import (
+    TicketEscalationRecord,
+)
 from supportops.modules.tickets.infrastructure.escalation_repository import (
     SqlAlchemyTicketEscalationRepository,
 )
+from supportops.modules.tickets.infrastructure.models import TicketRecord
 from supportops.modules.tickets.infrastructure.repository import (
     SqlAlchemyTicketRepository,
 )
@@ -75,43 +91,53 @@ from supportops.modules.workspaces.infrastructure.repository import (
     SqlAlchemyWorkspaceRepository,
 )
 
-_WORKSPACE_ID = UUID("12000000-0000-4000-8000-000000000021")
-_FOREIGN_WORKSPACE_ID = UUID("12000000-0000-4000-8000-000000000091")
-_TICKET_ID = UUID("22000000-0000-4000-8000-000000000022")
-_OTHER_TICKET_ID = UUID("22000000-0000-4000-8000-000000000032")
-_FOREIGN_TICKET_ID = UUID("22000000-0000-4000-8000-000000000092")
-_AGENT_RUN_ID = UUID("32000000-0000-4000-8000-000000000023")
-_OTHER_AGENT_RUN_ID = UUID("32000000-0000-4000-8000-000000000033")
-_FOREIGN_AGENT_RUN_ID = UUID("32000000-0000-4000-8000-000000000093")
-_LEASE_TOKEN = UUID("42000000-0000-4000-8000-000000000024")
-_OTHER_LEASE_TOKEN = UUID("42000000-0000-4000-8000-000000000034")
-_FOREIGN_LEASE_TOKEN = UUID("42000000-0000-4000-8000-000000000094")
-_EXECUTION_REQUEST_ID = UUID("52000000-0000-4000-8000-000000000025")
-_OTHER_EXECUTION_REQUEST_ID = UUID("52000000-0000-4000-8000-000000000035")
-_FOREIGN_EXECUTION_REQUEST_ID = UUID("52000000-0000-4000-8000-000000000095")
-_TOOL_CALL_ID = UUID("62000000-0000-4000-8000-000000000026")
-_OTHER_TOOL_CALL_ID = UUID("62000000-0000-4000-8000-000000000036")
-_FOREIGN_TOOL_CALL_ID = UUID("62000000-0000-4000-8000-000000000096")
-_INVOCATION_ID = UUID("82000000-0000-4000-8000-000000000028")
-_OTHER_INVOCATION_ID = UUID("82000000-0000-4000-8000-000000000038")
-_FOREIGN_INVOCATION_ID = UUID("82000000-0000-4000-8000-000000000098")
-_APPROVAL_REQUEST_ID = UUID("92000000-0000-4000-8000-000000000029")
-_OTHER_APPROVAL_REQUEST_ID = UUID("92000000-0000-4000-8000-000000000039")
-_FOREIGN_APPROVAL_REQUEST_ID = UUID("92000000-0000-4000-8000-000000000099")
-_GRANT_ID = UUID("a2000000-0000-4000-8000-00000000002a")
-_OTHER_GRANT_ID = UUID("a2000000-0000-4000-8000-00000000003a")
-_FOREIGN_GRANT_ID = UUID("a2000000-0000-4000-8000-00000000009a")
-_ESCALATION_ID = UUID("d2000000-0000-4000-8000-00000000002d")
-_OTHER_ESCALATION_ID = UUID("d2000000-0000-4000-8000-00000000003d")
-_FOREIGN_ESCALATION_ID = UUID("d2000000-0000-4000-8000-00000000009d")
-_DECISION_REQUEST_ID = UUID("b2000000-0000-4000-8000-00000000002b")
-_OTHER_DECISION_REQUEST_ID = UUID("b2000000-0000-4000-8000-00000000003b")
-_FOREIGN_DECISION_REQUEST_ID = UUID("b2000000-0000-4000-8000-00000000009b")
-_DECISION_CORRELATION_ID = UUID("c2000000-0000-4000-8000-00000000002c")
-_OTHER_DECISION_CORRELATION_ID = UUID("c2000000-0000-4000-8000-00000000003c")
-_FOREIGN_DECISION_CORRELATION_ID = UUID("c2000000-0000-4000-8000-00000000009c")
+_WORKSPACE_ID = UUID("14000000-0000-4000-8000-000000000041")
+_FOREIGN_WORKSPACE_ID = UUID("14000000-0000-4000-8000-000000000091")
+_TICKET_ID = UUID("24000000-0000-4000-8000-000000000042")
+_OTHER_TICKET_ID = UUID("24000000-0000-4000-8000-000000000052")
+_FOREIGN_TICKET_ID = UUID("24000000-0000-4000-8000-000000000092")
+_AGENT_RUN_ID = UUID("34000000-0000-4000-8000-000000000043")
+_OTHER_AGENT_RUN_ID = UUID("34000000-0000-4000-8000-000000000053")
+_FOREIGN_AGENT_RUN_ID = UUID("34000000-0000-4000-8000-000000000093")
+_LEASE_TOKEN = UUID("44000000-0000-4000-8000-000000000044")
+_OTHER_LEASE_TOKEN = UUID("44000000-0000-4000-8000-000000000054")
+_FOREIGN_LEASE_TOKEN = UUID("44000000-0000-4000-8000-000000000094")
+_EXECUTION_REQUEST_ID = UUID("54000000-0000-4000-8000-000000000045")
+_OTHER_EXECUTION_REQUEST_ID = UUID("54000000-0000-4000-8000-000000000055")
+_FOREIGN_EXECUTION_REQUEST_ID = UUID(
+    "54000000-0000-4000-8000-000000000095",
+)
+_TOOL_CALL_ID = UUID("64000000-0000-4000-8000-000000000046")
+_OTHER_TOOL_CALL_ID = UUID("64000000-0000-4000-8000-000000000056")
+_FOREIGN_TOOL_CALL_ID = UUID("64000000-0000-4000-8000-000000000096")
+_INVOCATION_ID = UUID("84000000-0000-4000-8000-000000000048")
+_OTHER_INVOCATION_ID = UUID("84000000-0000-4000-8000-000000000058")
+_FOREIGN_INVOCATION_ID = UUID("84000000-0000-4000-8000-000000000098")
+_APPROVAL_REQUEST_ID = UUID("94000000-0000-4000-8000-000000000049")
+_OTHER_APPROVAL_REQUEST_ID = UUID("94000000-0000-4000-8000-000000000059")
+_FOREIGN_APPROVAL_REQUEST_ID = UUID(
+    "94000000-0000-4000-8000-000000000099",
+)
+_GRANT_ID = UUID("a4000000-0000-4000-8000-00000000004a")
+_OTHER_GRANT_ID = UUID("a4000000-0000-4000-8000-00000000005a")
+_FOREIGN_GRANT_ID = UUID("a4000000-0000-4000-8000-00000000009a")
+_ESCALATION_ID = UUID("d4000000-0000-4000-8000-00000000004d")
+_OTHER_ESCALATION_ID = UUID("d4000000-0000-4000-8000-00000000005d")
+_FOREIGN_ESCALATION_ID = UUID("d4000000-0000-4000-8000-00000000009d")
+_DECISION_REQUEST_ID = UUID("b4000000-0000-4000-8000-00000000004b")
+_OTHER_DECISION_REQUEST_ID = UUID("b4000000-0000-4000-8000-00000000005b")
+_FOREIGN_DECISION_REQUEST_ID = UUID(
+    "b4000000-0000-4000-8000-00000000009b",
+)
+_DECISION_CORRELATION_ID = UUID("c4000000-0000-4000-8000-00000000004c")
+_OTHER_DECISION_CORRELATION_ID = UUID(
+    "c4000000-0000-4000-8000-00000000005c",
+)
+_FOREIGN_DECISION_CORRELATION_ID = UUID(
+    "c4000000-0000-4000-8000-00000000009c",
+)
 
-_CREATED_AT = datetime(2026, 8, 3, 19, 0, tzinfo=UTC)
+_CREATED_AT = datetime(2026, 8, 3, 20, 30, tzinfo=UTC)
 _CLAIMED_AT = _CREATED_AT + timedelta(minutes=1)
 _LEASE_EXPIRES_AT = _CLAIMED_AT + timedelta(seconds=45)
 _TOOL_PROPOSED_AT = _CLAIMED_AT + timedelta(seconds=1)
@@ -124,22 +150,141 @@ _ESCALATION_CREATED_AT = _GRANT_CREATED_AT + timedelta(minutes=1)
 
 
 @dataclass(frozen=True, slots=True)
-class PersistedTicketEscalationFixture:
-    """Seeded escalations for workspace-scoped inspection API tests."""
+class TicketEscalationApiSafetyFixture:
+    """Seeded escalations for workspace-scoped inspection safety tests."""
 
     workspace_id: UUID
     ticket_id: UUID
     escalation: TicketEscalation
     foreign_workspace_id: UUID
     foreign_escalation: TicketEscalation
+    other_escalation_id: UUID
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def snapshot_business_state(self) -> tuple[object, ...]:
+        """Capture durable rows that inspection must leave unchanged."""
+
+        async with self.session_factory() as session:
+            escalation = (
+                await session.execute(
+                    select(TicketEscalationRecord).where(
+                        TicketEscalationRecord.id == self.escalation.id,
+                    ),
+                )
+            ).scalar_one()
+            ticket = (
+                await session.execute(
+                    select(TicketRecord).where(
+                        TicketRecord.id == self.ticket_id,
+                    ),
+                )
+            ).scalar_one()
+            agent_run = (
+                await session.execute(
+                    select(AgentRunRecord).where(
+                        AgentRunRecord.id == escalation.agent_run_id,
+                    ),
+                )
+            ).scalar_one()
+            approval = (
+                await session.execute(
+                    select(ApprovalRequestRecord).where(
+                        ApprovalRequestRecord.id == escalation.approval_request_id,
+                    ),
+                )
+            ).scalar_one()
+            tool_call = (
+                await session.execute(
+                    select(AgentToolCallRecord).where(
+                        AgentToolCallRecord.id == escalation.agent_tool_call_id,
+                    ),
+                )
+            ).scalar_one()
+            grant_count = int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT COUNT(*) FROM "
+                            "sensitive_execution_grants "
+                            "WHERE workspace_id = :workspace_id",
+                        ),
+                        {"workspace_id": self.workspace_id},
+                    )
+                ).scalar_one(),
+            )
+            recommendation_count = int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT COUNT(*) FROM support_recommendations "
+                            "WHERE workspace_id = :workspace_id",
+                        ),
+                        {"workspace_id": self.workspace_id},
+                    )
+                ).scalar_one(),
+            )
+
+            return (
+                (
+                    escalation.id,
+                    escalation.workspace_id,
+                    escalation.ticket_id,
+                    escalation.agent_run_id,
+                    escalation.executed_by_agent_run_attempt_id,
+                    escalation.approval_request_id,
+                    escalation.agent_tool_call_id,
+                    escalation.target_queue,
+                    escalation.reason,
+                    escalation.created_at,
+                ),
+                (
+                    ticket.id,
+                    ticket.workspace_id,
+                    ticket.status,
+                    ticket.updated_at,
+                ),
+                (
+                    agent_run.id,
+                    agent_run.status,
+                    agent_run.attempt_count,
+                    agent_run.retryable_failure_count,
+                    agent_run.updated_at,
+                    agent_run.lease_token,
+                ),
+                (
+                    approval.id,
+                    approval.status,
+                    approval.decision_actor_reference,
+                    approval.decision_comment,
+                    approval.updated_at,
+                ),
+                (
+                    tool_call.id,
+                    tool_call.status,
+                    tool_call.executed_by_agent_run_attempt_id,
+                    tool_call.safe_output,
+                    tool_call.finished_at,
+                ),
+                grant_count,
+                recommendation_count,
+            )
 
 
 @pytest.fixture
-async def persisted_ticket_escalation_fixture(
+async def api_client(
+    integration_client: AsyncClient,
+) -> AsyncClient:
+    """Alias the shared integration HTTP client for safety tests."""
+
+    return integration_client
+
+
+@pytest.fixture
+async def ticket_escalation_api_safety_fixture(
     postgresql_session_factory: async_sessionmaker[AsyncSession],
     clean_business_tables: None,
-) -> AsyncIterator[PersistedTicketEscalationFixture]:
-    """Persist one primary escalation plus a foreign-workspace sibling."""
+) -> AsyncIterator[TicketEscalationApiSafetyFixture]:
+    """Persist primary, sibling, and foreign escalations for safety tests."""
 
     del clean_business_tables
 
@@ -147,8 +292,8 @@ async def persisted_ticket_escalation_fixture(
         escalation = await _seed_escalation_graph(
             session,
             workspace_id=_WORKSPACE_ID,
-            workspace_name="Escalation Inspection Workspace",
-            workspace_slug="escalation-inspection-workspace",
+            workspace_name="Escalation Safety Workspace",
+            workspace_slug="escalation-safety-workspace",
             ticket_id=_TICKET_ID,
             agent_run_id=_AGENT_RUN_ID,
             lease_token=_LEASE_TOKEN,
@@ -160,19 +305,23 @@ async def persisted_ticket_escalation_fixture(
             decision_request_id=_DECISION_REQUEST_ID,
             decision_correlation_id=_DECISION_CORRELATION_ID,
             escalation_id=_ESCALATION_ID,
-            worker_id="escalation-inspection-worker-1",
-            provider_tool_call_id="escalation-inspection-call-1",
+            worker_id="escalation-safety-worker-1",
+            provider_tool_call_id="escalation-safety-call-1",
             input_fingerprint="b" * 64,
             reason="Primary ticket requires escalation review.",
-            ingestion_request_id=UUID("81200000-0000-4000-8000-000000000028"),
-            correlation_id=UUID("82200000-0000-4000-8000-000000000029"),
+            ingestion_request_id=UUID(
+                "81400000-0000-4000-8000-000000000048",
+            ),
+            correlation_id=UUID(
+                "82400000-0000-4000-8000-000000000049",
+            ),
             create_workspace=True,
         )
         await _seed_escalation_graph(
             session,
             workspace_id=_WORKSPACE_ID,
-            workspace_name="Escalation Inspection Workspace",
-            workspace_slug="escalation-inspection-workspace",
+            workspace_name="Escalation Safety Workspace",
+            workspace_slug="escalation-safety-workspace",
             ticket_id=_OTHER_TICKET_ID,
             agent_run_id=_OTHER_AGENT_RUN_ID,
             lease_token=_OTHER_LEASE_TOKEN,
@@ -184,19 +333,23 @@ async def persisted_ticket_escalation_fixture(
             decision_request_id=_OTHER_DECISION_REQUEST_ID,
             decision_correlation_id=_OTHER_DECISION_CORRELATION_ID,
             escalation_id=_OTHER_ESCALATION_ID,
-            worker_id="escalation-inspection-worker-2",
-            provider_tool_call_id="escalation-inspection-call-2",
+            worker_id="escalation-safety-worker-2",
+            provider_tool_call_id="escalation-safety-call-2",
             input_fingerprint="e" * 64,
             reason="Sibling ticket escalation in the same workspace.",
-            ingestion_request_id=UUID("81200000-0000-4000-8000-000000000038"),
-            correlation_id=UUID("82200000-0000-4000-8000-000000000039"),
+            ingestion_request_id=UUID(
+                "81400000-0000-4000-8000-000000000058",
+            ),
+            correlation_id=UUID(
+                "82400000-0000-4000-8000-000000000059",
+            ),
             create_workspace=False,
         )
         foreign_escalation = await _seed_escalation_graph(
             session,
             workspace_id=_FOREIGN_WORKSPACE_ID,
-            workspace_name="Foreign Escalation Workspace",
-            workspace_slug="foreign-escalation-workspace",
+            workspace_name="Foreign Escalation Safety Workspace",
+            workspace_slug="foreign-escalation-safety-workspace",
             ticket_id=_FOREIGN_TICKET_ID,
             agent_run_id=_FOREIGN_AGENT_RUN_ID,
             lease_token=_FOREIGN_LEASE_TOKEN,
@@ -208,21 +361,27 @@ async def persisted_ticket_escalation_fixture(
             decision_request_id=_FOREIGN_DECISION_REQUEST_ID,
             decision_correlation_id=_FOREIGN_DECISION_CORRELATION_ID,
             escalation_id=_FOREIGN_ESCALATION_ID,
-            worker_id="escalation-inspection-worker-foreign",
-            provider_tool_call_id="escalation-inspection-call-foreign",
+            worker_id="escalation-safety-worker-foreign",
+            provider_tool_call_id="escalation-safety-call-foreign",
             input_fingerprint="2" * 64,
             reason="Foreign workspace escalation must stay hidden.",
-            ingestion_request_id=UUID("81200000-0000-4000-8000-000000000098"),
-            correlation_id=UUID("82200000-0000-4000-8000-000000000099"),
+            ingestion_request_id=UUID(
+                "81400000-0000-4000-8000-000000000098",
+            ),
+            correlation_id=UUID(
+                "82400000-0000-4000-8000-000000000099",
+            ),
             create_workspace=True,
         )
 
-    yield PersistedTicketEscalationFixture(
+    yield TicketEscalationApiSafetyFixture(
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
         escalation=escalation,
         foreign_workspace_id=_FOREIGN_WORKSPACE_ID,
         foreign_escalation=foreign_escalation,
+        other_escalation_id=_OTHER_ESCALATION_ID,
+        session_factory=postgresql_session_factory,
     )
 
 
@@ -254,7 +413,7 @@ async def _seed_escalation_graph(
     ticket = Ticket.create(
         ticket_id=ticket_id,
         workspace_id=workspace_id,
-        subject="Needs escalation inspection",
+        subject="Needs escalation safety inspection",
         description=("The customer requested a policy-sensitive escalation."),
         external_reference=None,
         ingestion_request_id=ingestion_request_id,
@@ -288,7 +447,9 @@ async def _seed_escalation_graph(
         await SqlAlchemyAgentRunRepository(session).add(agent_run)
 
     async with transaction_manager.transaction():
-        claim = await SqlAlchemyAgentRunRepository(session).claim_next_available(
+        claim = await SqlAlchemyAgentRunRepository(
+            session,
+        ).claim_next_available(
             ClaimAgentRunCommand(
                 worker_id=worker_id,
                 lease_token=lease_token,
@@ -414,13 +575,13 @@ async def _seed_escalation_graph(
 
 
 @pytest.mark.integration
-async def test_list_escalations_is_workspace_scoped(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
+async def test_escalation_list_never_discloses_foreign_workspace_records(
+    api_client: AsyncClient,
+    ticket_escalation_api_safety_fixture: TicketEscalationApiSafetyFixture,
 ) -> None:
-    fixture = persisted_ticket_escalation_fixture
+    fixture = ticket_escalation_api_safety_fixture
 
-    response = await integration_client.get(
+    response = await api_client.get(
         (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
     )
 
@@ -431,158 +592,105 @@ async def test_list_escalations_is_workspace_scoped(
 
 
 @pytest.mark.integration
-async def test_list_escalations_filters_by_ticket(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
+async def test_ticket_filter_does_not_cross_workspace_boundary(
+    api_client: AsyncClient,
+    ticket_escalation_api_safety_fixture: TicketEscalationApiSafetyFixture,
 ) -> None:
-    fixture = persisted_ticket_escalation_fixture
+    fixture = ticket_escalation_api_safety_fixture
 
-    response = await integration_client.get(
+    response = await api_client.get(
         (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
         params={"ticket_id": str(fixture.ticket_id)},
     )
 
     assert response.status_code == 200
-    assert all(item["ticket_id"] == str(fixture.ticket_id) for item in response.json()["items"])
+    assert all(
+        item["workspace_id"] == str(fixture.workspace_id)
+        and item["ticket_id"] == str(fixture.ticket_id)
+        for item in response.json()["items"]
+    )
+    assert str(fixture.other_escalation_id) not in {item["id"] for item in response.json()["items"]}
 
 
 @pytest.mark.integration
-async def test_foreign_workspace_detail_returns_404(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
+async def test_foreign_escalation_detail_matches_missing_404(
+    api_client: AsyncClient,
+    ticket_escalation_api_safety_fixture: TicketEscalationApiSafetyFixture,
 ) -> None:
-    fixture = persisted_ticket_escalation_fixture
+    fixture = ticket_escalation_api_safety_fixture
 
-    response = await integration_client.get(
+    foreign = await api_client.get(
         (
             f"/api/v1/workspaces/{fixture.foreign_workspace_id}/"
             f"ticket-escalations/{fixture.escalation.id}"
         ),
     )
-
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == ("ticket_escalation_not_found")
-    assert response.json()["error"]["request_id"] == (response.headers["X-Request-ID"])
-
-
-@pytest.mark.integration
-async def test_own_escalation_detail_returns_200(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
-) -> None:
-    fixture = persisted_ticket_escalation_fixture
-
-    response = await integration_client.get(
-        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations/{fixture.escalation.id}"),
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["id"] == str(fixture.escalation.id)
-    assert payload["workspace_id"] == str(fixture.workspace_id)
-    assert payload["ticket_id"] == str(fixture.ticket_id)
-    assert "grant_id" not in payload
-    assert "granted_input" not in payload
-    assert "proposed_input" not in payload
-
-
-@pytest.mark.integration
-async def test_missing_escalation_detail_matches_foreign_404(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
-) -> None:
-    fixture = persisted_ticket_escalation_fixture
-
-    foreign = await integration_client.get(
-        (
-            f"/api/v1/workspaces/{fixture.foreign_workspace_id}/"
-            f"ticket-escalations/{fixture.escalation.id}"
-        ),
-    )
-    missing = await integration_client.get(
-        (
-            f"/api/v1/workspaces/{fixture.workspace_id}/"
-            f"ticket-escalations/{UUID('00000000-0000-4000-8000-0000000000ee')}"
-        ),
+    missing = await api_client.get(
+        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations/{uuid4()}"),
     )
 
     assert foreign.status_code == 404
     assert missing.status_code == 404
     assert foreign.json()["error"]["code"] == ("ticket_escalation_not_found")
     assert missing.json()["error"]["code"] == ("ticket_escalation_not_found")
-    assert foreign.json()["error"]["message"] == (missing.json()["error"]["message"])
 
 
 @pytest.mark.integration
-async def test_escalation_malformed_cursor_returns_400(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
+async def test_escalation_inspection_is_read_only(
+    api_client: AsyncClient,
+    ticket_escalation_api_safety_fixture: TicketEscalationApiSafetyFixture,
 ) -> None:
-    fixture = persisted_ticket_escalation_fixture
+    fixture = ticket_escalation_api_safety_fixture
+    before = await fixture.snapshot_business_state()
 
-    response = await integration_client.get(
+    list_response = await api_client.get(
         (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
-        params={"cursor": "not-a-valid-cursor"},
+    )
+    detail_response = await api_client.get(
+        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations/{fixture.escalation.id}"),
     )
 
-    assert response.status_code == 400
-    assert response.json() == {
-        "error": {
-            "code": "invalid_pagination_cursor",
-            "message": ("Ticket escalation pagination cursor is invalid."),
-            "request_id": response.headers["X-Request-ID"],
-        }
+    after = await fixture.snapshot_business_state()
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+    assert after == before
+
+
+@pytest.mark.integration
+async def test_escalation_response_excludes_internal_execution_data(
+    api_client: AsyncClient,
+    ticket_escalation_api_safety_fixture: TicketEscalationApiSafetyFixture,
+) -> None:
+    fixture = ticket_escalation_api_safety_fixture
+
+    response = await api_client.get(
+        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations/{fixture.escalation.id}"),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    forbidden = {
+        "grant_id",
+        "granted_input",
+        "approval_actor_reference",
+        "decision_comment",
+        "proposed_input",
+        "execution_output",
+        "checkpoint",
+        "lease_token",
     }
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize("page_size", [0, 101])
-async def test_escalation_list_rejects_invalid_page_size(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
-    page_size: int,
-) -> None:
-    fixture = persisted_ticket_escalation_fixture
-
-    response = await integration_client.get(
-        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
-        params={"page_size": page_size},
+    assert forbidden.isdisjoint(payload)
+    assert payload["workspace_id"] == str(fixture.workspace_id)
+    assert payload["ticket_id"] == str(fixture.ticket_id)
+    assert payload["agent_run_id"] == str(fixture.escalation.agent_run_id)
+    assert payload["approval_request_id"] == str(
+        fixture.escalation.approval_request_id,
     )
-
-    assert response.status_code == 422
-
-
-@pytest.mark.integration
-async def test_escalation_pagination_is_stable_and_workspace_scoped(
-    integration_client: AsyncClient,
-    persisted_ticket_escalation_fixture: PersistedTicketEscalationFixture,
-) -> None:
-    fixture = persisted_ticket_escalation_fixture
-
-    first = await integration_client.get(
-        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
-        params={"page_size": 1},
+    assert payload["agent_tool_call_id"] == str(
+        fixture.escalation.agent_tool_call_id,
     )
-    assert first.status_code == 200
-    first_payload = first.json()
-    assert len(first_payload["items"]) == 1
-    assert first_payload["next_cursor"] is not None
-    assert first_payload["items"][0]["workspace_id"] == str(
-        fixture.workspace_id,
+    assert payload["executed_by_agent_run_attempt_id"] == str(
+        fixture.escalation.executed_by_agent_run_attempt_id,
     )
-
-    second = await integration_client.get(
-        (f"/api/v1/workspaces/{fixture.workspace_id}/ticket-escalations"),
-        params={
-            "page_size": 1,
-            "cursor": first_payload["next_cursor"],
-        },
-    )
-    assert second.status_code == 200
-    second_payload = second.json()
-    assert len(second_payload["items"]) == 1
-    assert second_payload["items"][0]["id"] != first_payload["items"][0]["id"]
-    assert str(fixture.foreign_escalation.id) not in {
-        first_payload["items"][0]["id"],
-        second_payload["items"][0]["id"],
-    }

@@ -428,3 +428,101 @@ async def test_foreign_workspace_decision_returns_404(
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == ("approval_request_not_found")
+    assert response.json()["error"]["request_id"] == (response.headers["X-Request-ID"])
+
+
+@pytest.mark.integration
+async def test_same_terminal_decision_with_different_comment_conflicts(
+    api_client: AsyncClient,
+    pending_approval_fixture: PendingApprovalFixture,
+) -> None:
+    workspace_id = pending_approval_fixture.workspace_id
+    approval = pending_approval_fixture.approval_request
+    path = f"/api/v1/workspaces/{workspace_id}/approvals/{approval.id}/approve"
+
+    first = await api_client.post(
+        path,
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+            "comment": "Approved after review.",
+        },
+    )
+    conflict = await api_client.post(
+        path,
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+            "comment": "Approved with a different comment.",
+        },
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == ("approval_decision_conflict")
+
+
+@pytest.mark.integration
+async def test_reject_then_approve_returns_conflict(
+    api_client: AsyncClient,
+    pending_approval_fixture: PendingApprovalFixture,
+) -> None:
+    workspace_id = pending_approval_fixture.workspace_id
+    approval = pending_approval_fixture.approval_request
+
+    reject = await api_client.post(
+        (f"/api/v1/workspaces/{workspace_id}/approvals/{approval.id}/reject"),
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+            "comment": "Reject before any approve attempt.",
+        },
+    )
+    approve = await api_client.post(
+        (f"/api/v1/workspaces/{workspace_id}/approvals/{approval.id}/approve"),
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+        },
+    )
+
+    assert reject.status_code == 200
+    assert approve.status_code == 409
+    assert approve.json()["error"]["code"] == ("approval_decision_conflict")
+
+
+@pytest.mark.integration
+async def test_identical_replay_does_not_requeue_or_spawn_attempts(
+    api_client: AsyncClient,
+    pending_approval_fixture: PendingApprovalFixture,
+) -> None:
+    workspace_id = pending_approval_fixture.workspace_id
+    approval = pending_approval_fixture.approval_request
+    agent_run = pending_approval_fixture.agent_run
+    path = f"/api/v1/workspaces/{workspace_id}/approvals/{approval.id}/approve"
+    body = {
+        "actor_reference": "operator:alice",
+        "decision_request_id": str(uuid4()),
+        "comment": "Approved after review.",
+    }
+
+    first = await api_client.post(path, json=body)
+    second = await api_client.post(
+        path,
+        json={
+            **body,
+            "decision_request_id": str(uuid4()),
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["idempotent"] is False
+    assert second.json()["idempotent"] is True
+
+    refreshed = await pending_approval_fixture.load_agent_run()
+    assert refreshed.status.value == "queued"
+    assert refreshed.retryable_failure_count == (agent_run.retryable_failure_count)
+    assert refreshed.attempt_count == agent_run.attempt_count
+    assert await pending_approval_fixture.count_execution_grants() == 0
+    assert await pending_approval_fixture.count_ticket_escalations() == 0

@@ -162,3 +162,59 @@ def test_decision_response_contains_no_execution_fields() -> None:
     assert "grant_id" not in fields
     assert "ticket_escalation_id" not in fields
     assert "execution_output" not in fields
+
+
+def test_approve_endpoint_rejects_missing_actor() -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    approval_id = uuid4()
+    app.dependency_overrides[get_decide_approval_request] = lambda: SimpleNamespace(
+        approve=AsyncMock(),
+    )
+
+    response = TestClient(app).post(
+        (f"/api/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve"),
+        json={
+            "decision_request_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_approve_endpoint_rejects_malformed_approval_id() -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    app.dependency_overrides[get_decide_approval_request] = lambda: SimpleNamespace(
+        approve=AsyncMock(),
+    )
+
+    response = TestClient(app).post(
+        (f"/api/v1/workspaces/{workspace_id}/approvals/not-a-uuid/approve"),
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_approve_endpoint_rejects_client_supplied_decided_at() -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    approval_id = uuid4()
+    app.dependency_overrides[get_decide_approval_request] = lambda: SimpleNamespace(
+        approve=AsyncMock(),
+    )
+
+    response = TestClient(app).post(
+        (f"/api/v1/workspaces/{workspace_id}/approvals/{approval_id}/approve"),
+        json={
+            "actor_reference": "operator:alice",
+            "decision_request_id": str(uuid4()),
+            "decided_at": "2026-08-03T21:30:00Z",
+        },
+    )
+
+    assert response.status_code == 422
