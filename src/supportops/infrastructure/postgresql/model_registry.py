@@ -4,6 +4,9 @@
 def register_persistence_models() -> None:
     """Import all persistence records into the shared SQLAlchemy metadata."""
 
+    from supportops.agent_tools.infrastructure.grant_models import (
+        SensitiveExecutionGrantRecord,
+    )
     from supportops.agent_tools.infrastructure.models import AgentToolCallRecord
     from supportops.modules.agent_runs.infrastructure.models import (
         AgentRunAttemptRecord,
@@ -44,6 +47,7 @@ def register_persistence_models() -> None:
         TicketClassificationRecord,
         AgentToolCallRecord,
         ApprovalRequestRecord,
+        SensitiveExecutionGrantRecord,
         SupportRecommendationRecord,
         SupportRecommendationCitationRecord,
     )
