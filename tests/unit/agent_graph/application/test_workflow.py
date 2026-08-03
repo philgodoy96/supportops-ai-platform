@@ -7,13 +7,32 @@ from uuid import UUID
 
 import pytest
 from langgraph.errors import GraphRecursionError
+from langgraph.types import Command
 
+from supportops.agent_graph.application.human_approved_workflow import (
+    HumanApprovedSupportWorkflowExecutor,
+)
 from supportops.agent_graph.application.workflow import (
     CONTROLLED_SUPPORT_LANGGRAPH_RECURSION_LIMIT,
     ControlledSupportWorkflowExecutor,
 )
+from supportops.agent_graph.domain.human_approved_identity import (
+    derive_human_approved_support_graph_identity,
+)
+from supportops.agent_graph.domain.human_approved_state import (
+    HUMAN_APPROVED_SUPPORT_WORKFLOW_VERSION,
+    create_initial_human_approved_support_state,
+)
 from supportops.agent_graph.domain.identity import (
     derive_controlled_support_graph_identity,
+)
+from supportops.agent_graph.domain.resume_planning import (
+    ApprovalResumeDecisionStatus,
+    CompletedGraphExecution,
+    ContinueGraphExecution,
+    IncompatibleGraphState,
+    InitialGraphExecution,
+    ResumeGraphExecution,
 )
 from supportops.agent_graph.domain.state import (
     CONTROLLED_SUPPORT_GRAPH_VERSION,
@@ -323,3 +342,275 @@ async def test_rejects_unsupported_workflow_version() -> None:
 
     assert captured.value.error_code == ("unsupported_workflow_version")
     assert graph.state_configs == []
+
+
+@dataclass(frozen=True, slots=True)
+class HumanApprovedStubCheckpointSnapshot:
+    """Expose checkpoint values and active interrupts."""
+
+    values: Mapping[str, object]
+    interrupts: tuple[object, ...] = ()
+
+
+class HumanApprovedRecordingCompiledGraph:
+    """Record human-approved graph resume and invocation behavior."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_values: Mapping[str, object],
+        result: object,
+        checkpoint_interrupts: tuple[object, ...] = (),
+        recursion_failure: bool = False,
+    ) -> None:
+        self.checkpoint_values = checkpoint_values
+        self.checkpoint_interrupts = checkpoint_interrupts
+        self.result = result
+        self.recursion_failure = recursion_failure
+        self.state_configs: list[Mapping[str, object]] = []
+        self.inputs: list[object] = []
+        self.invoke_configs: list[Mapping[str, object]] = []
+        self.contexts: list[AgentRunExecutionContext] = []
+
+    async def aget_state(
+        self,
+        config: Mapping[str, object],
+    ) -> HumanApprovedStubCheckpointSnapshot:
+        self.state_configs.append(config)
+        return HumanApprovedStubCheckpointSnapshot(
+            values=self.checkpoint_values,
+            interrupts=self.checkpoint_interrupts,
+        )
+
+    async def ainvoke(
+        self,
+        input: object,
+        config: Mapping[str, object],
+        *,
+        context: AgentRunExecutionContext,
+        version: str = "v2",
+    ) -> object:
+        del version
+        self.inputs.append(input)
+        self.invoke_configs.append(config)
+        self.contexts.append(context)
+        if self.recursion_failure:
+            raise GraphRecursionError("recursion limit exceeded")
+        return self.result
+
+
+class RecordingResumePlanner:
+    """Return one configured human-approved execution plan."""
+
+    def __init__(self, planned: object) -> None:
+        self.planned = planned
+        self.calls: list[dict[str, object]] = []
+
+    async def plan(
+        self,
+        *,
+        context: object,
+        checkpoint_values: Mapping[str, object],
+        checkpoint_interrupts: tuple[object, ...],
+    ) -> object:
+        self.calls.append(
+            {
+                "context": context,
+                "checkpoint_values": checkpoint_values,
+                "checkpoint_interrupts": checkpoint_interrupts,
+            }
+        )
+        return self.planned
+
+
+def _human_approved_context() -> AgentRunExecutionContext:
+    context = _context()
+    return replace(
+        context,
+        agent_run=replace(
+            context.agent_run,
+            workflow_version=HUMAN_APPROVED_SUPPORT_WORKFLOW_VERSION,
+        ),
+    )
+
+
+def _human_approved_completed_state() -> Mapping[str, object]:
+    state = create_initial_human_approved_support_state(
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        agent_run_id=_AGENT_RUN_ID,
+    )
+    state.update(
+        {
+            "run_context_loaded": True,
+            "decision_kind": "terminal",
+            "decision_invocation_id": str(_RECOMMENDATION_INVOCATION_ID),
+            "decision_summary": "Respond with available evidence.",
+            "analysis_recommended_action": "respond",
+            "analysis_evidence_sufficient": True,
+            "analysis_requires_human_review": False,
+            "recommendation_invocation_id": str(_RECOMMENDATION_INVOCATION_ID),
+            "recommendation_id": str(_RECOMMENDATION_ID),
+        },
+    )
+    return state
+
+
+async def test_human_approved_initial_plan_invokes_with_state() -> None:
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values={},
+        result=_human_approved_completed_state(),
+    )
+    planner = RecordingResumePlanner(InitialGraphExecution())
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    result = await executor.execute(_human_approved_context())
+
+    assert result == CompletedExecution()
+    assert len(graph.inputs) == 1
+    initial_input = graph.inputs[0]
+    assert isinstance(initial_input, dict)
+    assert initial_input["workspace_id"] == str(_WORKSPACE_ID)
+    assert initial_input["ticket_id"] == str(_TICKET_ID)
+    assert initial_input["agent_run_id"] == str(_AGENT_RUN_ID)
+    identity = derive_human_approved_support_graph_identity(_AGENT_RUN_ID)
+    configurable = graph.invoke_configs[0]["configurable"]
+    assert isinstance(configurable, dict)
+    assert configurable["thread_id"] == identity.thread_id
+    assert configurable["checkpoint_ns"] == (identity.checkpoint_namespace)
+
+
+async def test_human_approved_continue_plan_invokes_with_none() -> None:
+    completed = _human_approved_completed_state()
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values={
+            **create_initial_human_approved_support_state(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_AGENT_RUN_ID,
+            ),
+            "run_context_loaded": True,
+        },
+        result=completed,
+    )
+    planner = RecordingResumePlanner(ContinueGraphExecution())
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    result = await executor.execute(_human_approved_context())
+
+    assert result == CompletedExecution()
+    assert graph.inputs == [None]
+
+
+async def test_human_approved_resume_plan_invokes_with_command() -> None:
+    approval_request_id = UUID("d0000000-0000-4000-8000-000000000013")
+    agent_tool_call_id = UUID("e0000000-0000-4000-8000-000000000014")
+    completed = _human_approved_completed_state()
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values=create_initial_human_approved_support_state(
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_TICKET_ID,
+            agent_run_id=_AGENT_RUN_ID,
+        ),
+        result=completed,
+    )
+    plan = ResumeGraphExecution(
+        approval_request_id=approval_request_id,
+        agent_tool_call_id=agent_tool_call_id,
+        decision_status=ApprovalResumeDecisionStatus.APPROVED,
+    )
+    planner = RecordingResumePlanner(plan)
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    result = await executor.execute(_human_approved_context())
+
+    assert result == CompletedExecution()
+    assert len(graph.inputs) == 1
+    command = graph.inputs[0]
+    assert isinstance(command, Command)
+    assert command.resume == {
+        "approval_request_id": str(approval_request_id),
+        "agent_tool_call_id": str(agent_tool_call_id),
+        "decision_status": "approved",
+    }
+    identity = derive_human_approved_support_graph_identity(_AGENT_RUN_ID)
+    configurable = graph.invoke_configs[0]["configurable"]
+    assert isinstance(configurable, dict)
+    assert configurable["thread_id"] == identity.thread_id
+    assert configurable["checkpoint_ns"] == (identity.checkpoint_namespace)
+    assert graph.state_configs[0]["configurable"] == configurable
+
+
+async def test_human_approved_completed_plan_skips_ainvoke() -> None:
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values=_human_approved_completed_state(),
+        result=_human_approved_completed_state(),
+    )
+    planner = RecordingResumePlanner(CompletedGraphExecution())
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    result = await executor.execute(_human_approved_context())
+
+    assert result == CompletedExecution()
+    assert graph.inputs == []
+    assert graph.invoke_configs == []
+    assert len(graph.state_configs) == 1
+
+
+async def test_human_approved_incompatible_plan_raises_without_ainvoke() -> None:
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values={},
+        result=_human_approved_completed_state(),
+    )
+    planner = RecordingResumePlanner(
+        IncompatibleGraphState(
+            error_code="approval_request_still_pending",
+            error_summary=("A pending approval request cannot resume execution."),
+        ),
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TerminalAgentRunExecutionError) as captured:
+        await executor.execute(_human_approved_context())
+
+    assert captured.value.error_code == ("approval_request_still_pending")
+    assert graph.inputs == []
+    assert graph.invoke_configs == []
+
+
+async def test_human_approved_pending_approval_fails_closed() -> None:
+    graph = HumanApprovedRecordingCompiledGraph(
+        checkpoint_values={},
+        result=_human_approved_completed_state(),
+    )
+    planner = RecordingResumePlanner(
+        IncompatibleGraphState(
+            error_code="approval_request_still_pending",
+            error_summary=("A pending approval request cannot resume execution."),
+        ),
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=graph,
+        resume_planner=planner,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(TerminalAgentRunExecutionError) as captured:
+        await executor.execute(_human_approved_context())
+
+    assert captured.value.error_code == ("approval_request_still_pending")
+    assert graph.inputs == []

@@ -6,12 +6,19 @@ from typing import Any, Never, Protocol, cast
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from supportops.agent_graph.application.approval_interrupt import (
     ApprovalInterruptPayload,
 )
 from supportops.agent_graph.application.human_approved_nodes import (
     HumanApprovedSupportWorkflowNodes,
+)
+from supportops.agent_graph.application.resume_planning import (
+    HumanApprovedGraphResumePlanner,
+    HumanApprovedResumePlanningContext,
+    build_approval_resume_value,
+    normalize_checkpoint_interrupts,
 )
 from supportops.agent_graph.domain.human_approved_identity import (
     derive_human_approved_support_graph_identity,
@@ -27,6 +34,13 @@ from supportops.agent_graph.domain.human_approved_state import (
     HumanApprovedSupportGraphStateSnapshot,
     create_initial_human_approved_support_state,
     validate_human_approved_support_state,
+)
+from supportops.agent_graph.domain.resume_planning import (
+    CompletedGraphExecution,
+    ContinueGraphExecution,
+    IncompatibleGraphState,
+    InitialGraphExecution,
+    ResumeGraphExecution,
 )
 from supportops.agent_graph.infrastructure.checkpoints import (
     GraphCheckpointError,
@@ -68,6 +82,12 @@ class HumanApprovedCheckpointSnapshot(Protocol):
 
         ...
 
+    @property
+    def interrupts(self) -> tuple[object, ...]:
+        """Return active LangGraph interrupts for the thread."""
+
+        ...
+
 
 class HumanApprovedCompiledGraph(Protocol):
     """Compiled graph operations consumed by the executor."""
@@ -82,7 +102,7 @@ class HumanApprovedCompiledGraph(Protocol):
 
     async def ainvoke(
         self,
-        input: HumanApprovedSupportGraphState | None,
+        input: HumanApprovedSupportGraphState | Command[Any] | None,
         config: Mapping[str, object],
         *,
         context: AgentRunExecutionContext,
@@ -172,8 +192,10 @@ class HumanApprovedSupportWorkflowExecutor:
         self,
         *,
         graph: HumanApprovedCompiledGraph,
+        resume_planner: HumanApprovedGraphResumePlanner,
     ) -> None:
         self._graph = graph
+        self._resume_planner = resume_planner
 
     async def execute(
         self,
@@ -195,20 +217,41 @@ class HumanApprovedSupportWorkflowExecutor:
 
         try:
             checkpoint = await self._graph.aget_state(config)
-            if checkpoint.values:
-                recovered = validate_human_approved_support_state(
-                    checkpoint.values,
+            plan = await self._resume_planner.plan(
+                context=HumanApprovedResumePlanningContext(
+                    workspace_id=context.agent_run.workspace_id,
+                    ticket_id=context.ticket.id,
+                    agent_run_id=context.agent_run.id,
+                ),
+                checkpoint_values=dict(checkpoint.values),
+                checkpoint_interrupts=normalize_checkpoint_interrupts(
+                    checkpoint,
+                ),
+            )
+            if isinstance(plan, CompletedGraphExecution):
+                return CompletedExecution()
+            if isinstance(plan, IncompatibleGraphState):
+                raise TerminalAgentRunExecutionError(
+                    error_code=plan.error_code,
+                    error_summary=plan.error_summary,
                 )
-                _validate_state_ownership(
-                    state=recovered,
-                    context=context,
-                )
-                graph_input = None
-            else:
+
+            graph_input: HumanApprovedSupportGraphState | Command[Any] | None
+            if isinstance(plan, InitialGraphExecution):
                 graph_input = create_initial_human_approved_support_state(
                     workspace_id=(context.agent_run.workspace_id),
                     ticket_id=context.ticket.id,
                     agent_run_id=context.agent_run.id,
+                )
+            elif isinstance(plan, ContinueGraphExecution):
+                graph_input = None
+            elif isinstance(plan, ResumeGraphExecution):
+                graph_input = Command[Any](
+                    resume=build_approval_resume_value(plan),
+                )
+            else:
+                raise TypeError(
+                    f"Unsupported human-approved execution plan: {type(plan)!r}.",
                 )
 
             result = await self._graph.ainvoke(
