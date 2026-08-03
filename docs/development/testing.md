@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -581,9 +581,8 @@ business cleanup does not delete framework checkpoint tables.
 
 Human-approved coverage validates durable interrupt and resume, grant-gated
 sensitive execution, immutable escalation, AgentRun waiting lifecycle, crash
-recovery, concurrency convergence, and historical controlled-support
-regressions. Approval decision and inspection HTTP APIs remain outside this
-suite and are introduced in a separate operational API slice.
+recovery, concurrency convergence, historical controlled-support regressions,
+and the operational approval and escalation HTTP APIs.
 
 ### Unit coverage
 
@@ -615,6 +614,24 @@ uv run pytest `
   tests/unit/modules/agent_runs/application/test_processor.py
 ```
 
+### Approval and escalation API unit coverage
+
+Focused API unit groups cover approval inspection schemas and routes, opaque
+approval cursors, decision request schemas and routers, escalation schemas and
+routes, and escalation cursors.
+
+```powershell
+uv run pytest `
+  tests/unit/modules/approvals/api/test_schemas.py `
+  tests/unit/modules/approvals/api/test_pagination.py `
+  tests/unit/modules/approvals/api/test_router.py `
+  tests/unit/modules/approvals/api/test_decision_schemas.py `
+  tests/unit/modules/approvals/api/test_decision_router.py `
+  tests/unit/modules/tickets/api/test_escalation_schemas.py `
+  tests/unit/modules/tickets/api/test_escalation_pagination.py `
+  tests/unit/modules/tickets/api/test_escalation_router.py
+```
+
 ### Integration coverage
 
 Integration tests require live PostgreSQL. They cover granted escalation
@@ -626,6 +643,23 @@ uv run pytest -m integration `
   tests/integration/agent_tools/application/test_granted_escalation.py `
   tests/integration/agent_tools/infrastructure/test_grant_repository.py `
   tests/integration/modules/approvals/infrastructure/test_repository.py
+```
+
+### Approval and escalation API integration coverage
+
+Focused HTTP integration groups cover approval decisions, approval API safety,
+ticket escalation inspection, and escalation API safety. Coverage includes
+approval inspection, approval decisions, escalation inspection, workspace
+isolation, cursor validation, idempotent replay, conflicting terminal
+decisions, concurrent decision safety, API/worker boundary, and read-only
+escalation behavior.
+
+```powershell
+uv run pytest -m integration `
+  tests/integration/api/test_approval_decisions.py `
+  tests/integration/api/test_ticket_escalations.py `
+  tests/integration/api/test_approval_api_safety.py `
+  tests/integration/api/test_ticket_escalation_api_safety.py
 ```
 
 Historical controlled-support regression:
@@ -1247,7 +1281,6 @@ Later implementation phases are expected to add tests for:
 - global AgentRun listing and status filtering;
 - retrieval quality scoring and reranking;
 - write-capable tool authorization beyond grant-gated internal escalation;
-- approval decision and inspection HTTP APIs;
 - prompt version 2 regression comparison;
 - scheduled evaluation and evaluation history persistence;
 - retrieval and generation evaluation beyond structured classification;
@@ -1257,7 +1290,8 @@ Later implementation phases are expected to add tests for:
 Authentication remains an intentional scope boundary for the current suite.
 Durable AgentRun scheduling, PostgreSQL claiming, fencing, retries, recovery,
 deterministic execution, worker process coverage, workspace-scoped AgentRun and
-classification inspection, controlled support workflow coverage, immutable
-knowledge-document versioning, explicit knowledge indexing, active-version
-semantic knowledge retrieval, and offline classification evaluation are part of
-the current suite.
+classification inspection, controlled support workflow coverage, human-approved
+workflow coverage, approval and escalation inspection and decision APIs,
+immutable knowledge-document versioning, explicit knowledge indexing,
+active-version semantic knowledge retrieval, and offline classification
+evaluation are part of the current suite.

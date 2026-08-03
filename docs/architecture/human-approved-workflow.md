@@ -278,23 +278,56 @@ Current guarantees include:
 - no external side-effect tools;
 - fail-closed checkpoint mismatch handling.
 
-Authentication and RBAC are intentionally deferred to a separate slice. Actor references remain asserted rather than verified.
+Verified identities and RBAC remain a separate policy-enforcement concern. Actor references remain asserted rather than verified.
+
+## HTTP Inspection and Decision Boundary
+
+Workspace-scoped approval inspection, approval decision, and ticket escalation inspection APIs are implemented. Operational contracts are documented in [`../development/approval-workflow-api.md`](../development/approval-workflow-api.md).
+
+Ownership:
+
+```text
+HTTP API
+-> inspect or decide
+-> requeue AgentRun
+
+Worker
+-> claim
+-> validate checkpoint and PostgreSQL
+-> resume graph
+-> execute sensitive action
+```
+
+The API owns validation, inspection, approval and rejection command submission, durable terminal decision persistence, and `AgentRun` requeue. The worker owns claim, new `AgentRunAttempt` creation, checkpoint validation, LangGraph resume, execution grant consumption, `TicketEscalation` creation, and recommendation completion. HTTP decisions do not execute workflows. The API never invokes LangGraph or sensitive execution.
+
+Decision replay identity:
+
+```text
+same terminal status
++ same actor_reference
++ same comment
+= idempotent replay
+```
+
+`decision_request_id` and correlation ID are audit metadata, not replay keys.
 
 ## Intentional Scope Boundaries
 
 This workflow does not include:
 
-- approval inspection APIs;
-- approval decision HTTP endpoints;
-- ticket escalation inspection APIs;
 - authentication or RBAC;
+- grant inspection endpoints;
+- escalation mutation endpoints;
+- manual LangGraph resume endpoints;
 - external side-effect tools;
 - notifications;
 - mutable ticket escalation state;
 - prompt version 2;
 - evaluation datasets and scoring.
 
-Operational APIs are introduced separately so the interrupt, authorization, and recovery design remains independent from inspection concerns.
+Grant inspection intentionally remains internal. Manual resume endpoints remain unavailable to preserve worker ownership. Frontend operator workflows can be introduced without changing domain transitions. Authentication and RBAC remain separate from workflow continuity and grant authorization.
+
+`controlled-support-v1` remains the default ticket-processing workflow. `human-approved-support-v1` remains separately versioned.
 
 ## Operational Validation
 

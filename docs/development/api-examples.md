@@ -4,7 +4,8 @@
 
 This document provides reproducible examples for the implemented workspace,
 support ticket, AgentRun, classification, logical invocation inspection,
-controlled support inspection, versioned knowledge-document, and semantic
+controlled support inspection, approval inspection and decision, ticket
+escalation inspection, versioned knowledge-document, and semantic
 knowledge-search HTTP API.
 
 The examples use placeholder values suitable for local development and public
@@ -28,6 +29,9 @@ The API currently supports:
 - ticket classification history;
 - AgentRun logical invocation history;
 - controlled support aggregate inspection for `controlled-support-v1`;
+- workspace-scoped approval request listing and detail;
+- explicit approval and rejection commands that requeue waiting AgentRuns;
+- workspace-scoped ticket escalation listing and detail;
 - opaque cursor pagination;
 - stable expected-error responses;
 - request and correlation trace identifiers.
@@ -40,11 +44,19 @@ A queued `controlled-support-v1` processing run records that durable controlled
 support work has been scheduled. Classification, tool execution, recommendation
 persistence, and final AgentRun completion remain asynchronous worker outcomes.
 
-AgentRun, classification, logical invocation, and controlled support inspection
-endpoints are strictly read-only. They report current persisted state and do not
-guarantee future completion. They do not perform mutation, retry, cancellation,
-or lease revocation. Controlled support inspection reads persisted business
-records and does not deserialize LangGraph checkpoint state.
+AgentRun, classification, logical invocation, controlled support, and ticket
+escalation inspection endpoints are strictly read-only. They report current
+persisted state and do not guarantee future completion. They do not perform
+mutation, retry, cancellation, or lease revocation. Controlled support
+inspection reads persisted business records and does not deserialize LangGraph
+checkpoint state.
+
+Approval decision endpoints persist a durable terminal decision and requeue the
+associated `AgentRun`. They return after requeue, not after worker claim,
+LangGraph resume, grant creation, or sensitive execution. `actor_reference` is
+asserted operational metadata, not a verified identity. `decision_request_id`
+is supplied in the request body. `X-Correlation-ID` is optional and is
+propagated by request-context middleware.
 
 Knowledge-document registration and version creation persist source content only
 in PostgreSQL and do not call an embedding provider or Qdrant. Indexing is a
@@ -1278,6 +1290,91 @@ Persisted records that violate inspection invariants return:
 controlled_support_inspection_inconsistent
 ```
 
+## Approval and escalation workflow APIs
+
+Full request and response contracts, replay semantics, error codes, workspace
+isolation, and the HTTP/worker boundary are documented in
+[`approval-workflow-api.md`](approval-workflow-api.md).
+
+The short examples below assume `$workspaceAId`, `$approvalRequestId`,
+`$ticketId`, and `$ticketEscalationId` are already known. `$CorrelationId` is
+optional.
+
+### List pending approvals
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/approvals?status=pending&page_size=20" `
+  -Headers @{
+    "X-Correlation-ID" = $CorrelationId
+  }
+```
+
+### Approve an approval request
+
+`actor_reference` is asserted. `decision_request_id` comes from the body.
+`X-Correlation-ID` is optional and propagated by middleware. The response
+returns after durable requeue, not after execution.
+
+```powershell
+$approveBody = @{
+  actor_reference = "operator:alice"
+  decision_request_id = [guid]::NewGuid().ToString()
+  comment = "Approved after operational review."
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/approvals/$approvalRequestId/approve" `
+  -ContentType "application/json" `
+  -Headers @{
+    "X-Correlation-ID" = $CorrelationId
+  } `
+  -Body $approveBody
+```
+
+### Reject an approval request
+
+```powershell
+$rejectBody = @{
+  actor_reference = "operator:alice"
+  decision_request_id = [guid]::NewGuid().ToString()
+  comment = "Escalation is not required for this ticket."
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/approvals/$approvalRequestId/reject" `
+  -ContentType "application/json" `
+  -Headers @{
+    "X-Correlation-ID" = $CorrelationId
+  } `
+  -Body $rejectBody
+```
+
+### List escalations for a ticket
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/ticket-escalations?ticket_id=$ticketId&page_size=20" `
+  -Headers @{
+    "X-Correlation-ID" = $CorrelationId
+  }
+```
+
+### Read escalation detail
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$workspaceAId/ticket-escalations/$ticketEscalationId" `
+  -Headers @{
+    "X-Correlation-ID" = $CorrelationId
+  }
+```
+
 ## List tickets in workspace A
 
 ```powershell
@@ -1554,6 +1651,12 @@ ticket_classification_not_found
 controlled_support_inspection_not_found
 unsupported_agent_run_inspection
 controlled_support_inspection_inconsistent
+approval_request_not_found
+ticket_escalation_not_found
+approval_decision_conflict
+approval_request_expired
+approval_run_state_conflict
+approval_tool_call_state_conflict
 workspace_slug_conflict
 document_external_reference_conflict
 document_version_content_conflict

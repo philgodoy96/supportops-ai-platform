@@ -21,17 +21,35 @@ The current ownership relationship is:
 ```text
 Workspace
 ├── Ticket
-├── AgentRun and related inspection records
+│   ├── AgentRun
+│   │   └── AgentToolCall
+│   ├── ApprovalRequest
+│   ├── SensitiveExecutionGrant
+│   └── TicketEscalation
 └── Knowledge document
     ├── Document version
     └── Document chunk
+```
+
+Ownership chain for approval and escalation records:
+
+```text
+Workspace
+-> Ticket
+-> AgentRun
+-> AgentToolCall
+-> ApprovalRequest
+-> SensitiveExecutionGrant
+-> TicketEscalation
 ```
 
 A workspace is the top-level owner of support and knowledge data.
 
 Each ticket and knowledge document contains an immutable `workspace_id` that
 references an existing workspace. Those records cannot exist without that
-ownership relationship.
+ownership relationship. Approval requests, sensitive execution grants, and
+ticket escalations inherit the same workspace ownership through their linked
+ticket and AgentRun identities.
 
 The current release does not support moving a ticket or document between
 workspaces.
@@ -96,12 +114,24 @@ GET  /api/v1/workspaces/{workspace_id}
 POST /api/v1/workspaces/{workspace_id}/tickets
 GET  /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}
 GET  /api/v1/workspaces/{workspace_id}/tickets
+GET  /api/v1/workspaces/{workspace_id}/approvals
+GET  /api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}
+POST /api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/approve
+POST /api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/reject
+GET  /api/v1/workspaces/{workspace_id}/ticket-escalations
+GET  /api/v1/workspaces/{workspace_id}/ticket-escalations/{ticket_escalation_id}
 POST /api/v1/workspaces/{workspace_id}/documents
 POST /api/v1/workspaces/{workspace_id}/knowledge/search
 ```
 
-Ticket, document, and semantic search operations are always nested under a
-workspace identifier.
+Ticket, document, approval, escalation, and semantic search operations are
+always nested under a workspace identifier. Every approval and escalation route
+includes `workspace_id`. List queries apply `workspace_id` before other filters.
+Foreign and missing approval or escalation details produce the same nondisclosing
+`404`. Decision commands lock and load approval state within workspace scope.
+`SensitiveExecutionGrant` records remain internal authorization records and are
+not exposed through HTTP inspection. Ticket escalation linkage identifiers do
+not weaken workspace isolation.
 
 Listing tickets for a missing workspace returns `404 Not Found` with
 `workspace_not_found`. Listing tickets for an existing workspace with no
@@ -147,6 +177,8 @@ The implemented boundary provides:
 - repository-level resistance to unscoped ticket and document access;
 - database-enforced ownership;
 - nested HTTP routes that require a workspace identifier;
+- workspace-scoped approval and escalation inspection;
+- workspace-scoped approval decision locking and loading;
 - workspace-scoped semantic retrieval with empty evidence for foreign filters;
 - cross-workspace behavior that avoids resource disclosure;
 - a clear integration point for future authorization checks.
@@ -159,6 +191,10 @@ It does not provide:
 - API key validation;
 - caller-to-workspace trust establishment;
 - authenticated tenant isolation.
+
+Verified identities and RBAC remain a separate policy-enforcement concern.
+Workspace scoping prevents cross-tenant disclosure of approval and escalation
+records, but does not itself authenticate callers.
 
 The current API is therefore appropriate for local and internal portfolio
 demonstration. Public multi-tenant exposure requires an identity and
