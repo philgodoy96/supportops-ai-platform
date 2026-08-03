@@ -1,4 +1,4 @@
-"""Fenced persistence contracts for terminal controlled tool calls."""
+"""Fenced persistence contracts for controlled tool-call lifecycle records."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -6,7 +6,10 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
-from supportops.agent_tools.domain.audit import AgentToolCall
+from supportops.agent_tools.domain.audit import (
+    AgentToolCall,
+    AgentToolCallStatus,
+)
 
 
 class AgentToolCallPersistenceResult(StrEnum):
@@ -19,7 +22,7 @@ class AgentToolCallPersistenceResult(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PersistAgentToolCallCommand:
-    """Persist one terminal tool call while the lease remains valid."""
+    """Persist one tool-call lifecycle record while the lease remains valid."""
 
     workspace_id: UUID
     ticket_id: UUID
@@ -39,18 +42,24 @@ class PersistAgentToolCallCommand:
             tool_call=self.tool_call,
         )
 
-        if self.persisted_at < self.tool_call.finished_at:
+        if self.persisted_at < self.tool_call.proposed_at:
+            raise ValueError("persisted_at must not precede proposed_at.")
+
+        if (
+            self.tool_call.finished_at is not None
+            and self.persisted_at < self.tool_call.finished_at
+        ):
             raise ValueError("persisted_at must not precede the tool-call completion timestamp.")
 
 
 class AgentToolCallExecutionRepository(Protocol):
-    """Atomic persistence boundary for one terminal tool call."""
+    """Atomic persistence boundary for one tool-call lifecycle record."""
 
     async def persist_fenced(
         self,
         command: PersistAgentToolCallCommand,
     ) -> AgentToolCallPersistenceResult:
-        """Persist one terminal audit record under lease fencing."""
+        """Persist one lifecycle record under lease fencing."""
 
         ...
 
@@ -77,9 +86,9 @@ def _validate_tool_call_ownership(
             "AgentRun",
         ),
         (
-            tool_call.agent_run_attempt_id,
+            tool_call.proposed_by_agent_run_attempt_id,
             command.agent_run_attempt_id,
-            "AgentRunAttempt",
+            "proposal AgentRunAttempt",
         ),
     )
 
@@ -88,6 +97,18 @@ def _validate_tool_call_ownership(
             raise ValueError(
                 f"Tool-call {resource_name} ownership does not match the persistence command."
             )
+
+    if tool_call.status is AgentToolCallStatus.PENDING_APPROVAL:
+        if tool_call.executed_by_agent_run_attempt_id is not None:
+            raise ValueError(
+                "Pending approval records cannot define executed_by_agent_run_attempt_id."
+            )
+        return
+
+    if tool_call.executed_by_agent_run_attempt_id != (command.agent_run_attempt_id):
+        raise ValueError(
+            "Tool-call execution AgentRunAttempt ownership does not match the persistence command."
+        )
 
 
 def _validate_utc_timestamp(

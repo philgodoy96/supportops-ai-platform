@@ -133,7 +133,7 @@ class RecordingQueryRepository:
         self.audit = audit
         self.queries: list[AgentToolCallLookup] = []
 
-    async def get_by_attempt_sequence(
+    async def get_by_proposal_attempt_sequence(
         self,
         query: AgentToolCallLookup,
     ) -> AgentToolCall | None:
@@ -141,6 +141,13 @@ class RecordingQueryRepository:
         self.queries.append(query)
 
         return self.audit
+
+    async def get_sensitive_by_identity(
+        self,
+        query: object,
+    ) -> AgentToolCall | None:
+        del query
+        return None
 
 
 class RecordingExecutionRepository:
@@ -306,7 +313,7 @@ def _audit(
     status: AgentToolCallStatus = (AgentToolCallStatus.SUCCEEDED),
     error_code: str | None = None,
 ) -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,

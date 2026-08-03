@@ -328,48 +328,84 @@ type ToolResultSummary = KnowledgeSearchEvidenceSummary | ServiceStatusSummary
 
 @dataclass(frozen=True, slots=True)
 class ToolCallInspection:
-    """Safe terminal audit projection for one controlled tool."""
+    """Safe lifecycle projection for one controlled tool call."""
 
     id: UUID
-    agent_run_attempt_id: UUID
-    attempt_number: int
+    proposed_by_agent_run_attempt_id: UUID
+    proposed_by_attempt_number: int
+    executed_by_agent_run_attempt_id: UUID | None
+    executed_by_attempt_number: int | None
     sequence: int
     tool_name: str
     tool_version: int
     safety_level: ToolSafetyLevel
     status: AgentToolCallStatus
-    latency_ms: int
+    latency_ms: int | None
     error_code: str | None
-    started_at: datetime
-    finished_at: datetime
+    proposed_at: datetime
+    execution_started_at: datetime | None
+    finished_at: datetime | None
     result_summary: ToolResultSummary | None
 
     def __post_init__(self) -> None:
         _validate_uuid(self.id, field_name="id")
         _validate_uuid(
-            self.agent_run_attempt_id,
-            field_name="agent_run_attempt_id",
+            self.proposed_by_agent_run_attempt_id,
+            field_name="proposed_by_agent_run_attempt_id",
         )
 
-        if self.attempt_number < 1:
-            raise ValueError("attempt_number must be at least one.")
+        if self.executed_by_agent_run_attempt_id is not None:
+            _validate_uuid(
+                self.executed_by_agent_run_attempt_id,
+                field_name="executed_by_agent_run_attempt_id",
+            )
+
+        if self.proposed_by_attempt_number < 1:
+            raise ValueError("proposed_by_attempt_number must be at least one.")
+
+        if self.executed_by_attempt_number is not None and self.executed_by_attempt_number < 1:
+            raise ValueError("executed_by_attempt_number must be at least one.")
+
+        if (
+            self.executed_by_agent_run_attempt_id is None
+            and self.executed_by_attempt_number is not None
+        ):
+            raise ValueError(
+                "executed_by_attempt_number requires executed_by_agent_run_attempt_id."
+            )
+
+        if (
+            self.executed_by_agent_run_attempt_id is not None
+            and self.executed_by_attempt_number is None
+        ):
+            raise ValueError(
+                "executed_by_agent_run_attempt_id requires executed_by_attempt_number."
+            )
 
         if self.sequence < 1:
             raise ValueError("sequence must be at least one.")
 
-        supported_tools = {
+        supported_read_only_tools = {
             SEARCH_KNOWLEDGE_TOOL_NAME: (SEARCH_KNOWLEDGE_TOOL_VERSION),
             LOOKUP_SERVICE_STATUS_TOOL_NAME: (LOOKUP_SERVICE_STATUS_TOOL_VERSION),
         }
 
-        if self.tool_name not in supported_tools:
-            raise ValueError("tool_name must identify a controlled support tool.")
+        if self.safety_level is ToolSafetyLevel.READ_ONLY:
+            if self.tool_name not in supported_read_only_tools:
+                raise ValueError("tool_name must identify a controlled support tool.")
 
-        if self.tool_version != supported_tools[self.tool_name]:
-            raise ValueError("tool_version does not match tool_name.")
+            if self.tool_version != supported_read_only_tools[self.tool_name]:
+                raise ValueError("tool_version does not match tool_name.")
+        elif self.safety_level is ToolSafetyLevel.SENSITIVE_WRITE:
+            if not self.tool_name or self.tool_name != self.tool_name.strip():
+                raise ValueError("tool_name is required.")
 
-        if self.safety_level is not ToolSafetyLevel.READ_ONLY:
-            raise ValueError("Controlled inspection supports only read-only tool calls.")
+            if self.tool_version < 1:
+                raise ValueError("tool_version must be at least one.")
+        else:
+            raise ValueError(
+                "Controlled inspection supports only read-only and sensitive_write tool calls."
+            )
 
         if not isinstance(
             self.status,
@@ -377,7 +413,7 @@ class ToolCallInspection:
         ):
             raise ValueError("status must be a supported tool-call status.")
 
-        if self.latency_ms < 0:
+        if self.latency_ms is not None and self.latency_ms < 0:
             raise ValueError("latency_ms must not be negative.")
 
         _validate_optional_text(
@@ -385,29 +421,35 @@ class ToolCallInspection:
             field_name="error_code",
         )
         _validate_utc_timestamp(
-            self.started_at,
-            field_name="started_at",
-        )
-        _validate_utc_timestamp(
-            self.finished_at,
-            field_name="finished_at",
+            self.proposed_at,
+            field_name="proposed_at",
         )
 
-        if self.finished_at < self.started_at:
-            raise ValueError("finished_at must not be earlier than started_at.")
+        if self.execution_started_at is not None:
+            _validate_utc_timestamp(
+                self.execution_started_at,
+                field_name="execution_started_at",
+            )
 
-        if self.status is AgentToolCallStatus.SUCCEEDED:
-            if self.error_code is not None:
-                raise ValueError("Successful tool calls must not define error_code.")
+            if self.execution_started_at < self.proposed_at:
+                raise ValueError("execution_started_at must not be earlier than proposed_at.")
 
-            if self.result_summary is None:
-                raise ValueError("Successful tool calls require a result summary.")
-        else:
-            if self.error_code is None:
-                raise ValueError("Unsuccessful tool calls require error_code.")
+        if self.finished_at is not None:
+            _validate_utc_timestamp(
+                self.finished_at,
+                field_name="finished_at",
+            )
 
-            if self.result_summary is not None:
-                raise ValueError("Unsuccessful tool calls must not expose a result summary.")
+            if self.finished_at < self.proposed_at:
+                raise ValueError("finished_at must not be earlier than proposed_at.")
+
+            if (
+                self.execution_started_at is not None
+                and self.finished_at < self.execution_started_at
+            ):
+                raise ValueError("finished_at must not be earlier than execution_started_at.")
+
+        _validate_tool_call_inspection_lifecycle(self)
 
         if (
             self.tool_name == SEARCH_KNOWLEDGE_TOOL_NAME
@@ -428,6 +470,135 @@ class ToolCallInspection:
             )
         ):
             raise ValueError("Service-status lookup requires a service status summary.")
+
+
+def _validate_tool_call_inspection_lifecycle(
+    tool_call: ToolCallInspection,
+) -> None:
+    if tool_call.status is AgentToolCallStatus.PENDING_APPROVAL:
+        if tool_call.safety_level is not ToolSafetyLevel.SENSITIVE_WRITE:
+            raise ValueError("Pending approval requires sensitive_write.")
+
+        if tool_call.executed_by_agent_run_attempt_id is not None:
+            raise ValueError("Pending approval cannot define an execution attempt.")
+
+        if tool_call.result_summary is not None:
+            raise ValueError("Pending approval must not expose a result summary.")
+
+        if tool_call.error_code is not None:
+            raise ValueError("Pending approval must not define error_code.")
+
+        if tool_call.latency_ms is not None:
+            raise ValueError("Pending approval must not define latency_ms.")
+
+        if tool_call.execution_started_at is not None:
+            raise ValueError("Pending approval must not define execution_started_at.")
+
+        if tool_call.finished_at is not None:
+            raise ValueError("Pending approval must not define finished_at.")
+        return
+
+    if tool_call.status is AgentToolCallStatus.SUCCEEDED:
+        if tool_call.executed_by_agent_run_attempt_id is None:
+            raise ValueError("Successful tool calls require an execution attempt.")
+
+        if tool_call.error_code is not None:
+            raise ValueError("Successful tool calls must not define error_code.")
+
+        if tool_call.result_summary is None:
+            raise ValueError("Successful tool calls require a result summary.")
+
+        if tool_call.latency_ms is None:
+            raise ValueError("Successful tool calls require latency_ms.")
+
+        if tool_call.execution_started_at is None:
+            raise ValueError("Successful tool calls require execution_started_at.")
+
+        if tool_call.finished_at is None:
+            raise ValueError("Successful tool calls require finished_at.")
+        return
+
+    if tool_call.status in {
+        AgentToolCallStatus.FAILED,
+        AgentToolCallStatus.TIMED_OUT,
+    }:
+        if tool_call.executed_by_agent_run_attempt_id is None:
+            raise ValueError("Failed tool calls require an execution attempt.")
+
+        if tool_call.error_code is None:
+            raise ValueError("Failed tool calls require error_code.")
+
+        if tool_call.result_summary is not None:
+            raise ValueError("Failed tool calls must not expose a result summary.")
+
+        if tool_call.latency_ms is None:
+            raise ValueError("Failed tool calls require latency_ms.")
+
+        if tool_call.execution_started_at is None:
+            raise ValueError("Failed tool calls require execution_started_at.")
+
+        if tool_call.finished_at is None:
+            raise ValueError("Failed tool calls require finished_at.")
+        return
+
+    if tool_call.status is AgentToolCallStatus.REJECTED:
+        if tool_call.result_summary is not None:
+            raise ValueError("Rejected tool calls must not expose a result summary.")
+
+        if tool_call.executed_by_agent_run_attempt_id is None:
+            if tool_call.safety_level is not ToolSafetyLevel.SENSITIVE_WRITE:
+                raise ValueError("Human approval rejection requires sensitive_write.")
+
+            if tool_call.error_code is not None:
+                raise ValueError("Human approval rejection must not define error_code.")
+
+            if tool_call.latency_ms is not None:
+                raise ValueError("Human approval rejection must not define latency_ms.")
+
+            if tool_call.execution_started_at is not None:
+                raise ValueError("Human approval rejection must not define execution_started_at.")
+
+            if tool_call.finished_at is None:
+                raise ValueError("Human approval rejection requires finished_at.")
+            return
+
+        if tool_call.error_code is None:
+            raise ValueError("Application-policy rejection requires error_code.")
+
+        if tool_call.latency_ms is None:
+            raise ValueError("Application-policy rejection requires latency_ms.")
+
+        if tool_call.execution_started_at is None:
+            raise ValueError("Application-policy rejection requires execution_started_at.")
+
+        if tool_call.finished_at is None:
+            raise ValueError("Application-policy rejection requires finished_at.")
+        return
+
+    if tool_call.status is AgentToolCallStatus.EXPIRED:
+        if tool_call.safety_level is not ToolSafetyLevel.SENSITIVE_WRITE:
+            raise ValueError("Expired proposals require sensitive_write.")
+
+        if tool_call.executed_by_agent_run_attempt_id is not None:
+            raise ValueError("Expired proposals cannot define an execution attempt.")
+
+        if tool_call.result_summary is not None:
+            raise ValueError("Expired proposals must not expose a result summary.")
+
+        if tool_call.error_code is not None:
+            raise ValueError("Expired proposals must not define error_code.")
+
+        if tool_call.latency_ms is not None:
+            raise ValueError("Expired proposals must not define latency_ms.")
+
+        if tool_call.execution_started_at is not None:
+            raise ValueError("Expired proposals must not define execution_started_at.")
+
+        if tool_call.finished_at is None:
+            raise ValueError("Expired proposals require finished_at.")
+        return
+
+    raise ValueError("status must be a supported tool-call status.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,7 +980,12 @@ class ControlledSupportInspection:
             raise ValueError("Invocation IDs must be unique.")
 
         attempt_numbers = tuple(
-            [tool_call.attempt_number for tool_call in self.tool_calls]
+            [tool_call.proposed_by_attempt_number for tool_call in self.tool_calls]
+            + [
+                tool_call.executed_by_attempt_number
+                for tool_call in self.tool_calls
+                if tool_call.executed_by_attempt_number is not None
+            ]
             + [invocation.attempt_number for invocation in self.llm_invocations]
         )
 
@@ -866,20 +1042,21 @@ def _validate_attempt_scoped_tool_order(
 ) -> None:
     keys = tuple(
         (
-            tool_call.attempt_number,
+            tool_call.proposed_by_attempt_number,
             tool_call.sequence,
+            tool_call.id,
         )
         for tool_call in tool_calls
     )
 
     if keys != tuple(sorted(keys)):
-        raise ValueError("Tool calls must be ordered by attempt and sequence.")
+        raise ValueError("Tool calls must be ordered by proposal attempt and sequence.")
 
     sequences_by_attempt: dict[int, list[int]] = {}
 
     for tool_call in tool_calls:
         sequences_by_attempt.setdefault(
-            tool_call.attempt_number,
+            tool_call.proposed_by_attempt_number,
             [],
         ).append(tool_call.sequence)
 

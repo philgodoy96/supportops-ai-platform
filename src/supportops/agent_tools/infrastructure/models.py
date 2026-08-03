@@ -1,4 +1,4 @@
-"""SQLAlchemy persistence model for controlled tool-call audits."""
+"""SQLAlchemy persistence model for controlled tool-call lifecycle records."""
 
 from datetime import datetime
 from uuid import UUID
@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -39,7 +40,7 @@ _TOOL_SAFETY_SQL_VALUES = ", ".join(f"'{member.value}'" for member in ToolSafety
 
 
 class AgentToolCallRecord(Base):
-    """Persisted terminal audit outcome for one controlled tool call."""
+    """Persisted lifecycle record for one controlled tool call."""
 
     __tablename__ = "agent_tool_calls"
 
@@ -59,9 +60,13 @@ class AgentToolCallRecord(Base):
         Uuid(as_uuid=True),
         nullable=False,
     )
-    agent_run_attempt_id: Mapped[UUID] = mapped_column(
+    proposed_by_agent_run_attempt_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
+    )
+    executed_by_agent_run_attempt_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=True,
     )
     sequence: Mapped[int] = mapped_column(
         Integer,
@@ -96,24 +101,28 @@ class AgentToolCallRecord(Base):
         nullable=False,
     )
     safe_output: Mapped[dict[str, JsonValue] | None] = mapped_column(
-        JSONB,
+        JSONB(none_as_null=True),
         nullable=True,
     )
-    latency_ms: Mapped[int] = mapped_column(
+    latency_ms: Mapped[int | None] = mapped_column(
         BigInteger,
-        nullable=False,
+        nullable=True,
     )
     error_code: Mapped[str | None] = mapped_column(
         String(AGENT_TOOL_CALL_ERROR_CODE_MAX_LENGTH),
         nullable=True,
     )
-    started_at: Mapped[datetime] = mapped_column(
+    proposed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
     )
-    finished_at: Mapped[datetime] = mapped_column(
+    execution_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (
@@ -134,24 +143,45 @@ class AgentToolCallRecord(Base):
         ForeignKeyConstraint(
             [
                 "agent_run_id",
-                "agent_run_attempt_id",
+                "proposed_by_agent_run_attempt_id",
             ],
             [
                 "agent_run_attempts.agent_run_id",
                 "agent_run_attempts.id",
             ],
-            name="fk_agent_tool_calls_agent_run_attempt",
+            name="fk_agent_tool_calls_proposed_by_attempt",
             ondelete="CASCADE",
         ),
-        UniqueConstraint(
-            "agent_run_attempt_id",
-            "sequence",
-            name="uq_agent_tool_calls_attempt_sequence",
+        ForeignKeyConstraint(
+            [
+                "agent_run_id",
+                "executed_by_agent_run_attempt_id",
+            ],
+            [
+                "agent_run_attempts.agent_run_id",
+                "agent_run_attempts.id",
+            ],
+            name="fk_agent_tool_calls_executed_by_attempt",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
-            "agent_run_attempt_id",
+            "proposed_by_agent_run_attempt_id",
+            "sequence",
+            name="uq_agent_tool_calls_proposal_attempt_sequence",
+        ),
+        UniqueConstraint(
+            "proposed_by_agent_run_attempt_id",
             "provider_tool_call_id",
-            name=("uq_agent_tool_calls_attempt_provider_call"),
+            name=("uq_agent_tool_calls_proposal_attempt_provider_call"),
+        ),
+        Index(
+            "uq_agent_tool_calls_sensitive_proposal_identity",
+            "agent_run_id",
+            "tool_name",
+            "tool_version",
+            "input_fingerprint",
+            unique=True,
+            postgresql_where=text("safety_level = 'sensitive_write'"),
         ),
         CheckConstraint(
             "sequence >= 1",
@@ -213,7 +243,7 @@ class AgentToolCallRecord(Base):
             name="agent_tool_call_safe_output_size",
         ),
         CheckConstraint(
-            "latency_ms >= 0",
+            "latency_ms IS NULL OR latency_ms >= 0",
             name="agent_tool_call_latency_non_negative",
         ),
         CheckConstraint(
@@ -228,21 +258,75 @@ class AgentToolCallRecord(Base):
         ),
         CheckConstraint(
             (
-                "("
-                "status = 'succeeded' "
-                "AND safe_output IS NOT NULL "
-                "AND error_code IS NULL"
-                ") OR ("
-                "status IN ('failed', 'timed_out', 'rejected') "
-                "AND safe_output IS NULL "
-                "AND error_code IS NOT NULL"
-                ")"
+                "(execution_started_at IS NULL "
+                "OR execution_started_at >= proposed_at) "
+                "AND (finished_at IS NULL OR finished_at >= proposed_at) "
+                "AND (execution_started_at IS NULL "
+                "OR finished_at IS NULL "
+                "OR finished_at >= execution_started_at)"
             ),
-            name="agent_tool_call_terminal_outcome",
+            name="agent_tool_call_timestamp_order",
         ),
         CheckConstraint(
-            "finished_at >= started_at",
-            name="agent_tool_call_timestamp_order",
+            ("status <> 'pending_approval' OR safety_level = 'sensitive_write'"),
+            name="agent_tool_call_sensitive_pending_state",
+        ),
+        CheckConstraint(
+            (
+                "("
+                "status = 'pending_approval' "
+                "AND executed_by_agent_run_attempt_id IS NULL "
+                "AND safe_output IS NULL "
+                "AND latency_ms IS NULL "
+                "AND error_code IS NULL "
+                "AND execution_started_at IS NULL "
+                "AND finished_at IS NULL"
+                ") OR ("
+                "status = 'succeeded' "
+                "AND executed_by_agent_run_attempt_id IS NOT NULL "
+                "AND safe_output IS NOT NULL "
+                "AND latency_ms IS NOT NULL "
+                "AND error_code IS NULL "
+                "AND execution_started_at IS NOT NULL "
+                "AND finished_at IS NOT NULL"
+                ") OR ("
+                "status IN ('failed', 'timed_out') "
+                "AND executed_by_agent_run_attempt_id IS NOT NULL "
+                "AND safe_output IS NULL "
+                "AND latency_ms IS NOT NULL "
+                "AND error_code IS NOT NULL "
+                "AND execution_started_at IS NOT NULL "
+                "AND finished_at IS NOT NULL"
+                ") OR ("
+                "status = 'rejected' "
+                "AND safe_output IS NULL "
+                "AND finished_at IS NOT NULL "
+                "AND ("
+                "("
+                "executed_by_agent_run_attempt_id IS NULL "
+                "AND safety_level = 'sensitive_write' "
+                "AND latency_ms IS NULL "
+                "AND error_code IS NULL "
+                "AND execution_started_at IS NULL"
+                ") OR ("
+                "executed_by_agent_run_attempt_id IS NOT NULL "
+                "AND latency_ms IS NOT NULL "
+                "AND error_code IS NOT NULL "
+                "AND execution_started_at IS NOT NULL"
+                ")"
+                ")"
+                ") OR ("
+                "status = 'expired' "
+                "AND safety_level = 'sensitive_write' "
+                "AND executed_by_agent_run_attempt_id IS NULL "
+                "AND safe_output IS NULL "
+                "AND latency_ms IS NULL "
+                "AND error_code IS NULL "
+                "AND execution_started_at IS NULL "
+                "AND finished_at IS NOT NULL"
+                ")"
+            ),
+            name="agent_tool_call_lifecycle_state",
         ),
         Index(
             "ix_agent_tool_calls_workspace_run_sequence",
@@ -257,14 +341,15 @@ class AgentToolCallRecord(Base):
         cls,
         tool_call: AgentToolCall,
     ) -> "AgentToolCallRecord":
-        """Create a persistence record from a terminal audit entity."""
+        """Create a persistence record from a lifecycle entity."""
 
         return cls(
             id=tool_call.id,
             workspace_id=tool_call.workspace_id,
             ticket_id=tool_call.ticket_id,
             agent_run_id=tool_call.agent_run_id,
-            agent_run_attempt_id=(tool_call.agent_run_attempt_id),
+            proposed_by_agent_run_attempt_id=(tool_call.proposed_by_agent_run_attempt_id),
+            executed_by_agent_run_attempt_id=(tool_call.executed_by_agent_run_attempt_id),
             sequence=tool_call.sequence,
             provider_tool_call_id=(tool_call.provider_tool_call_id),
             tool_name=tool_call.tool_name,
@@ -278,19 +363,21 @@ class AgentToolCallRecord(Base):
             ),
             latency_ms=tool_call.latency_ms,
             error_code=tool_call.error_code,
-            started_at=tool_call.started_at,
+            proposed_at=tool_call.proposed_at,
+            execution_started_at=(tool_call.execution_started_at),
             finished_at=tool_call.finished_at,
         )
 
     def to_domain(self) -> AgentToolCall:
-        """Map the persistence record to a terminal audit entity."""
+        """Map the persistence record to a lifecycle entity."""
 
         return AgentToolCall(
             id=self.id,
             workspace_id=self.workspace_id,
             ticket_id=self.ticket_id,
             agent_run_id=self.agent_run_id,
-            agent_run_attempt_id=self.agent_run_attempt_id,
+            proposed_by_agent_run_attempt_id=(self.proposed_by_agent_run_attempt_id),
+            executed_by_agent_run_attempt_id=(self.executed_by_agent_run_attempt_id),
             sequence=self.sequence,
             provider_tool_call_id=self.provider_tool_call_id,
             tool_name=self.tool_name,
@@ -302,6 +389,7 @@ class AgentToolCallRecord(Base):
             safe_output=self.safe_output,
             latency_ms=self.latency_ms,
             error_code=self.error_code,
-            started_at=self.started_at,
+            proposed_at=self.proposed_at,
+            execution_started_at=self.execution_started_at,
             finished_at=self.finished_at,
         )

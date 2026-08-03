@@ -142,7 +142,7 @@ def _tool_call(
     provider_tool_call_id: str = ("provider-tool-call-1"),
     input_fingerprint: str = "a" * 64,
 ) -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=tool_call_id,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -400,14 +400,14 @@ async def test_loads_terminal_audit_by_exact_attempt_sequence(
             workspace_id=_WORKSPACE_ID,
             ticket_id=_TICKET_ID,
             agent_run_id=claim.agent_run.id,
-            agent_run_attempt_id=claim.attempt.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
             sequence=1,
         )
 
         async with SqlAlchemyTransactionManager(session).transaction():
-            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
-                query
-            )
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(
+                session
+            ).get_by_proposal_attempt_sequence(query)
 
     assert loaded == _tool_call(claim)
 
@@ -428,14 +428,14 @@ async def test_returns_none_for_cross_workspace_tool_audit_lookup(
             workspace_id=UUID("a0000000-0000-4000-8000-000000000012"),
             ticket_id=_TICKET_ID,
             agent_run_id=claim.agent_run.id,
-            agent_run_attempt_id=claim.attempt.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
             sequence=1,
         )
 
         async with SqlAlchemyTransactionManager(session).transaction():
-            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
-                query
-            )
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(
+                session
+            ).get_by_proposal_attempt_sequence(query)
 
     assert loaded is None
 
@@ -456,13 +456,152 @@ async def test_returns_none_for_missing_tool_call_sequence(
             workspace_id=_WORKSPACE_ID,
             ticket_id=_TICKET_ID,
             agent_run_id=claim.agent_run.id,
-            agent_run_attempt_id=claim.attempt.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
             sequence=2,
         )
 
         async with SqlAlchemyTransactionManager(session).transaction():
-            loaded = await SqlAlchemyAgentToolCallQueryRepository(session).get_by_attempt_sequence(
-                query
-            )
+            loaded = await SqlAlchemyAgentToolCallQueryRepository(
+                session
+            ).get_by_proposal_attempt_sequence(query)
 
     assert loaded is None
+
+
+def _pending_sensitive_tool_call(
+    claim: AgentRunClaim,
+    *,
+    tool_call_id: UUID = _TOOL_CALL_ID,
+    sequence: int = 1,
+    provider_tool_call_id: str = "provider-sensitive-1",
+    input_fingerprint: str = "b" * 64,
+) -> AgentToolCall:
+    return AgentToolCall.propose_for_approval(
+        tool_call_id=tool_call_id,
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        agent_run_id=claim.agent_run.id,
+        proposed_by_agent_run_attempt_id=claim.attempt.id,
+        sequence=sequence,
+        provider_tool_call_id=provider_tool_call_id,
+        tool_name="escalate_ticket",
+        tool_version=1,
+        input_fingerprint=input_fingerprint,
+        safe_input={"reason_code": "policy_required"},
+        proposed_at=_TOOL_STARTED_AT,
+    )
+
+
+async def test_persists_pending_sensitive_proposal(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+
+        result = await _persist(
+            session,
+            _command(claim, tool_call=tool_call),
+        )
+
+    assert result is AgentToolCallPersistenceResult.APPLIED
+
+    async with postgresql_session_factory() as session:
+        records = await _load_records(session)
+
+    assert len(records) == 1
+    assert records[0].to_domain() == tool_call
+    assert records[0].executed_by_agent_run_attempt_id is None
+
+
+async def test_sensitive_proposal_replay_returns_already_recorded(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        first = _pending_sensitive_tool_call(claim)
+        proposal_attempt_id = claim.attempt.id
+
+        first_result = await _persist(
+            session,
+            _command(claim, tool_call=first),
+        )
+
+        replay = AgentToolCall.propose_for_approval(
+            tool_call_id=_SECOND_TOOL_CALL_ID,
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_TICKET_ID,
+            agent_run_id=claim.agent_run.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
+            sequence=2,
+            provider_tool_call_id="provider-sensitive-2",
+            tool_name="escalate_ticket",
+            tool_version=1,
+            input_fingerprint="b" * 64,
+            safe_input={"reason_code": "policy_required"},
+            proposed_at=_TOOL_STARTED_AT + timedelta(seconds=1),
+        )
+
+        second_result = await _persist(
+            session,
+            _command(
+                claim,
+                tool_call=replay,
+                persisted_at=_TOOL_STARTED_AT + timedelta(seconds=2),
+            ),
+        )
+
+    assert first_result is AgentToolCallPersistenceResult.APPLIED
+    assert second_result is AgentToolCallPersistenceResult.ALREADY_RECORDED
+
+    async with postgresql_session_factory() as session:
+        records = await _load_records(session)
+
+    assert len(records) == 1
+    assert records[0].id == first.id
+    assert records[0].proposed_by_agent_run_attempt_id == proposal_attempt_id
+    assert records[0].provider_tool_call_id == "provider-sensitive-1"
+
+
+async def test_conflicting_sensitive_proposal_raises(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        first = _pending_sensitive_tool_call(claim)
+
+        await _persist(
+            session,
+            _command(claim, tool_call=first),
+        )
+
+        conflicting = AgentToolCall.propose_for_approval(
+            tool_call_id=_SECOND_TOOL_CALL_ID,
+            workspace_id=_WORKSPACE_ID,
+            ticket_id=_TICKET_ID,
+            agent_run_id=claim.agent_run.id,
+            proposed_by_agent_run_attempt_id=claim.attempt.id,
+            sequence=2,
+            provider_tool_call_id="provider-sensitive-2",
+            tool_name="escalate_ticket",
+            tool_version=1,
+            input_fingerprint="b" * 64,
+            safe_input={"reason_code": "different_reason"},
+            proposed_at=_TOOL_STARTED_AT + timedelta(seconds=1),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="conflicting ownership or input data",
+        ):
+            await _persist(
+                session,
+                _command(
+                    claim,
+                    tool_call=conflicting,
+                    persisted_at=_TOOL_STARTED_AT + timedelta(seconds=2),
+                ),
+            )

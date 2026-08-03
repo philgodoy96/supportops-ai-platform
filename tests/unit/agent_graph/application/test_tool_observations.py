@@ -103,7 +103,7 @@ class StubToolCallRepository:
         self._audits = audits
         self.queries: list[AgentToolCallLookup] = []
 
-    async def get_by_attempt_sequence(
+    async def get_by_proposal_attempt_sequence(
         self,
         query: AgentToolCallLookup,
     ) -> AgentToolCall | None:
@@ -111,6 +111,13 @@ class StubToolCallRepository:
         self.queries.append(query)
 
         return self._audits.get(query.sequence)
+
+    async def get_sensitive_by_identity(
+        self,
+        query: object,
+    ) -> AgentToolCall | None:
+        del query
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +214,7 @@ def _state(
 
 
 def _search_audit() -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -250,7 +257,7 @@ def _search_audit() -> AgentToolCall:
 
 
 def _status_audit() -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -451,12 +458,12 @@ async def test_rejects_missing_checkpointed_audit() -> None:
 
 async def test_rejects_checkpoint_audit_id_mismatch() -> None:
     audit = _search_audit()
-    mismatched_state_audit = AgentToolCall.create(
+    mismatched_state_audit = AgentToolCall.create_terminal(
         tool_call_id=UUID("b0000000-0000-4000-8000-000000000011"),
         workspace_id=audit.workspace_id,
         ticket_id=audit.ticket_id,
         agent_run_id=audit.agent_run_id,
-        agent_run_attempt_id=audit.agent_run_attempt_id,
+        agent_run_attempt_id=audit.proposed_by_agent_run_attempt_id,
         sequence=audit.sequence,
         provider_tool_call_id=audit.provider_tool_call_id,
         tool_name=audit.tool_name,
@@ -466,10 +473,10 @@ async def test_rejects_checkpoint_audit_id_mismatch() -> None:
         input_fingerprint=audit.input_fingerprint,
         safe_input=audit.safe_input,
         safe_output=audit.safe_output,
-        latency_ms=audit.latency_ms,
+        latency_ms=audit.latency_ms or 0,
         error_code=audit.error_code,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
+        started_at=audit.execution_started_at or audit.proposed_at,
+        finished_at=audit.finished_at or audit.proposed_at,
     )
     assembler, _, _, _ = _assembler(
         audits={

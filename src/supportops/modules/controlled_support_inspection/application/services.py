@@ -177,15 +177,29 @@ def _project_tool_call(
     *,
     attempt_numbers: Mapping[UUID, int],
 ) -> ToolCallInspection:
-    attempt_number = attempt_numbers.get(tool_call.agent_run_attempt_id)
+    proposed_by_attempt_number = attempt_numbers.get(
+        tool_call.proposed_by_agent_run_attempt_id,
+    )
 
-    if attempt_number is None:
-        raise ValueError("Tool call references an unknown AgentRun attempt.")
+    if proposed_by_attempt_number is None:
+        raise ValueError("Tool call references an unknown proposal AgentRun attempt.")
+
+    executed_by_attempt_number: int | None = None
+
+    if tool_call.executed_by_agent_run_attempt_id is not None:
+        executed_by_attempt_number = attempt_numbers.get(
+            tool_call.executed_by_agent_run_attempt_id,
+        )
+
+        if executed_by_attempt_number is None:
+            raise ValueError("Tool call references an unknown execution AgentRun attempt.")
 
     return ToolCallInspection(
         id=tool_call.id,
-        agent_run_attempt_id=(tool_call.agent_run_attempt_id),
-        attempt_number=attempt_number,
+        proposed_by_agent_run_attempt_id=(tool_call.proposed_by_agent_run_attempt_id),
+        proposed_by_attempt_number=proposed_by_attempt_number,
+        executed_by_agent_run_attempt_id=(tool_call.executed_by_agent_run_attempt_id),
+        executed_by_attempt_number=executed_by_attempt_number,
         sequence=tool_call.sequence,
         tool_name=tool_call.tool_name,
         tool_version=tool_call.tool_version,
@@ -193,7 +207,8 @@ def _project_tool_call(
         status=tool_call.status,
         latency_ms=tool_call.latency_ms,
         error_code=tool_call.error_code,
-        started_at=tool_call.started_at,
+        proposed_at=tool_call.proposed_at,
+        execution_started_at=(tool_call.execution_started_at),
         finished_at=tool_call.finished_at,
         result_summary=_project_tool_result(tool_call),
     )

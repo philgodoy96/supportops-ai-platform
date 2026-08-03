@@ -158,20 +158,23 @@ class ServiceStatusSummaryResponse(BaseModel):
 
 
 class ToolCallInspectionResponse(BaseModel):
-    """Safe terminal tool-call history item."""
+    """Safe tool-call lifecycle history item."""
 
     id: UUID
-    agent_run_attempt_id: UUID
-    attempt_number: int
+    proposed_by_agent_run_attempt_id: UUID
+    proposed_by_attempt_number: int
+    executed_by_agent_run_attempt_id: UUID | None
+    executed_by_attempt_number: int | None
     sequence: int
     tool_name: str
     tool_version: int
     safety_level: ToolSafetyLevel
     status: AgentToolCallStatus
-    latency_ms: int
+    latency_ms: int | None
     error_code: str | None
-    started_at: datetime
-    finished_at: datetime
+    proposed_at: datetime
+    execution_started_at: datetime | None
+    finished_at: datetime | None
     result_summary: KnowledgeSearchEvidenceSummaryResponse | ServiceStatusSummaryResponse | None
 
     @classmethod
@@ -200,8 +203,10 @@ class ToolCallInspectionResponse(BaseModel):
 
         return cls(
             id=value.id,
-            agent_run_attempt_id=(value.agent_run_attempt_id),
-            attempt_number=value.attempt_number,
+            proposed_by_agent_run_attempt_id=(value.proposed_by_agent_run_attempt_id),
+            proposed_by_attempt_number=(value.proposed_by_attempt_number),
+            executed_by_agent_run_attempt_id=(value.executed_by_agent_run_attempt_id),
+            executed_by_attempt_number=(value.executed_by_attempt_number),
             sequence=value.sequence,
             tool_name=value.tool_name,
             tool_version=value.tool_version,
@@ -209,7 +214,8 @@ class ToolCallInspectionResponse(BaseModel):
             status=value.status,
             latency_ms=value.latency_ms,
             error_code=value.error_code,
-            started_at=value.started_at,
+            proposed_at=value.proposed_at,
+            execution_started_at=(value.execution_started_at),
             finished_at=value.finished_at,
             result_summary=result_summary,
         )

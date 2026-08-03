@@ -289,7 +289,8 @@ async def test_executes_and_returns_terminal_success_audit() -> None:
     assert result.audit.workspace_id == _WORKSPACE_ID
     assert result.audit.ticket_id == _TICKET_ID
     assert result.audit.agent_run_id == _AGENT_RUN_ID
-    assert result.audit.agent_run_attempt_id == _ATTEMPT_ID
+    assert result.audit.proposed_by_agent_run_attempt_id == _ATTEMPT_ID
+    assert result.audit.executed_by_agent_run_attempt_id == _ATTEMPT_ID
     assert result.audit.sequence == 1
     assert result.audit.status is (AgentToolCallStatus.SUCCEEDED)
     assert result.audit.safe_input == {
@@ -304,7 +305,8 @@ async def test_executes_and_returns_terminal_success_audit() -> None:
     }
     assert result.audit.latency_ms == 25
     assert result.audit.error_code is None
-    assert result.audit.started_at == _STARTED_AT
+    assert result.audit.proposed_at == _STARTED_AT
+    assert result.audit.execution_started_at == _STARTED_AT
     assert result.audit.finished_at == _FINISHED_AT
 
 

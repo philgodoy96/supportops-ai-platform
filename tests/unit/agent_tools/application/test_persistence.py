@@ -37,7 +37,7 @@ _PERSISTED_AT = _FINISHED_AT + timedelta(milliseconds=5)
 
 
 def _tool_call() -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -83,7 +83,9 @@ def test_accepts_consistent_terminal_tool_call() -> None:
     assert command.tool_call.workspace_id == (command.workspace_id)
     assert command.tool_call.ticket_id == command.ticket_id
     assert command.tool_call.agent_run_id == (command.agent_run_id)
-    assert command.tool_call.agent_run_attempt_id == (command.agent_run_attempt_id)
+    assert command.tool_call.proposed_by_agent_run_attempt_id == (command.agent_run_attempt_id)
+    assert command.tool_call.executed_by_agent_run_attempt_id == (command.agent_run_attempt_id)
+    assert command.tool_call.finished_at is not None
     assert command.persisted_at >= command.tool_call.finished_at
 
 
@@ -104,7 +106,7 @@ def test_accepts_consistent_terminal_tool_call() -> None:
         ),
         (
             "agent_run_attempt_id",
-            "Tool-call AgentRunAttempt ownership",
+            "Tool-call proposal AgentRunAttempt ownership",
         ),
     ],
 )
@@ -133,7 +135,8 @@ def test_rejects_tool_call_ownership_mismatch(
     else:
         mismatched_call = replace(
             tool_call,
-            agent_run_attempt_id=mismatched_id,
+            proposed_by_agent_run_attempt_id=mismatched_id,
+            executed_by_agent_run_attempt_id=mismatched_id,
         )
 
     with pytest.raises(

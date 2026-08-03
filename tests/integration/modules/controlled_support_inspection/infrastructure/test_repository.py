@@ -160,7 +160,7 @@ def _tool_call(
     provider_call_id: str,
     started_at: datetime,
 ) -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=tool_call_id,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -324,7 +324,11 @@ async def test_loads_attempt_scoped_history_in_order(
         1,
         2,
     )
-    assert tuple(tool_call.agent_run_attempt_id for tool_call in data.tool_calls) == (
+    assert tuple(tool_call.proposed_by_agent_run_attempt_id for tool_call in data.tool_calls) == (
+        _ATTEMPT_ONE_ID,
+        _ATTEMPT_TWO_ID,
+    )
+    assert tuple(tool_call.executed_by_agent_run_attempt_id for tool_call in data.tool_calls) == (
         _ATTEMPT_ONE_ID,
         _ATTEMPT_TWO_ID,
     )

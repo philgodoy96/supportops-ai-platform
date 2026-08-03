@@ -39,7 +39,7 @@ FINISHED_AT = STARTED_AT + timedelta(milliseconds=25)
 def create_tool_call() -> AgentToolCall:
     """Create one valid terminal tool-call audit."""
 
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=TOOL_CALL_ID,
         workspace_id=WORKSPACE_ID,
         ticket_id=TICKET_ID,
@@ -87,9 +87,10 @@ def test_tool_call_table_has_expected_constraints() -> None:
 
     assert {
         "fk_agent_tool_calls_workspace_ticket_agent_run",
-        "fk_agent_tool_calls_agent_run_attempt",
-        "uq_agent_tool_calls_attempt_sequence",
-        "uq_agent_tool_calls_attempt_provider_call",
+        "fk_agent_tool_calls_proposed_by_attempt",
+        "fk_agent_tool_calls_executed_by_attempt",
+        "uq_agent_tool_calls_proposal_attempt_sequence",
+        "uq_agent_tool_calls_proposal_attempt_provider_call",
         "ck_agent_tool_calls_agent_tool_call_sequence_positive",
         ("ck_agent_tool_calls_agent_tool_call_provider_call_id_format"),
         "ck_agent_tool_calls_agent_tool_call_tool_name_format",
@@ -103,8 +104,18 @@ def test_tool_call_table_has_expected_constraints() -> None:
         "ck_agent_tool_calls_agent_tool_call_safe_output_size",
         ("ck_agent_tool_calls_agent_tool_call_latency_non_negative"),
         ("ck_agent_tool_calls_agent_tool_call_error_code_format"),
-        "ck_agent_tool_calls_agent_tool_call_terminal_outcome",
         "ck_agent_tool_calls_agent_tool_call_timestamp_order",
+        ("ck_agent_tool_calls_agent_tool_call_sensitive_pending_state"),
+        "ck_agent_tool_calls_agent_tool_call_lifecycle_state",
     }.issubset(constraint_names)
 
     assert "ix_agent_tool_calls_workspace_run_sequence" in index_names
+    assert "uq_agent_tool_calls_sensitive_proposal_identity" in index_names
+    assert "ck_agent_tool_calls_agent_tool_call_terminal_outcome" not in (constraint_names)
+    assert "proposed_by_agent_run_attempt_id" in {column.name for column in table.c}
+    assert "executed_by_agent_run_attempt_id" in {column.name for column in table.c}
+    assert "proposed_at" in {column.name for column in table.c}
+    assert "execution_started_at" in {column.name for column in table.c}
+    assert table.c.latency_ms.nullable is True
+    assert table.c.finished_at.nullable is True
+    assert table.c.execution_started_at.nullable is True

@@ -121,7 +121,8 @@ class SqlAlchemyControlledSupportInspectionRepository(ControlledSupportInspectio
                 AgentRunAttemptRecord,
                 and_(
                     AgentRunAttemptRecord.agent_run_id == AgentToolCallRecord.agent_run_id,
-                    AgentRunAttemptRecord.id == (AgentToolCallRecord.agent_run_attempt_id),
+                    AgentRunAttemptRecord.id
+                    == (AgentToolCallRecord.proposed_by_agent_run_attempt_id),
                 ),
             )
             .where(

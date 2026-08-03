@@ -52,7 +52,7 @@ def _queued_run() -> AgentRun:
 
 
 def _tool_call() -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -125,7 +125,7 @@ def test_accepts_empty_queued_snapshot() -> None:
 def test_rejects_tool_call_for_unknown_attempt() -> None:
     with pytest.raises(
         ValueError,
-        match="unknown AgentRun attempt",
+        match="unknown proposal AgentRun attempt",
     ):
         ControlledSupportInspectionData(
             agent_run=_queued_run(),
