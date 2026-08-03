@@ -9,6 +9,9 @@ def register_persistence_models() -> None:
         AgentRunAttemptRecord,
         AgentRunRecord,
     )
+    from supportops.modules.approvals.infrastructure.models import (
+        ApprovalRequestRecord,
+    )
     from supportops.modules.knowledge_documents.infrastructure.models import (
         DocumentChunkRecord,
         DocumentRecord,
@@ -40,6 +43,7 @@ def register_persistence_models() -> None:
         LLMInvocationRecord,
         TicketClassificationRecord,
         AgentToolCallRecord,
+        ApprovalRequestRecord,
         SupportRecommendationRecord,
         SupportRecommendationCitationRecord,
     )

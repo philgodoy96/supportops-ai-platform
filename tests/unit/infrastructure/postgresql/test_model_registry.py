@@ -20,6 +20,7 @@ def test_register_persistence_models_populates_shared_metadata() -> None:
         "llm_invocations",
         "ticket_classifications",
         "agent_tool_calls",
+        "approval_requests",
         "support_recommendations",
         "support_recommendation_citations",
     }

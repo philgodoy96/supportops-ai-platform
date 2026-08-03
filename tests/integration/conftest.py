@@ -165,6 +165,7 @@ async def clean_business_tables(
         # Citations RESTRICT-reference knowledge_document_chunks, so clear them first.
         await lock_connection.execute(text("DELETE FROM support_recommendation_citations"))
         await lock_connection.execute(text("DELETE FROM support_recommendations"))
+        await lock_connection.execute(text("DELETE FROM approval_requests"))
         await lock_connection.execute(text("DELETE FROM agent_tool_calls"))
         await lock_connection.execute(text("DELETE FROM knowledge_document_chunks"))
         await lock_connection.execute(
