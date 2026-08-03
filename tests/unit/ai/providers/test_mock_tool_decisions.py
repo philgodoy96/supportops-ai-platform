@@ -223,6 +223,25 @@ async def test_returns_scripted_terminal_completion() -> None:
     )
 
 
+async def test_returns_scripted_sensitive_escalation() -> None:
+    provider = MockLLMProvider.with_strict_tool_decisions(
+        (
+            MockToolDecisionOutcome.escalate_ticket(
+                target_queue="security_operations",
+                reason="Potential account takeover indicators.",
+            ),
+        ),
+        model=MOCK_SUPPORT_MODEL,
+    )
+
+    response = await provider.decide(_decision_request())
+
+    assert response.function_name == "escalate_ticket"
+    assert response.arguments_json == (
+        '{"reason":"Potential account takeover indicators.","target_queue":"security_operations"}'
+    )
+
+
 async def test_unknown_tool_is_returned_without_correction() -> None:
     provider = MockLLMProvider.with_strict_tool_decisions(
         (

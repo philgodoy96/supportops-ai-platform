@@ -186,6 +186,49 @@ class MockToolDecisionOutcome:
         )
 
     @classmethod
+    def escalate_ticket(
+        cls,
+        *,
+        target_queue: str = "security_operations",
+        reason: str = ("The ticket evidence supports internal escalation."),
+        usage: LLMTokenUsage | None = None,
+    ) -> "MockToolDecisionOutcome":
+        """Script one bounded sensitive escalation proposal."""
+
+        return cls.function_call(
+            function_name="escalate_ticket",
+            arguments={
+                "target_queue": target_queue,
+                "reason": reason,
+            },
+            usage=usage,
+        )
+
+    @classmethod
+    def complete_human_approved_support_analysis(
+        cls,
+        *,
+        recommended_action: str,
+        evidence_sufficient: bool,
+        requires_human_review: bool,
+        decision_summary: str,
+        usage: LLMTokenUsage | None = None,
+    ) -> "MockToolDecisionOutcome":
+        """Script the human-approved terminal control action."""
+
+        return cls.function_call(
+            function_name=("complete_human_approved_support_analysis"),
+            arguments={
+                "schema_version": ("human-approved-support-decision-v1"),
+                "recommended_action": recommended_action,
+                "evidence_sufficient": evidence_sufficient,
+                "requires_human_review": (requires_human_review),
+                "decision_summary": decision_summary,
+            },
+            usage=usage,
+        )
+
+    @classmethod
     def unknown_tool(
         cls,
         *,

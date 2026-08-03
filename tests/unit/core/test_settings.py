@@ -431,6 +431,17 @@ def test_settings_accept_controlled_support_as_ticket_processing_workflow_versio
     assert settings.ticket_processing_workflow_version == "controlled-support-v1"
 
 
+def test_settings_accept_human_approved_support_as_ticket_processing_workflow_version() -> None:
+    settings = create_required_settings(
+        ticket_processing_workflow_version="human-approved-support-v1",
+    )
+
+    assert settings.ticket_processing_workflow_version == "human-approved-support-v1"
+    assert create_required_settings().ticket_processing_workflow_version == (
+        "controlled-support-v1"
+    )
+
+
 def test_settings_reject_unsupported_agent_graph_durability() -> None:
     with pytest.raises(ValidationError):
         create_required_settings(agent_graph_durability="async")

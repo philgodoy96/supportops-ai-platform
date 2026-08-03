@@ -53,6 +53,7 @@ TicketProcessingWorkflowVersion = Literal[
     "deterministic-baseline-v1",
     "ticket-classification-v1",
     "controlled-support-v1",
+    "human-approved-support-v1",
 ]
 
 SupportWorkflowVersion = Literal["controlled-support-v1"]
@@ -296,7 +297,11 @@ class Settings(BaseSettings):
         maximum_logical_invocation_count = 1 + self.llm_max_repair_attempts
         logical_generation_count = (
             _CONTROLLED_SUPPORT_LOGICAL_LLM_GENERATIONS
-            if self.ticket_processing_workflow_version == "controlled-support-v1"
+            if self.ticket_processing_workflow_version
+            in {
+                "controlled-support-v1",
+                "human-approved-support-v1",
+            }
             else 1
         )
         logical_llm_budget_seconds = (

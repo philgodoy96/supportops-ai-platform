@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import Table, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from tests.integration.conftest import clear_integration_business_data
 
 from supportops.agent_tools.infrastructure.models import (
     AgentToolCallRecord,
@@ -195,10 +196,16 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
     upgrade = run_alembic_command("upgrade", "head")
     assert upgrade.returncode == 0, upgrade.stderr
 
-    downgrade = run_alembic_command("downgrade", "base")
-    assert downgrade.returncode == 0, downgrade.stderr
-
     try:
+        # Approval-aware tool-call rows block downgrade through c9e2f4a7b6d1;
+        # clear first so a partial downgrade cannot drop approval_requests and
+        # then fail, poisoning later clean_business_tables fixtures.
+        async with engine.begin() as connection:
+            await clear_integration_business_data(connection)
+
+        downgrade = run_alembic_command("downgrade", "base")
+        assert downgrade.returncode == 0, downgrade.stderr
+
         assert not await relation_exists(engine, "public.tickets")
         assert not await relation_exists(engine, "public.workspaces")
         assert not await relation_exists(
@@ -223,14 +230,10 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
             engine,
             "public.support_recommendation_citations",
         )
-    finally:
-        await engine.dispose()
 
-    reupgrade = run_alembic_command("upgrade", "head")
-    assert reupgrade.returncode == 0, reupgrade.stderr
+        reupgrade = run_alembic_command("upgrade", "head")
+        assert reupgrade.returncode == 0, reupgrade.stderr
 
-    engine = create_async_engine(str(settings.postgresql_url))
-    try:
         assert await relation_exists(engine, "public.alembic_version")
         assert await relation_exists(engine, "public.workspaces")
         assert await relation_exists(engine, "public.tickets")
@@ -252,6 +255,7 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
         )
     finally:
         await engine.dispose()
+        run_alembic_command("upgrade", "head")
 
 
 async def test_alembic_downgrade_controlled_workflow_revision_removes_only_those_tables(
@@ -264,6 +268,9 @@ async def test_alembic_downgrade_controlled_workflow_revision_removes_only_those
     assert upgrade.returncode == 0, upgrade.stderr
 
     try:
+        async with engine.begin() as connection:
+            await clear_integration_business_data(connection)
+
         downgrade = run_alembic_command(
             "downgrade",
             PRE_CONTROLLED_WORKFLOW_REVISION,
@@ -341,6 +348,8 @@ async def test_alembic_retryable_failure_budget_migration_upgrades_and_downgrade
 
     upgrade_head = run_alembic_command("upgrade", "head")
     assert upgrade_head.returncode == 0, upgrade_head.stderr
+    async with engine.begin() as connection:
+        await clear_integration_business_data(connection)
     downgrade_to_baseline = run_alembic_command(
         "downgrade",
         CONTROLLED_WORKFLOW_REVISION,
@@ -759,6 +768,9 @@ async def test_alembic_waiting_for_approval_migration_upgrades_and_downgrades(
     upgrade_head = run_alembic_command("upgrade", "head")
     assert upgrade_head.returncode == 0, upgrade_head.stderr
 
+    async with engine.begin() as connection:
+        await clear_integration_business_data(connection)
+
     downgrade_to_budget = run_alembic_command(
         "downgrade",
         RETRYABLE_FAILURE_BUDGET_REVISION,
@@ -1107,6 +1119,9 @@ async def test_alembic_tool_call_lifecycle_migration_upgrades_and_downgrades(
 
     upgrade_head = run_alembic_command("upgrade", "head")
     assert upgrade_head.returncode == 0, upgrade_head.stderr
+
+    async with engine.begin() as connection:
+        await clear_integration_business_data(connection)
 
     downgrade_to_waiting = run_alembic_command(
         "downgrade",
@@ -1812,6 +1827,9 @@ async def test_alembic_approval_request_migration_upgrades_and_downgrades(
 
     upgrade_head = run_alembic_command("upgrade", "head")
     assert upgrade_head.returncode == 0, upgrade_head.stderr
+
+    async with engine.begin() as connection:
+        await clear_integration_business_data(connection)
 
     downgrade_prior = run_alembic_command(
         "downgrade",

@@ -10,8 +10,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from supportops.agent_graph.application.human_approved_workflow import (
+    HumanApprovedSupportWorkflowExecutor,
+)
 from supportops.agent_graph.application.workflow import (
     ControlledSupportWorkflowExecutor,
+)
+from supportops.agent_graph.domain.human_approved_state import (
+    HUMAN_APPROVED_SUPPORT_WORKFLOW_VERSION,
 )
 from supportops.agent_graph.domain.state import (
     CONTROLLED_SUPPORT_WORKFLOW_VERSION,
@@ -478,7 +484,7 @@ async def _build_registry_with_stubs() -> tuple[Any, Any]:
     return registry, (llm_runtime, controlled_runtime)
 
 
-async def test_session_factory_registers_three_workflows() -> None:
+async def test_session_factory_registers_four_workflows() -> None:
     registry, runtimes = await _build_registry_with_stubs()
     llm_runtime, controlled_runtime = runtimes
 
@@ -495,8 +501,12 @@ async def test_session_factory_registers_three_workflows() -> None:
             workflow_name=(INITIAL_TICKET_PROCESSING_WORKFLOW_NAME),
             workflow_version=(CONTROLLED_SUPPORT_WORKFLOW_VERSION),
         )
+        human_approved_executor = registry.resolve(
+            workflow_name=(INITIAL_TICKET_PROCESSING_WORKFLOW_NAME),
+            workflow_version=(HUMAN_APPROVED_SUPPORT_WORKFLOW_VERSION),
+        )
 
-        assert len(registry) == 3
+        assert len(registry) == 4
         assert isinstance(
             baseline_executor,
             DeterministicTicketProcessingExecutor,
@@ -508,6 +518,10 @@ async def test_session_factory_registers_three_workflows() -> None:
         assert isinstance(
             controlled_executor,
             ControlledSupportWorkflowExecutor,
+        )
+        assert isinstance(
+            human_approved_executor,
+            HumanApprovedSupportWorkflowExecutor,
         )
     finally:
         await controlled_runtime.close()

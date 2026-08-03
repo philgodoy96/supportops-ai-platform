@@ -223,6 +223,42 @@ def test_allows_same_workflow_with_different_versions() -> None:
     assert len(registry) == 2
 
 
+def test_historical_and_human_approved_versions_can_coexist() -> None:
+    registry = AgentRunExecutorRegistry(
+        (
+            AgentRunExecutorRegistration(
+                workflow_name="ticket-processing",
+                workflow_version="deterministic-baseline-v1",
+                executor=RecordingExecutor(),
+            ),
+            AgentRunExecutorRegistration(
+                workflow_name="ticket-processing",
+                workflow_version="ticket-classification-v1",
+                executor=RecordingExecutor(),
+            ),
+            AgentRunExecutorRegistration(
+                workflow_name="ticket-processing",
+                workflow_version="controlled-support-v1",
+                executor=RecordingExecutor(),
+            ),
+            AgentRunExecutorRegistration(
+                workflow_name="ticket-processing",
+                workflow_version="human-approved-support-v1",
+                executor=RecordingExecutor(),
+            ),
+        ),
+    )
+
+    assert len(registry) == 4
+    assert registry.resolve(
+        workflow_name="ticket-processing",
+        workflow_version="controlled-support-v1",
+    ) is not registry.resolve(
+        workflow_name="ticket-processing",
+        workflow_version="human-approved-support-v1",
+    )
+
+
 def test_allows_same_version_for_different_workflows() -> None:
     registry = AgentRunExecutorRegistry(
         (
