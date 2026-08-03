@@ -1,4 +1,4 @@
-"""Unit tests for controlled tool-call audit records."""
+"""Unit tests for controlled tool-call lifecycle records."""
 
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -30,10 +30,11 @@ STARTED_AT = datetime(
     tzinfo=UTC,
 )
 FINISHED_AT = STARTED_AT + timedelta(milliseconds=25)
+DECIDED_AT = STARTED_AT + timedelta(minutes=5)
 FINGERPRINT = "a" * 64
 
 
-def create_tool_call(
+def create_terminal_tool_call(
     *,
     status: AgentToolCallStatus = (AgentToolCallStatus.SUCCEEDED),
     safe_input: dict[str, JsonValue] | None = None,
@@ -41,8 +42,9 @@ def create_tool_call(
     error_code: str | None = None,
     started_at: datetime = STARTED_AT,
     finished_at: datetime = FINISHED_AT,
+    latency_ms: int = 25,
 ) -> AgentToolCall:
-    """Create a valid synthetic audit record."""
+    """Create a valid synthetic terminal audit record."""
 
     if safe_input is None:
         safe_input = {
@@ -62,7 +64,7 @@ def create_tool_call(
     if error_code is None and status is not AgentToolCallStatus.SUCCEEDED:
         error_code = "tool_dependency_unavailable"
 
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=TOOL_CALL_ID,
         workspace_id=WORKSPACE_ID,
         ticket_id=TICKET_ID,
@@ -77,21 +79,46 @@ def create_tool_call(
         input_fingerprint=FINGERPRINT,
         safe_input=safe_input,
         safe_output=safe_output,
-        latency_ms=25,
+        latency_ms=latency_ms,
         error_code=error_code,
         started_at=started_at,
         finished_at=finished_at,
     )
 
 
+def create_pending_proposal(
+    *,
+    proposed_at: datetime = STARTED_AT,
+) -> AgentToolCall:
+    """Create one valid sensitive proposal."""
+
+    return AgentToolCall.propose_for_approval(
+        tool_call_id=TOOL_CALL_ID,
+        workspace_id=WORKSPACE_ID,
+        ticket_id=TICKET_ID,
+        agent_run_id=AGENT_RUN_ID,
+        proposed_by_agent_run_attempt_id=ATTEMPT_ID,
+        sequence=1,
+        provider_tool_call_id="provider-tool-call-1",
+        tool_name="escalate_ticket",
+        tool_version=1,
+        input_fingerprint=FINGERPRINT,
+        safe_input={
+            "reason_code": "policy_required",
+        },
+        proposed_at=proposed_at,
+    )
+
+
 def test_creates_successful_read_only_tool_audit() -> None:
-    tool_call = create_tool_call()
+    tool_call = create_terminal_tool_call()
 
     assert tool_call.id == TOOL_CALL_ID
     assert tool_call.workspace_id == WORKSPACE_ID
     assert tool_call.ticket_id == TICKET_ID
     assert tool_call.agent_run_id == AGENT_RUN_ID
-    assert tool_call.agent_run_attempt_id == ATTEMPT_ID
+    assert tool_call.proposed_by_agent_run_attempt_id == ATTEMPT_ID
+    assert tool_call.executed_by_agent_run_attempt_id == ATTEMPT_ID
     assert tool_call.sequence == 1
     assert tool_call.tool_name == "search_knowledge"
     assert tool_call.tool_version == 1
@@ -99,6 +126,35 @@ def test_creates_successful_read_only_tool_audit() -> None:
     assert tool_call.status is AgentToolCallStatus.SUCCEEDED
     assert tool_call.error_code is None
     assert tool_call.safe_output is not None
+    assert tool_call.proposed_at == STARTED_AT
+    assert tool_call.execution_started_at == STARTED_AT
+    assert tool_call.finished_at == FINISHED_AT
+    assert tool_call.latency_ms == 25
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        AgentToolCallStatus.FAILED,
+        AgentToolCallStatus.TIMED_OUT,
+        AgentToolCallStatus.REJECTED,
+    ],
+)
+def test_terminal_unsuccessful_outcomes_require_error_code(
+    status: AgentToolCallStatus,
+) -> None:
+    tool_call = create_terminal_tool_call(
+        status=status,
+        safe_output=None,
+    )
+
+    assert tool_call.status is status
+    assert tool_call.error_code == "tool_dependency_unavailable"
+    assert tool_call.safe_output is None
+    assert tool_call.executed_by_agent_run_attempt_id == ATTEMPT_ID
+    assert tool_call.execution_started_at == STARTED_AT
+    assert tool_call.finished_at == FINISHED_AT
+    assert tool_call.latency_ms == 25
 
 
 def test_safe_payloads_are_defensively_copied() -> None:
@@ -115,7 +171,7 @@ def test_safe_payloads_are_defensively_copied() -> None:
         ],
     }
 
-    tool_call = create_tool_call(
+    tool_call = create_terminal_tool_call(
         safe_input=safe_input,
         safe_output=safe_output,
     )
@@ -135,33 +191,12 @@ def test_safe_payloads_are_defensively_copied() -> None:
         tool_call.safe_input["top_k"] = 3  # type: ignore[index]
 
 
-@pytest.mark.parametrize(
-    "status",
-    [
-        AgentToolCallStatus.FAILED,
-        AgentToolCallStatus.TIMED_OUT,
-        AgentToolCallStatus.REJECTED,
-    ],
-)
-def test_unsuccessful_outcomes_require_error_code(
-    status: AgentToolCallStatus,
-) -> None:
-    tool_call = create_tool_call(
-        status=status,
-        safe_output=None,
-    )
-
-    assert tool_call.status is status
-    assert tool_call.error_code == "tool_dependency_unavailable"
-    assert tool_call.safe_output is None
-
-
 def test_success_rejects_error_code() -> None:
     with pytest.raises(
         ValueError,
         match="cannot define an error_code",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             error_code="tool_unexpected",
         )
 
@@ -171,7 +206,7 @@ def test_success_requires_safe_output() -> None:
         ValueError,
         match="require safe_output",
     ):
-        AgentToolCall.create(
+        AgentToolCall.create_terminal(
             tool_call_id=TOOL_CALL_ID,
             workspace_id=WORKSPACE_ID,
             ticket_id=TICKET_ID,
@@ -198,12 +233,187 @@ def test_failure_rejects_safe_output() -> None:
         ValueError,
         match="cannot define safe_output",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             status=AgentToolCallStatus.FAILED,
             safe_output={
                 "unexpected": "partial output",
             },
         )
+
+
+def test_creates_pending_sensitive_proposal() -> None:
+    tool_call = create_pending_proposal()
+
+    assert tool_call.status is AgentToolCallStatus.PENDING_APPROVAL
+    assert tool_call.safety_level is ToolSafetyLevel.SENSITIVE_WRITE
+    assert tool_call.proposed_by_agent_run_attempt_id == ATTEMPT_ID
+    assert tool_call.executed_by_agent_run_attempt_id is None
+    assert tool_call.safe_output is None
+    assert tool_call.latency_ms is None
+    assert tool_call.error_code is None
+    assert tool_call.execution_started_at is None
+    assert tool_call.finished_at is None
+    assert tool_call.proposed_at == STARTED_AT
+    assert tool_call.safe_input == {
+        "reason_code": "policy_required",
+    }
+
+
+def test_pending_rejects_read_only_safety_level() -> None:
+    with pytest.raises(
+        ValueError,
+        match="sensitive_write",
+    ):
+        AgentToolCall(
+            id=TOOL_CALL_ID,
+            workspace_id=WORKSPACE_ID,
+            ticket_id=TICKET_ID,
+            agent_run_id=AGENT_RUN_ID,
+            proposed_by_agent_run_attempt_id=ATTEMPT_ID,
+            executed_by_agent_run_attempt_id=None,
+            sequence=1,
+            provider_tool_call_id=None,
+            tool_name="search_knowledge",
+            tool_version=1,
+            safety_level=ToolSafetyLevel.READ_ONLY,
+            status=AgentToolCallStatus.PENDING_APPROVAL,
+            input_fingerprint=FINGERPRINT,
+            safe_input={},
+            safe_output=None,
+            latency_ms=None,
+            error_code=None,
+            proposed_at=STARTED_AT,
+            execution_started_at=None,
+            finished_at=None,
+        )
+
+
+def test_pending_rejects_execution_fields() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Non-executed lifecycle states cannot define",
+    ):
+        AgentToolCall(
+            id=TOOL_CALL_ID,
+            workspace_id=WORKSPACE_ID,
+            ticket_id=TICKET_ID,
+            agent_run_id=AGENT_RUN_ID,
+            proposed_by_agent_run_attempt_id=ATTEMPT_ID,
+            executed_by_agent_run_attempt_id=ATTEMPT_ID,
+            sequence=1,
+            provider_tool_call_id=None,
+            tool_name="escalate_ticket",
+            tool_version=1,
+            safety_level=ToolSafetyLevel.SENSITIVE_WRITE,
+            status=AgentToolCallStatus.PENDING_APPROVAL,
+            input_fingerprint=FINGERPRINT,
+            safe_input={},
+            safe_output=None,
+            latency_ms=None,
+            error_code=None,
+            proposed_at=STARTED_AT,
+            execution_started_at=None,
+            finished_at=None,
+        )
+
+
+def test_human_rejection_transition() -> None:
+    pending = create_pending_proposal()
+
+    rejected = pending.reject_for_approval(decided_at=DECIDED_AT)
+
+    assert rejected.status is AgentToolCallStatus.REJECTED
+    assert rejected.safety_level is ToolSafetyLevel.SENSITIVE_WRITE
+    assert rejected.executed_by_agent_run_attempt_id is None
+    assert rejected.safe_output is None
+    assert rejected.latency_ms is None
+    assert rejected.error_code is None
+    assert rejected.execution_started_at is None
+    assert rejected.finished_at == DECIDED_AT
+    assert rejected.id == pending.id
+    assert rejected.proposed_by_agent_run_attempt_id == (pending.proposed_by_agent_run_attempt_id)
+    assert rejected.safe_input == pending.safe_input
+    assert rejected.proposed_at == pending.proposed_at
+
+
+def test_expiration_transition() -> None:
+    pending = create_pending_proposal()
+
+    expired = pending.expire_for_approval(decided_at=DECIDED_AT)
+
+    assert expired.status is AgentToolCallStatus.EXPIRED
+    assert expired.executed_by_agent_run_attempt_id is None
+    assert expired.error_code is None
+    assert expired.latency_ms is None
+    assert expired.execution_started_at is None
+    assert expired.finished_at == DECIDED_AT
+
+
+def test_reject_from_non_pending_is_rejected() -> None:
+    terminal = create_terminal_tool_call()
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending approval proposals can be rejected",
+    ):
+        terminal.reject_for_approval(decided_at=DECIDED_AT)
+
+
+def test_expire_from_non_pending_is_rejected() -> None:
+    terminal = create_terminal_tool_call()
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending approval proposals can expire",
+    ):
+        terminal.expire_for_approval(decided_at=DECIDED_AT)
+
+
+def test_rejects_execution_started_before_proposed() -> None:
+    with pytest.raises(
+        ValueError,
+        match="execution_started_at must not precede proposed_at",
+    ):
+        AgentToolCall(
+            id=TOOL_CALL_ID,
+            workspace_id=WORKSPACE_ID,
+            ticket_id=TICKET_ID,
+            agent_run_id=AGENT_RUN_ID,
+            proposed_by_agent_run_attempt_id=ATTEMPT_ID,
+            executed_by_agent_run_attempt_id=ATTEMPT_ID,
+            sequence=1,
+            provider_tool_call_id=None,
+            tool_name="search_knowledge",
+            tool_version=1,
+            safety_level=ToolSafetyLevel.READ_ONLY,
+            status=AgentToolCallStatus.SUCCEEDED,
+            input_fingerprint=FINGERPRINT,
+            safe_input={},
+            safe_output={},
+            latency_ms=0,
+            error_code=None,
+            proposed_at=STARTED_AT,
+            execution_started_at=STARTED_AT - timedelta(milliseconds=1),
+            finished_at=FINISHED_AT,
+        )
+
+
+def test_rejects_finished_before_execution_started() -> None:
+    with pytest.raises(
+        ValueError,
+        match="finished_at must not precede",
+    ):
+        create_terminal_tool_call(
+            finished_at=STARTED_AT - timedelta(milliseconds=1),
+        )
+
+
+def test_rejects_negative_latency() -> None:
+    with pytest.raises(
+        ValueError,
+        match="latency_ms must be non-negative",
+    ):
+        create_terminal_tool_call(latency_ms=-1)
 
 
 @pytest.mark.parametrize(
@@ -222,7 +432,7 @@ def test_rejects_invalid_fingerprint(
         ValueError,
         match="lowercase SHA-256",
     ):
-        AgentToolCall.create(
+        AgentToolCall.create_terminal(
             tool_call_id=TOOL_CALL_ID,
             workspace_id=WORKSPACE_ID,
             ticket_id=TICKET_ID,
@@ -249,7 +459,7 @@ def test_rejects_non_json_safe_payload() -> None:
         ValueError,
         match="JSON-compatible object",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             safe_input={
                 "workspace_id": WORKSPACE_ID,  # type: ignore[dict-item]
             },
@@ -261,7 +471,7 @@ def test_rejects_oversized_safe_payload() -> None:
         ValueError,
         match="exceeds the supported size",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             safe_input={
                 "value": "x" * AGENT_TOOL_CALL_SAFE_INPUT_MAX_BYTES,
             },
@@ -273,18 +483,8 @@ def test_rejects_non_utc_timestamp() -> None:
         ValueError,
         match="UTC-aware",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             started_at=STARTED_AT.replace(tzinfo=None),
-        )
-
-
-def test_rejects_finished_time_before_start() -> None:
-    with pytest.raises(
-        ValueError,
-        match="must not precede",
-    ):
-        create_tool_call(
-            finished_at=STARTED_AT - timedelta(milliseconds=1),
         )
 
 
@@ -293,7 +493,7 @@ def test_rejects_unstable_error_code() -> None:
         ValueError,
         match="lowercase snake case",
     ):
-        create_tool_call(
+        create_terminal_tool_call(
             status=AgentToolCallStatus.REJECTED,
             safe_output=None,
             error_code="Tool Rejected",
@@ -301,7 +501,7 @@ def test_rejects_unstable_error_code() -> None:
 
 
 def test_record_is_immutable() -> None:
-    tool_call = create_tool_call()
+    tool_call = create_terminal_tool_call()
 
     with pytest.raises(
         AttributeError,

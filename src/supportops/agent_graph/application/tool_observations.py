@@ -296,12 +296,12 @@ class ControlledToolObservationAssembler:
             1,
             state.tool_call_count + 1,
         ):
-            audit = await self._tool_call_repository.get_by_attempt_sequence(
+            audit = await self._tool_call_repository.get_by_proposal_attempt_sequence(
                 AgentToolCallLookup(
                     workspace_id=context.workspace_id,
                     ticket_id=context.ticket_id,
                     agent_run_id=context.agent_run_id,
-                    agent_run_attempt_id=(context.agent_run_attempt_id),
+                    proposed_by_agent_run_attempt_id=(context.agent_run_attempt_id),
                     sequence=sequence,
                 )
             )

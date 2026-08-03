@@ -249,7 +249,7 @@ class BoundedReadOnlyToolExecutor:
             started_at=started_at,
             started_monotonic=started_monotonic,
         )
-        audit = AgentToolCall.create(
+        audit = AgentToolCall.create_terminal(
             tool_call_id=self._tool_call_id_factory(),
             workspace_id=command.context.workspace_id,
             ticket_id=command.context.ticket_id,
@@ -294,7 +294,7 @@ class BoundedReadOnlyToolExecutor:
         )
         status = _status_for_error(error)
         definition = binding.definition
-        audit = AgentToolCall.create(
+        audit = AgentToolCall.create_terminal(
             tool_call_id=self._tool_call_id_factory(),
             workspace_id=command.context.workspace_id,
             ticket_id=command.context.ticket_id,

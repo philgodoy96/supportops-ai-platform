@@ -209,8 +209,10 @@ def _tool_call(
 ) -> ToolCallInspection:
     return ToolCallInspection(
         id=tool_call_id,
-        agent_run_attempt_id=attempt_id,
-        attempt_number=attempt_number,
+        proposed_by_agent_run_attempt_id=attempt_id,
+        proposed_by_attempt_number=attempt_number,
+        executed_by_agent_run_attempt_id=attempt_id,
+        executed_by_attempt_number=attempt_number,
         sequence=sequence,
         tool_name="lookup_service_status",
         tool_version=1,
@@ -218,7 +220,8 @@ def _tool_call(
         status=AgentToolCallStatus.SUCCEEDED,
         latency_ms=5,
         error_code=None,
-        started_at=_NOW,
+        proposed_at=_NOW,
+        execution_started_at=_NOW,
         finished_at=_NOW,
         result_summary=ServiceStatusSummary(
             service_name="payments-api",

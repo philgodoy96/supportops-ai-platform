@@ -10,6 +10,9 @@ from sqlalchemy import Table, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from supportops.agent_tools.infrastructure.models import (
+    AgentToolCallRecord,
+)
 from supportops.core.settings import Settings
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunRecord,
@@ -17,10 +20,11 @@ from supportops.modules.agent_runs.infrastructure.models import (
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "b7c4d2e9a1f6"
+EXPECTED_HEAD = "c9e2f4a7b6d1"
 CONTROLLED_WORKFLOW_REVISION = "e8b7c6d5a4f3"
 PRE_CONTROLLED_WORKFLOW_REVISION = "d4e8f2a6c901"
 RETRYABLE_FAILURE_BUDGET_REVISION = "f3a9c1d7e5b2"
+WAITING_FOR_APPROVAL_REVISION = "b7c4d2e9a1f6"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -1054,6 +1058,738 @@ async def test_alembic_waiting_for_approval_migration_upgrades_and_downgrades(
         assert "ck_agent_runs_agent_run_available_at_state" in constraint_names
         assert "ck_agent_runs_agent_run_status" in constraint_names
         assert table.c.available_at.nullable is True
+    finally:
+        await engine.dispose()
+        run_alembic_command("upgrade", "head")
+
+
+async def index_exists(
+    engine: AsyncEngine,
+    *,
+    table_name: str,
+    index_name: str,
+) -> bool:
+    """Return whether a named PostgreSQL index exists."""
+
+    async with engine.connect() as connection:
+        result = await connection.execute(
+            text(
+                """
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = 'public'
+                  AND tablename = :table_name
+                  AND indexname = :index_name
+                """
+            ),
+            {
+                "table_name": table_name,
+                "index_name": index_name,
+            },
+        )
+        return result.scalar_one_or_none() is not None
+
+
+async def test_alembic_tool_call_lifecycle_migration_upgrades_and_downgrades(
+    exclusive_integration_database: None,
+) -> None:
+    settings = Settings()
+    engine = create_async_engine(str(settings.postgresql_url))
+
+    upgrade_head = run_alembic_command("upgrade", "head")
+    assert upgrade_head.returncode == 0, upgrade_head.stderr
+
+    downgrade_to_waiting = run_alembic_command(
+        "downgrade",
+        WAITING_FOR_APPROVAL_REVISION,
+    )
+    assert downgrade_to_waiting.returncode == 0, downgrade_to_waiting.stderr
+
+    workspace_id = uuid4()
+    ticket_id = uuid4()
+    run_id = uuid4()
+    attempt_one_id = uuid4()
+    attempt_two_id = uuid4()
+    historical_tool_call_id = uuid4()
+    fingerprint = "a" * 64
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (
+                        id, name, slug, created_at, updated_at
+                    ) VALUES (
+                        :workspace_id,
+                        'Tool Call Workspace',
+                        'tool-call-workspace',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                    )
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO tickets (
+                        id, workspace_id, subject, description, status,
+                        external_reference, ingestion_request_id,
+                        correlation_id, created_at, updated_at
+                    ) VALUES (
+                        :ticket_id,
+                        :workspace_id,
+                        'Tool call subject',
+                        'Tool call description',
+                        'open',
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                    )
+                    """
+                ),
+                {
+                    "ticket_id": ticket_id,
+                    "workspace_id": workspace_id,
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_runs (
+                        id, workspace_id, ticket_id, workflow_name,
+                        workflow_version, trigger_key, status, available_at,
+                        attempt_count, retryable_failure_count,
+                        max_retryable_failures, lease_owner, lease_token,
+                        lease_expires_at, first_started_at, completed_at,
+                        last_error_code, last_error_summary,
+                        ingestion_request_id, correlation_id,
+                        created_at, updated_at
+                    ) VALUES (
+                        :run_id,
+                        :workspace_id,
+                        :ticket_id,
+                        'ticket-processing',
+                        'controlled-support-v1',
+                        'initial-ticket-processing',
+                        'running',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        1,
+                        0,
+                        3,
+                        'worker-a',
+                        :lease_token,
+                        TIMESTAMPTZ '2026-08-02 00:10:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "lease_token": uuid4(),
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_attempts (
+                        id, agent_run_id, attempt_number, worker_id,
+                        lease_token, execution_request_id, started_at,
+                        finished_at, outcome, error_code, error_summary
+                    ) VALUES (
+                        :attempt_id,
+                        :run_id,
+                        1,
+                        'worker-a',
+                        :lease_token,
+                        :execution_request_id,
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "attempt_id": attempt_one_id,
+                    "run_id": run_id,
+                    "lease_token": uuid4(),
+                    "execution_request_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        agent_run_attempt_id, sequence, provider_tool_call_id,
+                        tool_name, tool_version, safety_level, status,
+                        input_fingerprint, safe_input, safe_output,
+                        latency_ms, error_code, started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        1,
+                        'provider-tool-call-1',
+                        'search_knowledge',
+                        1,
+                        'read_only',
+                        'succeeded',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        CAST(:safe_output AS jsonb),
+                        25,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:01:30+00',
+                        TIMESTAMPTZ '2026-08-02 00:01:30.025+00'
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": historical_tool_call_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_one_id,
+                    "fingerprint": fingerprint,
+                    "safe_input": '{"top_k":5}',
+                    "safe_output": '{"result_count":1}',
+                },
+            )
+
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="agent_run_attempt_id",
+        )
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="started_at",
+        )
+
+        upgrade = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert upgrade.returncode == 0, upgrade.stderr
+
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="proposed_by_agent_run_attempt_id",
+        )
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="executed_by_agent_run_attempt_id",
+        )
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="proposed_at",
+        )
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="execution_started_at",
+        )
+        assert not await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="agent_run_attempt_id",
+        )
+        assert not await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="started_at",
+        )
+        assert await index_exists(
+            engine,
+            table_name="agent_tool_calls",
+            index_name=("uq_agent_tool_calls_sensitive_proposal_identity"),
+        )
+        assert await constraint_exists(
+            engine,
+            table_name="agent_tool_calls",
+            constraint_name=("ck_agent_tool_calls_agent_tool_call_lifecycle_state"),
+        )
+
+        async with engine.connect() as connection:
+            backfilled = await connection.execute(
+                text(
+                    """
+                    SELECT
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id,
+                        proposed_at,
+                        execution_started_at,
+                        finished_at,
+                        latency_ms
+                    FROM agent_tool_calls
+                    WHERE id = :tool_call_id
+                    """
+                ),
+                {"tool_call_id": historical_tool_call_id},
+            )
+            (
+                proposed_by,
+                executed_by,
+                proposed_at,
+                execution_started_at,
+                finished_at,
+                latency_ms,
+            ) = backfilled.one()
+            assert proposed_by == attempt_one_id
+            assert executed_by == attempt_one_id
+            assert proposed_at == execution_started_at
+            assert finished_at is not None
+            assert latency_ms == 25
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_attempts (
+                        id, agent_run_id, attempt_number, worker_id,
+                        lease_token, execution_request_id, started_at,
+                        finished_at, outcome, error_code, error_summary
+                    ) VALUES (
+                        :attempt_id,
+                        :run_id,
+                        2,
+                        'worker-a',
+                        :lease_token,
+                        :execution_request_id,
+                        TIMESTAMPTZ '2026-08-02 00:02:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "attempt_id": attempt_two_id,
+                    "run_id": run_id,
+                    "lease_token": uuid4(),
+                    "execution_request_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id, sequence,
+                        provider_tool_call_id, tool_name, tool_version,
+                        safety_level, status, input_fingerprint, safe_input,
+                        safe_output, latency_ms, error_code, proposed_at,
+                        execution_started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        NULL,
+                        2,
+                        'provider-sensitive-1',
+                        'escalate_ticket',
+                        1,
+                        'sensitive_write',
+                        'pending_approval',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        NULL,
+                        NULL,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:02:30+00',
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_one_id,
+                    "fingerprint": "b" * 64,
+                    "safe_input": '{"reason_code":"policy"}',
+                },
+            )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO agent_tool_calls (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            proposed_by_agent_run_attempt_id,
+                            executed_by_agent_run_attempt_id, sequence,
+                            provider_tool_call_id, tool_name, tool_version,
+                            safety_level, status, input_fingerprint, safe_input,
+                            safe_output, latency_ms, error_code, proposed_at,
+                            execution_started_at, finished_at
+                        ) VALUES (
+                            :tool_call_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            NULL,
+                            3,
+                            'provider-sensitive-2',
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            'pending_approval',
+                            :fingerprint,
+                            CAST(:safe_input AS jsonb),
+                            NULL,
+                            NULL,
+                            NULL,
+                            TIMESTAMPTZ '2026-08-02 00:03:00+00',
+                            NULL,
+                            NULL
+                        )
+                        """
+                    ),
+                    {
+                        "tool_call_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_two_id,
+                        "fingerprint": "b" * 64,
+                        "safe_input": '{"reason_code":"policy"}',
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO agent_tool_calls (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            proposed_by_agent_run_attempt_id,
+                            executed_by_agent_run_attempt_id, sequence,
+                            provider_tool_call_id, tool_name, tool_version,
+                            safety_level, status, input_fingerprint, safe_input,
+                            safe_output, latency_ms, error_code, proposed_at,
+                            execution_started_at, finished_at
+                        ) VALUES (
+                            :tool_call_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            NULL,
+                            4,
+                            'provider-pending-readonly',
+                            'search_knowledge',
+                            1,
+                            'read_only',
+                            'pending_approval',
+                            :fingerprint,
+                            CAST(:safe_input AS jsonb),
+                            NULL,
+                            NULL,
+                            NULL,
+                            TIMESTAMPTZ '2026-08-02 00:03:00+00',
+                            NULL,
+                            NULL
+                        )
+                        """
+                    ),
+                    {
+                        "tool_call_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_one_id,
+                        "fingerprint": "c" * 64,
+                        "safe_input": '{"top_k":1}',
+                    },
+                )
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id, sequence,
+                        provider_tool_call_id, tool_name, tool_version,
+                        safety_level, status, input_fingerprint, safe_input,
+                        safe_output, latency_ms, error_code, proposed_at,
+                        execution_started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        :attempt_id,
+                        5,
+                        'provider-rejected-policy',
+                        'search_knowledge',
+                        1,
+                        'read_only',
+                        'rejected',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        NULL,
+                        3,
+                        'tool_repeated_call',
+                        TIMESTAMPTZ '2026-08-02 00:03:10+00',
+                        TIMESTAMPTZ '2026-08-02 00:03:10+00',
+                        TIMESTAMPTZ '2026-08-02 00:03:10.003+00'
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_one_id,
+                    "fingerprint": "d" * 64,
+                    "safe_input": '{"top_k":1}',
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id, sequence,
+                        provider_tool_call_id, tool_name, tool_version,
+                        safety_level, status, input_fingerprint, safe_input,
+                        safe_output, latency_ms, error_code, proposed_at,
+                        execution_started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        NULL,
+                        6,
+                        'provider-human-rejected',
+                        'escalate_ticket',
+                        1,
+                        'sensitive_write',
+                        'rejected',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        NULL,
+                        NULL,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:03:20+00',
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:04:00+00'
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_one_id,
+                    "fingerprint": "e" * 64,
+                    "safe_input": '{"reason_code":"policy"}',
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id, sequence,
+                        provider_tool_call_id, tool_name, tool_version,
+                        safety_level, status, input_fingerprint, safe_input,
+                        safe_output, latency_ms, error_code, proposed_at,
+                        execution_started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        NULL,
+                        7,
+                        'provider-expired',
+                        'escalate_ticket',
+                        1,
+                        'sensitive_write',
+                        'expired',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        NULL,
+                        NULL,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:03:30+00',
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:05:00+00'
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_one_id,
+                    "fingerprint": "f" * 64,
+                    "safe_input": '{"reason_code":"policy"}',
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_tool_calls (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        proposed_by_agent_run_attempt_id,
+                        executed_by_agent_run_attempt_id, sequence,
+                        provider_tool_call_id, tool_name, tool_version,
+                        safety_level, status, input_fingerprint, safe_input,
+                        safe_output, latency_ms, error_code, proposed_at,
+                        execution_started_at, finished_at
+                    ) VALUES (
+                        :tool_call_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        :attempt_id,
+                        8,
+                        'provider-readonly-repeat',
+                        'search_knowledge',
+                        1,
+                        'read_only',
+                        'succeeded',
+                        :fingerprint,
+                        CAST(:safe_input AS jsonb),
+                        CAST(:safe_output AS jsonb),
+                        10,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:03:40+00',
+                        TIMESTAMPTZ '2026-08-02 00:03:40+00',
+                        TIMESTAMPTZ '2026-08-02 00:03:40.010+00'
+                    )
+                    """
+                ),
+                {
+                    "tool_call_id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_two_id,
+                    "fingerprint": fingerprint,
+                    "safe_input": '{"top_k":5}',
+                    "safe_output": '{"result_count":1}',
+                },
+            )
+
+        downgrade_blocked = run_alembic_command(
+            "downgrade",
+            WAITING_FOR_APPROVAL_REVISION,
+        )
+        assert downgrade_blocked.returncode != 0
+        assert (
+            "Cannot downgrade approval-aware tool-call records" in downgrade_blocked.stderr
+            or "Cannot downgrade approval-aware tool-call records" in downgrade_blocked.stdout
+        )
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    DELETE FROM agent_tool_calls
+                    WHERE status IN (
+                        'pending_approval',
+                        'expired'
+                    )
+                    OR (
+                        status = 'rejected'
+                        AND executed_by_agent_run_attempt_id IS NULL
+                    )
+                    OR executed_by_agent_run_attempt_id IS NULL
+                    OR executed_by_agent_run_attempt_id
+                        <> proposed_by_agent_run_attempt_id
+                    OR execution_started_at IS NULL
+                    OR finished_at IS NULL
+                    OR latency_ms IS NULL
+                    """
+                )
+            )
+
+        downgrade_clean = run_alembic_command(
+            "downgrade",
+            WAITING_FOR_APPROVAL_REVISION,
+        )
+        assert downgrade_clean.returncode == 0, downgrade_clean.stderr
+
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="agent_run_attempt_id",
+        )
+        assert await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="started_at",
+        )
+        assert not await column_exists(
+            engine,
+            table_name="agent_tool_calls",
+            column_name="proposed_at",
+        )
+
+        reupgrade = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert reupgrade.returncode == 0, reupgrade.stderr
+
+        table = cast(Table, AgentToolCallRecord.__table__)
+        column_names = {column.name for column in table.c}
+        assert "proposed_by_agent_run_attempt_id" in column_names
+        assert "executed_by_agent_run_attempt_id" in column_names
+        assert "proposed_at" in column_names
+        assert "execution_started_at" in column_names
+        assert table.c.latency_ms.nullable is True
+        assert table.c.finished_at.nullable is True
+        constraint_names = {constraint.name for constraint in table.constraints}
+        assert "ck_agent_tool_calls_agent_tool_call_lifecycle_state" in (constraint_names)
+        assert "uq_agent_tool_calls_proposal_attempt_sequence" in (constraint_names)
+        index_names = {index.name for index in table.indexes}
+        assert "uq_agent_tool_calls_sensitive_proposal_identity" in index_names
     finally:
         await engine.dispose()
         run_alembic_command("upgrade", "head")

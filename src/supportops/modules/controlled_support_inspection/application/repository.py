@@ -149,7 +149,7 @@ def _validate_tool_calls(
     tool_calls: tuple[AgentToolCall, ...],
     attempt_number_by_id: dict[UUID, int],
 ) -> None:
-    keys: list[tuple[int, int]] = []
+    keys: list[tuple[int, int, UUID]] = []
     tool_call_ids: list[UUID] = []
 
     for tool_call in tool_calls:
@@ -171,21 +171,32 @@ def _validate_tool_calls(
         if any(actual != expected for actual, expected in ownership):
             raise ValueError("Tool-call ownership does not match the inspection root.")
 
-        attempt_number = attempt_number_by_id.get(tool_call.agent_run_attempt_id)
+        proposed_by_attempt_number = attempt_number_by_id.get(
+            tool_call.proposed_by_agent_run_attempt_id,
+        )
 
-        if attempt_number is None:
-            raise ValueError("Tool call references an unknown AgentRun attempt.")
+        if proposed_by_attempt_number is None:
+            raise ValueError("Tool call references an unknown proposal AgentRun attempt.")
+
+        if tool_call.executed_by_agent_run_attempt_id is not None:
+            executed_by_attempt_number = attempt_number_by_id.get(
+                tool_call.executed_by_agent_run_attempt_id,
+            )
+
+            if executed_by_attempt_number is None:
+                raise ValueError("Tool call references an unknown execution AgentRun attempt.")
 
         keys.append(
             (
-                attempt_number,
+                proposed_by_attempt_number,
                 tool_call.sequence,
+                tool_call.id,
             )
         )
         tool_call_ids.append(tool_call.id)
 
     if tuple(keys) != tuple(sorted(keys)):
-        raise ValueError("Tool calls must be ordered by attempt and sequence.")
+        raise ValueError("Tool calls must be ordered by proposal attempt and sequence.")
 
     if len(set(tool_call_ids)) != len(tool_call_ids):
         raise ValueError("Tool-call IDs must be unique.")

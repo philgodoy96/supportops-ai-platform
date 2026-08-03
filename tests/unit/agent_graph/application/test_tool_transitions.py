@@ -108,7 +108,7 @@ def _search_audit(
     status: AgentToolCallStatus = (AgentToolCallStatus.SUCCEEDED),
     error_code: str | None = None,
 ) -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -164,7 +164,7 @@ def _search_audit(
 
 
 def _service_status_audit() -> AgentToolCall:
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=_TOOL_CALL_ID,
         workspace_id=_WORKSPACE_ID,
         ticket_id=_TICKET_ID,
@@ -292,12 +292,12 @@ def test_rejects_sequence_conflict() -> None:
         audit,
         expected_attempt_id=_ATTEMPT_ID,
     )
-    conflicting = AgentToolCall.create(
+    conflicting = AgentToolCall.create_terminal(
         tool_call_id=UUID("d0000000-0000-4000-8000-000000000013"),
         workspace_id=audit.workspace_id,
         ticket_id=audit.ticket_id,
         agent_run_id=audit.agent_run_id,
-        agent_run_attempt_id=audit.agent_run_attempt_id,
+        agent_run_attempt_id=audit.proposed_by_agent_run_attempt_id,
         sequence=1,
         provider_tool_call_id="provider-call-2",
         tool_name=audit.tool_name,
@@ -307,10 +307,10 @@ def test_rejects_sequence_conflict() -> None:
         input_fingerprint="1" * 64,
         safe_input=audit.safe_input,
         safe_output=audit.safe_output,
-        latency_ms=audit.latency_ms,
+        latency_ms=audit.latency_ms or 0,
         error_code=audit.error_code,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
+        started_at=audit.execution_started_at or audit.proposed_at,
+        finished_at=audit.finished_at or audit.proposed_at,
     )
 
     with pytest.raises(
@@ -340,12 +340,12 @@ def test_rejects_attempt_ownership_mismatch() -> None:
 
 def test_rejects_malformed_safe_output() -> None:
     audit = _search_audit()
-    malformed = AgentToolCall.create(
+    malformed = AgentToolCall.create_terminal(
         tool_call_id=audit.id,
         workspace_id=audit.workspace_id,
         ticket_id=audit.ticket_id,
         agent_run_id=audit.agent_run_id,
-        agent_run_attempt_id=audit.agent_run_attempt_id,
+        agent_run_attempt_id=audit.proposed_by_agent_run_attempt_id,
         sequence=audit.sequence,
         provider_tool_call_id=audit.provider_tool_call_id,
         tool_name=audit.tool_name,
@@ -357,10 +357,10 @@ def test_rejects_malformed_safe_output() -> None:
         safe_output={
             "result_count": 1,
         },
-        latency_ms=audit.latency_ms,
+        latency_ms=audit.latency_ms or 0,
         error_code=audit.error_code,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
+        started_at=audit.execution_started_at or audit.proposed_at,
+        finished_at=audit.finished_at or audit.proposed_at,
     )
 
     with pytest.raises(
@@ -381,12 +381,12 @@ def test_rejects_non_contiguous_search_evidence_ranks() -> None:
     assert audit.safe_output is not None
     original_evidence = audit.safe_output["evidence"]
     assert isinstance(original_evidence, list)
-    non_contiguous = AgentToolCall.create(
+    non_contiguous = AgentToolCall.create_terminal(
         tool_call_id=audit.id,
         workspace_id=audit.workspace_id,
         ticket_id=audit.ticket_id,
         agent_run_id=audit.agent_run_id,
-        agent_run_attempt_id=audit.agent_run_attempt_id,
+        agent_run_attempt_id=audit.proposed_by_agent_run_attempt_id,
         sequence=audit.sequence,
         provider_tool_call_id=audit.provider_tool_call_id,
         tool_name=audit.tool_name,
@@ -400,10 +400,10 @@ def test_rejects_non_contiguous_search_evidence_ranks() -> None:
             "result_count": 1,
             "evidence": [original_evidence[1]],
         },
-        latency_ms=audit.latency_ms,
+        latency_ms=audit.latency_ms or 0,
         error_code=audit.error_code,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
+        started_at=audit.execution_started_at or audit.proposed_at,
+        finished_at=audit.finished_at or audit.proposed_at,
     )
 
     with pytest.raises(
@@ -431,12 +431,12 @@ def test_rejects_duplicate_search_evidence_chunks() -> None:
     first_evidence = dict(first_item)
     second_evidence = dict(second_item)
     second_evidence["chunk_id"] = first_evidence["chunk_id"]
-    duplicate_chunks = AgentToolCall.create(
+    duplicate_chunks = AgentToolCall.create_terminal(
         tool_call_id=audit.id,
         workspace_id=audit.workspace_id,
         ticket_id=audit.ticket_id,
         agent_run_id=audit.agent_run_id,
-        agent_run_attempt_id=audit.agent_run_attempt_id,
+        agent_run_attempt_id=audit.proposed_by_agent_run_attempt_id,
         sequence=audit.sequence,
         provider_tool_call_id=audit.provider_tool_call_id,
         tool_name=audit.tool_name,
@@ -453,10 +453,10 @@ def test_rejects_duplicate_search_evidence_chunks() -> None:
                 second_evidence,
             ],
         },
-        latency_ms=audit.latency_ms,
+        latency_ms=audit.latency_ms or 0,
         error_code=audit.error_code,
-        started_at=audit.started_at,
-        finished_at=audit.finished_at,
+        started_at=audit.execution_started_at or audit.proposed_at,
+        finished_at=audit.finished_at or audit.proposed_at,
     )
 
     with pytest.raises(

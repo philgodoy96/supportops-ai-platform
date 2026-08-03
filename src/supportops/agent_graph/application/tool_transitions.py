@@ -243,7 +243,7 @@ def _validate_runtime_ownership(
             "AgentRun",
         ),
         (
-            audit.agent_run_attempt_id,
+            audit.proposed_by_agent_run_attempt_id,
             expected_attempt_id,
             "AgentRunAttempt",
         ),

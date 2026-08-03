@@ -1,4 +1,4 @@
-"""PostgreSQL repository for fenced tool-call audit persistence."""
+"""PostgreSQL repository for fenced tool-call lifecycle persistence."""
 
 from uuid import UUID
 
@@ -10,6 +10,8 @@ from supportops.agent_tools.application.persistence import (
     AgentToolCallPersistenceResult,
     PersistAgentToolCallCommand,
 )
+from supportops.agent_tools.domain.audit import AgentToolCall
+from supportops.agent_tools.domain.contracts import ToolSafetyLevel
 from supportops.agent_tools.infrastructure.models import (
     AgentToolCallRecord,
 )
@@ -23,7 +25,7 @@ from supportops.modules.agent_runs.infrastructure.models import (
 
 
 class SqlAlchemyAgentToolCallExecutionRepository(AgentToolCallExecutionRepository):
-    """Persist terminal tool calls through an active transaction."""
+    """Persist tool-call lifecycle records through an active transaction."""
 
     def __init__(
         self,
@@ -35,7 +37,7 @@ class SqlAlchemyAgentToolCallExecutionRepository(AgentToolCallExecutionRepositor
         self,
         command: PersistAgentToolCallCommand,
     ) -> AgentToolCallPersistenceResult:
-        """Persist a terminal tool call while the lease is valid."""
+        """Persist a tool-call lifecycle record while the lease is valid."""
 
         if not await self._lock_active_run(command):
             return AgentToolCallPersistenceResult.LEASE_LOST
@@ -67,10 +69,56 @@ class SqlAlchemyAgentToolCallExecutionRepository(AgentToolCallExecutionRepositor
                     "persisted for another tool-call sequence."
                 )
 
+        if command.tool_call.safety_level is ToolSafetyLevel.SENSITIVE_WRITE:
+            sensitive_result = await self._resolve_sensitive_proposal_replay(
+                command.tool_call,
+            )
+            if sensitive_result is not None:
+                return sensitive_result
+
         self._session.add(AgentToolCallRecord.from_domain(command.tool_call))
         await self._session.flush()
 
         return AgentToolCallPersistenceResult.APPLIED
+
+    async def _resolve_sensitive_proposal_replay(
+        self,
+        tool_call: AgentToolCall,
+    ) -> AgentToolCallPersistenceResult | None:
+        statement = (
+            select(AgentToolCallRecord)
+            .where(
+                AgentToolCallRecord.agent_run_id == tool_call.agent_run_id,
+                AgentToolCallRecord.tool_name == tool_call.tool_name,
+                AgentToolCallRecord.tool_version == tool_call.tool_version,
+                AgentToolCallRecord.input_fingerprint == (tool_call.input_fingerprint),
+                AgentToolCallRecord.safety_level == (ToolSafetyLevel.SENSITIVE_WRITE.value),
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        existing_record = result.scalar_one_or_none()
+
+        if existing_record is None:
+            return None
+
+        existing = existing_record.to_domain()
+
+        if (
+            existing.workspace_id == tool_call.workspace_id
+            and existing.ticket_id == tool_call.ticket_id
+            and existing.tool_name == tool_call.tool_name
+            and existing.tool_version == tool_call.tool_version
+            and existing.input_fingerprint == tool_call.input_fingerprint
+            and dict(existing.safe_input) == dict(tool_call.safe_input)
+            and existing.safety_level is ToolSafetyLevel.SENSITIVE_WRITE
+        ):
+            return AgentToolCallPersistenceResult.ALREADY_RECORDED
+
+        raise RuntimeError(
+            "A sensitive tool-call proposal identity is already persisted with "
+            "conflicting ownership or input data."
+        )
 
     async def _lock_active_run(
         self,
@@ -134,7 +182,7 @@ class SqlAlchemyAgentToolCallExecutionRepository(AgentToolCallExecutionRepositor
         statement = (
             select(AgentToolCallRecord)
             .where(
-                AgentToolCallRecord.agent_run_attempt_id == attempt_id,
+                AgentToolCallRecord.proposed_by_agent_run_attempt_id == attempt_id,
                 or_(*identity_predicates),
             )
             .order_by(AgentToolCallRecord.sequence.asc())

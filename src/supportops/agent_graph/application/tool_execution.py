@@ -229,12 +229,12 @@ class ControlledToolDecisionExecutor:
             workspace_id=state.workspace_id,
             ticket_id=state.ticket_id,
             agent_run_id=state.agent_run_id,
-            agent_run_attempt_id=context.attempt.id,
+            proposed_by_agent_run_attempt_id=(context.attempt.id),
             sequence=sequence,
         )
 
         async with self._transaction_manager.transaction():
-            return await self._query_repository.get_by_attempt_sequence(query)
+            return await self._query_repository.get_by_proposal_attempt_sequence(query)
 
     async def _persist_audit(
         self,

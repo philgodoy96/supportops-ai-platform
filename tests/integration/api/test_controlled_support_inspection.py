@@ -240,7 +240,7 @@ def _service_status_tool_call(
 ) -> AgentToolCall:
     started_at = now + timedelta(seconds=sequence)
 
-    return AgentToolCall.create(
+    return AgentToolCall.create_terminal(
         tool_call_id=uuid4(),
         workspace_id=workspace_id,
         ticket_id=ticket_id,
