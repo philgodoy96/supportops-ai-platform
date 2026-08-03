@@ -6,9 +6,13 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification with invocation and accepted classification persistence, classification inspection, logical invocation inspection, offline deterministic evaluation, opt-in provider evaluation, PostgreSQL-authoritative immutable knowledge-document versioning, deterministic chunking, embedding providers, explicit Qdrant indexing, active-version semantic knowledge retrieval with authoritative PostgreSQL hydration, and the controlled support workflow that combines LangGraph orchestration, bounded read-only tool execution, durable tool-call auditing, grounded recommendation drafting, recommendation and citation persistence, and workspace-scoped controlled support inspection. Human approval, write-capable tools, reranking, AI observability integrations, and RAGAS remain later phases.
+The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification with invocation and accepted classification persistence, classification inspection, logical invocation inspection, offline deterministic evaluation, opt-in provider evaluation, PostgreSQL-authoritative immutable knowledge-document versioning, deterministic chunking, embedding providers, explicit Qdrant indexing, active-version semantic knowledge retrieval with authoritative PostgreSQL hydration, the controlled support workflow that combines LangGraph orchestration, bounded read-only tool execution, durable tool-call auditing, grounded recommendation drafting, recommendation and citation persistence, and workspace-scoped controlled support inspection, and the separately versioned human-approved support workflow that adds durable sensitive proposals, approval interruption and resume, grant-gated sensitive execution, and immutable ticket escalation. Approval decision and inspection HTTP APIs, external side-effect tools, reranking, AI observability integrations, and RAGAS remain later phases.
 
-The controlled support workflow is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). Its durability boundaries are recorded in [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md) and [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
+The controlled support workflow is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). The human-approved support workflow is documented in [`human-approved-workflow.md`](human-approved-workflow.md). Durability boundaries for AgentRun and LangGraph checkpoint ownership are recorded in [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md) and [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
+
+### Human-Approved Support Workflow
+
+`human-approved-support-v1` is versioned separately from `controlled-support-v1`. `controlled-support-v1` remains the default ticket-processing workflow. Sensitive actions require durable approval before execution. PostgreSQL remains the business authority for ownership, approval status, grants, tool-call lifecycle, escalations, and recommendations. LangGraph checkpoints preserve workflow continuity across interrupt and resume. Sensitive execution is grant-gated through immutable `SensitiveExecutionGrant` records. `TicketEscalation` is an immutable side record and does not mutate `Ticket.status`. External side-effect tools intentionally remain unavailable. Full interrupt, resume, recovery, and authorization semantics are documented in [`human-approved-workflow.md`](human-approved-workflow.md).
 
 ## Architectural principles
 
@@ -264,6 +268,7 @@ Persisted AgentRun states are:
 ```text
 queued
 running
+waiting_for_approval
 retry_scheduled
 succeeded
 failed
@@ -277,6 +282,7 @@ retryable_failure
 terminal_failure
 timed_out
 lease_expired
+awaiting_approval
 ```
 
 ### Application
@@ -480,7 +486,7 @@ Controlled support inspection distinguishes three expected outcomes. An unresolv
 
 PostgreSQL is the transactional source of truth and the durable AgentRun work queue.
 
-Authoritative business state, workflow state, AgentRun leases, retry scheduling, attempt history, logical invocations, accepted classifications, controlled tool-call audits, support recommendations, recommendation citations, knowledge documents, immutable source versions, immutable index profiles, authoritative chunks, indexing lifecycle, embedding usage and cost provenance, failure provenance, active-version pointers, and future approvals, audit records, and operational cost reporting are persisted or planned for persistence in PostgreSQL.
+Authoritative business state, workflow state, AgentRun leases, retry scheduling, attempt history, logical invocations, accepted classifications, controlled tool-call audits, support recommendations, recommendation citations, approval requests, sensitive execution grants, ticket escalations, knowledge documents, immutable source versions, immutable index profiles, authoritative chunks, indexing lifecycle, embedding usage and cost provenance, failure provenance, active-version pointers, and future operational cost reporting are persisted or planned for persistence in PostgreSQL.
 
 The same PostgreSQL database also stores LangGraph checkpoint tables. Those tables remain framework-owned orchestration storage rather than business records, and they are not part of the application domain model or the inspection contract.
 
@@ -586,12 +592,13 @@ The worker process:
 - executes provider, embedding, tool, and Qdrant calls outside database transactions;
 - persists invocation, classification, tool-audit, recommendation, and AgentRun outcome records through separate short lease-token-fenced transactions.
 
-The registry contains exactly three workflow versions:
+The registry contains exactly four workflow versions:
 
 ```text
 ticket-processing / deterministic-baseline-v1
 ticket-processing / ticket-classification-v1
 ticket-processing / controlled-support-v1
+ticket-processing / human-approved-support-v1
 ```
 
 The persisted initial workflow contract is:
@@ -602,7 +609,7 @@ workflow_version = configured value
 trigger_key = initial-ticket-processing
 ```
 
-The local default configured value is `controlled-support-v1`. The classification workflow and the deterministic baseline remain supported for historical or explicitly scheduled runs; the deterministic baseline performs no external I/O, LLM call, retrieval, or ticket classification. Unknown workflow or version values are terminal.
+The local default configured value is `controlled-support-v1`. The human-approved workflow is versioned separately and may be scheduled explicitly. The classification workflow and the deterministic baseline remain supported for historical or explicitly scheduled runs; the deterministic baseline performs no external I/O, LLM call, retrieval, or ticket classification. Unknown workflow or version values are terminal.
 
 For controlled runs, the worker also compiles the graph with the process-scoped PostgreSQL checkpointer. Graph nodes persist business records through short lease-fenced transactions, while provider, embedding, tool, and Qdrant work happens outside those transactions. An outer attempt retry may resume the same graph thread rather than repeating completed nodes, and the outer AgentRun succeeds only after the recommendation is durably persisted.
 
@@ -653,8 +660,8 @@ Future AI behavior is expected to remain behind application-owned boundaries for
 
 - reranking over retrieved evidence;
 - multi-profile score fusion;
-- write-capable tools;
-- human approval and resume workflows;
+- external side-effect tools;
+- approval decision and inspection HTTP APIs;
 - AI observability integrations;
 - RAGAS;
 - prompt-version comparison;
@@ -918,8 +925,8 @@ The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL 
 - AgentRun and AgentRunAttempt persistence;
 - atomic Ticket and configured initial AgentRun scheduling;
 - PostgreSQL claiming, leases, fencing, retries, and recovery;
-- versioned workflow executor registry with three exact registered versions;
-- deterministic baseline, classification, and controlled support workflow execution;
+- versioned workflow executor registry with four exact registered versions;
+- deterministic baseline, classification, controlled support, and human-approved support workflow execution;
 - process-scoped provider, Gateway, checkpoint, embedding, and Qdrant composition in the worker;
 - durable `LLMInvocation` and `TicketClassification` persistence;
 - LangGraph orchestration with PostgreSQL checkpoints inside the worker;
@@ -966,9 +973,10 @@ The current phase does not implement:
 - reranking;
 - generated answers in the public semantic search API;
 - multi-profile score fusion;
-- write-capable tools;
+- external side-effect tools;
 - customer-response delivery;
-- human approval and resume APIs;
+- approval decision and inspection HTTP APIs;
+- ticket escalation inspection APIs;
 - workflow cancellation and HTTP retry controls;
 - checkpoint inspection endpoints and raw graph-state exposure;
 - long-term checkpoint retention policy;
