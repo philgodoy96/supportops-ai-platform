@@ -13,6 +13,12 @@ from supportops.knowledge_index.vector_store.contracts import (
     KnowledgeVectorStoreError,
 )
 from supportops.modules.agent_runs.application.errors import AgentRunNotFoundError
+from supportops.modules.approvals.api.pagination import (
+    InvalidApprovalPaginationCursor,
+)
+from supportops.modules.approvals.application.queries import (
+    ApprovalRequestNotFoundError,
+)
 from supportops.modules.controlled_support_inspection.application.errors import (
     ControlledSupportInspectionInconsistentError,
     ControlledSupportInspectionNotFoundError,
@@ -148,6 +154,14 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         ControlledSupportInspectionInconsistentError,
         _controlled_support_inspection_inconsistent_handler,
+    )
+    app.add_exception_handler(
+        ApprovalRequestNotFoundError,
+        _approval_request_not_found_handler,
+    )
+    app.add_exception_handler(
+        InvalidApprovalPaginationCursor,
+        _invalid_approval_pagination_cursor_handler,
     )
 
 
@@ -428,6 +442,34 @@ async def _controlled_support_inspection_inconsistent_handler(
         status_code=500,
         code="controlled_support_inspection_inconsistent",
         message="The controlled support inspection data is internally inconsistent.",
+    )
+
+
+async def _approval_request_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="approval_request_not_found",
+        message="Approval request was not found.",
+    )
+
+
+async def _invalid_approval_pagination_cursor_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=400,
+        code="invalid_pagination_cursor",
+        message="Approval pagination cursor is invalid.",
     )
 
 
