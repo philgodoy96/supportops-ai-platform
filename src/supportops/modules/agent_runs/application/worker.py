@@ -26,6 +26,12 @@ from supportops.modules.agent_runs.domain.repositories import (
 from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
 )
+from supportops.modules.approvals.application.models import (
+    ExpirePendingApprovalRequestsCommand,
+)
+from supportops.modules.approvals.application.services import (
+    ExpirePendingApprovalRequests,
+)
 
 UtcNowProvider = Callable[[], datetime]
 UuidProvider = Callable[[], UUID]
@@ -76,6 +82,8 @@ class RunAgentWorkerCycle:
         processor: ProcessClaimedAgentRun,
         retry_policy: AgentRunRetryPolicy,
         lease_seconds: float,
+        expire_pending_approvals: ExpirePendingApprovalRequests,
+        approval_expiration_batch_size: int,
         utc_now: UtcNowProvider | None = None,
         uuid_provider: UuidProvider | None = None,
     ) -> None:
@@ -84,19 +92,27 @@ class RunAgentWorkerCycle:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero.")
 
+        if approval_expiration_batch_size < 1:
+            raise ValueError(
+                "approval_expiration_batch_size must be at least one.",
+            )
+
         self._worker_id = worker_id
         self._agent_run_repository = agent_run_repository
         self._transaction_manager = transaction_manager
         self._processor = processor
         self._retry_policy = retry_policy
         self._lease_seconds = lease_seconds
+        self._expire_pending_approvals = expire_pending_approvals
+        self._approval_expiration_batch_size = approval_expiration_batch_size
         self._utc_now = utc_now or _utc_now
         self._uuid_provider = uuid_provider or uuid4
 
     async def execute(self) -> WorkerCycleResult:
-        """Run one recovery, claim, and processing cycle."""
+        """Run one recovery, expiration, claim, and processing cycle."""
 
         recovered_expired_run = await self._recover_one_expired_run()
+        await self._expire_overdue_approvals()
         claim = await self._claim_one_available_run()
 
         if claim is None:
@@ -135,6 +151,14 @@ class RunAgentWorkerCycle:
             )
 
         return result is not None
+
+    async def _expire_overdue_approvals(self) -> None:
+        await self._expire_pending_approvals.execute(
+            ExpirePendingApprovalRequestsCommand(
+                now=self._utc_now(),
+                batch_size=self._approval_expiration_batch_size,
+            ),
+        )
 
     async def _claim_one_available_run(self) -> AgentRunClaim | None:
         claimed_at = self._utc_now()

@@ -1,5 +1,6 @@
 """Application-owned persistence contracts for approval requests."""
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
@@ -56,5 +57,32 @@ class ApprovalRequestRepository(Protocol):
         agent_run_id: UUID,
     ) -> tuple[ApprovalRequest, ...]:
         """Return workspace-scoped approvals for one AgentRun."""
+
+        ...
+
+    async def get_by_id_for_update(
+        self,
+        *,
+        workspace_id: UUID,
+        approval_request_id: UUID,
+    ) -> ApprovalRequest | None:
+        """Lock and return one workspace-scoped approval request by ID."""
+
+        ...
+
+    async def get_next_expired_pending_for_update(
+        self,
+        *,
+        now: datetime,
+    ) -> ApprovalRequest | None:
+        """Lock the next overdue pending approval, if available."""
+
+        ...
+
+    async def save(
+        self,
+        approval_request: ApprovalRequest,
+    ) -> None:
+        """Persist one terminal approval decision without committing."""
 
         ...

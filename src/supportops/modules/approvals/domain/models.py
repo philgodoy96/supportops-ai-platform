@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -239,6 +239,122 @@ class ApprovalRequest:
             and dict(self.proposed_input) == dict(candidate.proposed_input)
             and self.request_reason == candidate.request_reason
             and self.expires_at == candidate.expires_at
+        )
+
+    def approve(
+        self,
+        *,
+        actor_reference: str,
+        comment: str | None,
+        request_id: UUID,
+        correlation_id: UUID,
+        decided_at: datetime,
+    ) -> "ApprovalRequest":
+        """Transition one pending request to an approved decision."""
+
+        if self.status is not ApprovalRequestStatus.PENDING:
+            raise ValueError("Only pending approval requests can be approved.")
+
+        _validate_utc_timestamp(decided_at, field_name="decided_at")
+        if decided_at < self.created_at:
+            raise ValueError("decided_at must not precede created_at.")
+        if decided_at >= self.expires_at:
+            raise ValueError("decided_at must precede expires_at.")
+
+        _validate_uuid(request_id, field_name="request_id")
+        _validate_uuid(correlation_id, field_name="correlation_id")
+        _validate_bounded_text(
+            actor_reference,
+            field_name="actor_reference",
+            maximum_length=APPROVAL_DECISION_ACTOR_MAX_LENGTH,
+        )
+        if comment is not None:
+            _validate_bounded_text(
+                comment,
+                field_name="comment",
+                maximum_length=APPROVAL_DECISION_COMMENT_MAX_LENGTH,
+            )
+
+        return replace(
+            self,
+            status=ApprovalRequestStatus.APPROVED,
+            decision_actor_reference=actor_reference,
+            decision_comment=comment,
+            decision_request_id=request_id,
+            decision_correlation_id=correlation_id,
+            decided_at=decided_at,
+            updated_at=decided_at,
+        )
+
+    def reject(
+        self,
+        *,
+        actor_reference: str,
+        comment: str,
+        request_id: UUID,
+        correlation_id: UUID,
+        decided_at: datetime,
+    ) -> "ApprovalRequest":
+        """Transition one pending request to a rejected decision."""
+
+        if self.status is not ApprovalRequestStatus.PENDING:
+            raise ValueError("Only pending approval requests can be rejected.")
+
+        _validate_utc_timestamp(decided_at, field_name="decided_at")
+        if decided_at < self.created_at:
+            raise ValueError("decided_at must not precede created_at.")
+        if decided_at >= self.expires_at:
+            raise ValueError("decided_at must precede expires_at.")
+
+        _validate_uuid(request_id, field_name="request_id")
+        _validate_uuid(correlation_id, field_name="correlation_id")
+        _validate_bounded_text(
+            actor_reference,
+            field_name="actor_reference",
+            maximum_length=APPROVAL_DECISION_ACTOR_MAX_LENGTH,
+        )
+        _validate_bounded_text(
+            comment,
+            field_name="comment",
+            maximum_length=APPROVAL_DECISION_COMMENT_MAX_LENGTH,
+        )
+
+        return replace(
+            self,
+            status=ApprovalRequestStatus.REJECTED,
+            decision_actor_reference=actor_reference,
+            decision_comment=comment,
+            decision_request_id=request_id,
+            decision_correlation_id=correlation_id,
+            decided_at=decided_at,
+            updated_at=decided_at,
+        )
+
+    def expire(
+        self,
+        *,
+        decided_at: datetime,
+    ) -> "ApprovalRequest":
+        """Transition one overdue pending request to expiration."""
+
+        if self.status is not ApprovalRequestStatus.PENDING:
+            raise ValueError("Only pending approval requests can expire.")
+
+        _validate_utc_timestamp(decided_at, field_name="decided_at")
+        if decided_at < self.created_at:
+            raise ValueError("decided_at must not precede created_at.")
+        if decided_at < self.expires_at:
+            raise ValueError("decided_at must not precede expires_at.")
+
+        return replace(
+            self,
+            status=ApprovalRequestStatus.EXPIRED,
+            decision_actor_reference=APPROVAL_EXPIRATION_ACTOR_REFERENCE,
+            decision_comment=None,
+            decision_request_id=None,
+            decision_correlation_id=None,
+            decided_at=decided_at,
+            updated_at=decided_at,
         )
 
 

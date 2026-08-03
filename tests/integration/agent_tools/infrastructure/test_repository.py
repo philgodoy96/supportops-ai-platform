@@ -605,3 +605,125 @@ async def test_conflicting_sensitive_proposal_raises(
                     persisted_at=_TOOL_STARTED_AT + timedelta(seconds=2),
                 ),
             )
+
+
+async def test_save_approval_outcome_rejects_pending_to_rejected(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    decided_at = _TOOL_STARTED_AT + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        rejected = tool_call.reject_for_approval(decided_at=decided_at)
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save_approval_outcome(rejected)
+
+            loaded = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert loaded is not None
+    assert loaded.status is AgentToolCallStatus.REJECTED
+    assert loaded.finished_at == decided_at
+    assert loaded.tool_name == tool_call.tool_name
+    assert loaded.input_fingerprint == tool_call.input_fingerprint
+    assert dict(loaded.safe_input) == dict(tool_call.safe_input)
+
+
+async def test_save_approval_outcome_expires_pending_proposal(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    decided_at = _TOOL_STARTED_AT + timedelta(hours=24)
+
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        expired = tool_call.expire_for_approval(decided_at=decided_at)
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save_approval_outcome(expired)
+
+            loaded = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert loaded is not None
+    assert loaded.status is AgentToolCallStatus.EXPIRED
+    assert loaded.finished_at == decided_at
+
+
+async def test_get_by_id_for_update_is_workspace_scoped(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            locked = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                agent_tool_call_id=tool_call.id,
+            )
+            cross_workspace = await repository.get_by_id_for_update(
+                workspace_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                agent_tool_call_id=tool_call.id,
+            )
+
+    assert locked == tool_call
+    assert cross_workspace is None
+
+
+async def test_save_approval_outcome_rejects_non_pending(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        rejected = tool_call.reject_for_approval(
+            decided_at=_TOOL_STARTED_AT + timedelta(minutes=1),
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save_approval_outcome(rejected)
+
+        with pytest.raises(RuntimeError, match="pending_approval"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_approval_outcome(rejected)
+
+
+async def test_save_approval_outcome_rejects_immutable_mismatch(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        claim = await _create_running_claim(session)
+        tool_call = _pending_sensitive_tool_call(claim)
+        await _persist(session, _command(claim, tool_call=tool_call))
+
+        rejected = replace(
+            tool_call.reject_for_approval(
+                decided_at=_TOOL_STARTED_AT + timedelta(minutes=1),
+            ),
+            tool_name="create_escalation",
+        )
+        repository = SqlAlchemyAgentToolCallExecutionRepository(session)
+
+        with pytest.raises(RuntimeError, match="immutable"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save_approval_outcome(rejected)

@@ -21,10 +21,12 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRunStatus,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunFailureDisposition,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
     WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
@@ -177,6 +179,19 @@ async def mark_waiting_and_commit(
 
     async with SqlAlchemyTransactionManager(session).transaction():
         return await repository.mark_waiting_for_approval(command)
+
+
+async def requeue_waiting_and_commit(
+    session: AsyncSession,
+    *,
+    command: RequeueWaitingAgentRunCommand,
+) -> AgentRunApprovalRequeueResult:
+    """Persist and commit a waiting-for-approval requeue."""
+
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    async with SqlAlchemyTransactionManager(session).transaction():
+        return await repository.requeue_waiting_for_approval(command)
 
 
 async def record_failure_and_commit(
@@ -817,3 +832,130 @@ async def test_expired_lease_cannot_mark_waiting_for_approval(
     assert len(attempts) == 1
     assert attempts[0].finished_at is None
     assert attempts[0].outcome is None
+
+
+async def test_requeue_waiting_for_approval_sets_queued_without_new_attempt(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+    requeued_at = finished_at + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        waiting_result = await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    assert waiting_result is AgentRunTransitionResult.APPLIED
+
+    async with postgresql_session_factory() as requeue_session:
+        result = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=requeued_at,
+            ),
+        )
+
+    assert result is AgentRunApprovalRequeueResult.APPLIED
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.QUEUED.value
+    assert run.available_at == requeued_at
+    assert run.updated_at == requeued_at
+    assert run.completed_at is None
+    assert run.last_error_code is None
+    assert run.last_error_summary is None
+    assert run.attempt_count == 1
+    assert run.retryable_failure_count == 0
+    assert len(attempts) == 1
+    assert attempts[0].outcome == (AgentRunAttemptOutcome.AWAITING_APPROVAL.value)
+
+
+async def test_requeue_waiting_for_approval_rejects_invalid_status(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as requeue_session:
+        result = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+
+async def test_requeue_waiting_for_approval_rejects_cross_scope(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        result = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=finished_at + timedelta(minutes=1),
+            ),
+        )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT

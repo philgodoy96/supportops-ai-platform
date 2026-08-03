@@ -14,9 +14,11 @@ from supportops.modules.agent_runs.domain.recovery import (
     RecoverExpiredAgentRunResult,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
     WaitForApprovalAgentRunCommand,
 )
 
@@ -50,6 +52,14 @@ class AgentRunRepository(Protocol):
         command: WaitForApprovalAgentRunCommand,
     ) -> AgentRunTransitionResult:
         """Persist a fenced waiting-for-approval AgentRun transition."""
+
+        ...
+
+    async def requeue_waiting_for_approval(
+        self,
+        command: RequeueWaitingAgentRunCommand,
+    ) -> AgentRunApprovalRequeueResult:
+        """Requeue one AgentRun that is waiting for an approval decision."""
 
         ...
 

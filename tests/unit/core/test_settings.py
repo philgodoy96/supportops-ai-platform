@@ -33,6 +33,8 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_WORKER_MAX_RETRYABLE_FAILURES",
     "SUPPORTOPS_WORKER_RETRY_BASE_SECONDS",
     "SUPPORTOPS_WORKER_RETRY_MAX_SECONDS",
+    "SUPPORTOPS_APPROVAL_TTL_SECONDS",
+    "SUPPORTOPS_APPROVAL_EXPIRATION_BATCH_SIZE",
     "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
     "SUPPORTOPS_AGENT_GRAPH_MAX_STEPS",
     "SUPPORTOPS_AGENT_GRAPH_MAX_TOOL_CALLS",
@@ -104,6 +106,8 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.worker_max_retryable_failures == 3
     assert settings.worker_retry_base_seconds == 2.0
     assert settings.worker_retry_max_seconds == 60.0
+    assert settings.approval_ttl_seconds == 86400.0
+    assert settings.approval_expiration_batch_size == 100
     assert settings.ticket_processing_workflow_version == "controlled-support-v1"
     assert settings.agent_graph_max_steps == 16
     assert settings.agent_graph_max_tool_calls == 3
@@ -140,6 +144,8 @@ def test_settings_load_worker_configuration_from_environment(
     monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_RETRYABLE_FAILURES", "5")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_BASE_SECONDS", "4")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_MAX_SECONDS", "120")
+    monkeypatch.setenv("SUPPORTOPS_APPROVAL_TTL_SECONDS", "3600")
+    monkeypatch.setenv("SUPPORTOPS_APPROVAL_EXPIRATION_BATCH_SIZE", "25")
     monkeypatch.setenv(
         "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
         "ticket-classification-v1",
@@ -167,6 +173,8 @@ def test_settings_load_worker_configuration_from_environment(
     assert settings.worker_max_retryable_failures == 5
     assert settings.worker_retry_base_seconds == 4.0
     assert settings.worker_retry_max_seconds == 120.0
+    assert settings.approval_ttl_seconds == 3600.0
+    assert settings.approval_expiration_batch_size == 25
 
 
 def test_settings_load_agent_graph_configuration_from_environment(
@@ -571,6 +579,10 @@ def test_settings_reject_blank_required_strings(
         ("worker_retry_base_seconds", 3601),
         ("worker_retry_max_seconds", 0),
         ("worker_retry_max_seconds", 86401),
+        ("approval_ttl_seconds", 0),
+        ("approval_ttl_seconds", 2592001),
+        ("approval_expiration_batch_size", 0),
+        ("approval_expiration_batch_size", 1001),
         ("llm_request_timeout_seconds", 0),
         ("llm_request_timeout_seconds", 301),
         ("llm_transport_max_retries", -1),

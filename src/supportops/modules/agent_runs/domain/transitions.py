@@ -26,6 +26,13 @@ class AgentRunTransitionResult(StrEnum):
     LEASE_LOST = "lease_lost"
 
 
+class AgentRunApprovalRequeueResult(StrEnum):
+    """Outcome of requeueing an AgentRun waiting for approval."""
+
+    APPLIED = "applied"
+    STATE_CONFLICT = "state_conflict"
+
+
 @dataclass(frozen=True, slots=True)
 class CompleteAgentRunCommand:
     """Values required to complete an actively leased AgentRun."""
@@ -53,6 +60,25 @@ class WaitForApprovalAgentRunCommand:
         _validate_utc_timestamp(
             self.finished_at,
             field_name="finished_at",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RequeueWaitingAgentRunCommand:
+    """Values required to requeue an AgentRun waiting for approval."""
+
+    workspace_id: UUID
+    ticket_id: UUID
+    agent_run_id: UUID
+    requeued_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_uuid(self.workspace_id, field_name="workspace_id")
+        _validate_uuid(self.ticket_id, field_name="ticket_id")
+        _validate_uuid(self.agent_run_id, field_name="agent_run_id")
+        _validate_utc_timestamp(
+            self.requeued_at,
+            field_name="requeued_at",
         )
 
 
@@ -153,6 +179,11 @@ def _validate_error_text(
         raise ValueError(
             f"{field_name} exceeds the maximum length.",
         )
+
+
+def _validate_uuid(value: object, *, field_name: str) -> None:
+    if not isinstance(value, UUID):
+        raise TypeError(f"{field_name} must be a UUID.")
 
 
 def _validate_utc_timestamp(

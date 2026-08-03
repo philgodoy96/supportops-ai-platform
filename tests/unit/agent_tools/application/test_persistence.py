@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from supportops.agent_tools.application.persistence import (
+    AgentToolCallExecutionRepository,
     PersistAgentToolCallCommand,
 )
 from supportops.agent_tools.domain.audit import (
@@ -178,3 +179,20 @@ def test_command_is_immutable() -> None:
         command.lease_token = UUID(  # type: ignore[misc]
             "99999999-9999-4999-8999-999999999999",
         )
+
+
+def test_execution_repository_protocol_exposes_approval_methods() -> None:
+    assert callable(
+        getattr(
+            AgentToolCallExecutionRepository,
+            "get_by_id_for_update",
+            None,
+        )
+    )
+    assert callable(
+        getattr(
+            AgentToolCallExecutionRepository,
+            "save_approval_outcome",
+            None,
+        )
+    )

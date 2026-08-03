@@ -172,6 +172,20 @@ class RecordingExecutionRepository:
 
         return self.result
 
+    async def get_by_id_for_update(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_tool_call_id: UUID,
+    ) -> AgentToolCall | None:
+        raise AssertionError("get_by_id_for_update must not be called")
+
+    async def save_approval_outcome(
+        self,
+        tool_call: AgentToolCall,
+    ) -> None:
+        raise AssertionError("save_approval_outcome must not be called")
+
 
 class RecordingToolExecutor:
     """Return one configured result outside transactions."""

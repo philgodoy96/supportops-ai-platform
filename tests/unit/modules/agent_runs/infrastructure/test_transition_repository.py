@@ -16,10 +16,12 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRunStatus,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunFailureDisposition,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
     WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
@@ -102,6 +104,55 @@ def create_running_run_record() -> AgentRunRecord:
         updated_at=_STARTED_AT,
     )
     return AgentRunRecord.from_domain(running_run)
+
+
+def create_waiting_run_record() -> AgentRunRecord:
+    """Create a deterministic waiting-for-approval AgentRun record."""
+
+    initial_run = AgentRun.create_initial(
+        agent_run_id=_RUN_ID,
+        workspace_id=UUID(
+            "032c8c87-57cc-4d14-bfbd-04968b4e8cd4",
+        ),
+        ticket_id=UUID(
+            "38bb60fe-d2ea-4615-b499-91aa45069019",
+        ),
+        ingestion_request_id=UUID(
+            "725eec8a-c504-4071-ac96-c78cc907f26c",
+        ),
+        correlation_id=UUID(
+            "1038c98e-62fd-45df-9839-138f7105cb78",
+        ),
+        workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
+        max_retryable_failures=3,
+        now=_STARTED_AT - timedelta(minutes=1),
+    )
+
+    waiting_run = AgentRun(
+        id=initial_run.id,
+        workspace_id=initial_run.workspace_id,
+        ticket_id=initial_run.ticket_id,
+        workflow_name=initial_run.workflow_name,
+        workflow_version=initial_run.workflow_version,
+        trigger_key=initial_run.trigger_key,
+        status=AgentRunStatus.WAITING_FOR_APPROVAL,
+        available_at=None,
+        attempt_count=1,
+        retryable_failure_count=0,
+        max_retryable_failures=initial_run.max_retryable_failures,
+        lease_owner=None,
+        lease_token=None,
+        lease_expires_at=None,
+        first_started_at=_STARTED_AT,
+        completed_at=None,
+        last_error_code=None,
+        last_error_summary=None,
+        ingestion_request_id=initial_run.ingestion_request_id,
+        correlation_id=initial_run.correlation_id,
+        created_at=initial_run.created_at,
+        updated_at=_FINISHED_AT,
+    )
+    return AgentRunRecord.from_domain(waiting_run)
 
 
 def create_active_attempt_record() -> AgentRunAttemptRecord:
@@ -595,4 +646,73 @@ async def test_mark_waiting_for_approval_requires_active_attempt() -> None:
             ),
         )
 
+    session.flush.assert_not_awaited()
+
+
+async def test_requeue_waiting_for_approval_sets_queued_available_at() -> None:
+    run_record = create_waiting_run_record()
+    original_attempt_count = run_record.attempt_count
+    original_retryable_failure_count = run_record.retryable_failure_count
+    session = create_session(run_record=run_record)
+    repository = SqlAlchemyAgentRunRepository(session)
+    requeued_at = _FINISHED_AT + timedelta(minutes=1)
+
+    result = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=run_record.ticket_id,
+            agent_run_id=_RUN_ID,
+            requeued_at=requeued_at,
+        ),
+    )
+
+    assert result is AgentRunApprovalRequeueResult.APPLIED
+    assert run_record.status == AgentRunStatus.QUEUED.value
+    assert run_record.available_at == requeued_at
+    assert run_record.updated_at == requeued_at
+    assert run_record.completed_at is None
+    assert run_record.last_error_code is None
+    assert run_record.last_error_summary is None
+    assert run_record.attempt_count == original_attempt_count
+    assert run_record.retryable_failure_count == (original_retryable_failure_count)
+    assert run_record.lease_owner is None
+    assert run_record.lease_token is None
+    assert run_record.lease_expires_at is None
+    session.flush.assert_awaited_once_with()
+    session.commit.assert_not_awaited()
+    session.add.assert_not_called()
+
+
+async def test_requeue_waiting_for_approval_returns_conflict_for_invalid_status() -> None:
+    run_record = create_running_run_record()
+    session = create_session(run_record=run_record)
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=run_record.ticket_id,
+            agent_run_id=_RUN_ID,
+            requeued_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
+    session.flush.assert_not_awaited()
+
+
+async def test_requeue_waiting_for_approval_returns_conflict_for_cross_scope() -> None:
+    session = create_session(run_record=None)
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ticket_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            agent_run_id=_RUN_ID,
+            requeued_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
     session.flush.assert_not_awaited()
