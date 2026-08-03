@@ -6,6 +6,7 @@ from enum import StrEnum
 from supportops.agent_graph.domain.human_approved_state import (
     HumanApprovalCheckpointStatus,
     HumanApprovedDecisionKind,
+    HumanApprovedRecommendationStage,
     HumanApprovedSupportGraphStateSnapshot,
 )
 
@@ -60,6 +61,14 @@ def select_human_approved_support_route(
         )
 
     if state.recommendation_id is not None:
+        if state.recommendation_stage is HumanApprovedRecommendationStage.DRAFTED:
+            return HumanApprovedRouteDecision(
+                route=(HumanApprovedSupportGraphRoute.VALIDATE_RECOMMENDATION),
+            )
+        if state.recommendation_stage is HumanApprovedRecommendationStage.VALIDATED:
+            return HumanApprovedRouteDecision(
+                route=(HumanApprovedSupportGraphRoute.PERSIST_RECOMMENDATION),
+            )
         return HumanApprovedRouteDecision(
             route=HumanApprovedSupportGraphRoute.COMPLETE_WORKFLOW,
         )
@@ -70,13 +79,7 @@ def select_human_approved_support_route(
         )
 
     if state.approval_request_id is not None:
-        if state.approval_status is HumanApprovalCheckpointStatus.PENDING:
-            return HumanApprovedRouteDecision(
-                route=(HumanApprovedSupportGraphRoute.AWAIT_HUMAN_APPROVAL),
-            )
-        return HumanApprovedRouteDecision(
-            route=(HumanApprovedSupportGraphRoute.HANDLE_APPROVAL_DECISION),
-        )
+        return _route_approval_checkpoint(state)
 
     if state.decision_kind is HumanApprovedDecisionKind.SENSITIVE_TOOL:
         return HumanApprovedRouteDecision(
@@ -100,4 +103,44 @@ def select_human_approved_support_route(
 
     return HumanApprovedRouteDecision(
         route=HumanApprovedSupportGraphRoute.DECIDE_NEXT_ACTION,
+    )
+
+
+def _route_approval_checkpoint(
+    state: HumanApprovedSupportGraphStateSnapshot,
+) -> HumanApprovedRouteDecision:
+    if state.approval_status is HumanApprovalCheckpointStatus.PENDING:
+        if state.approval_resume_payload is None:
+            return HumanApprovedRouteDecision(
+                route=(HumanApprovedSupportGraphRoute.AWAIT_HUMAN_APPROVAL),
+            )
+        return HumanApprovedRouteDecision(
+            route=(HumanApprovedSupportGraphRoute.HANDLE_APPROVAL_DECISION),
+        )
+
+    if state.approval_status is HumanApprovalCheckpointStatus.APPROVED:
+        if state.sensitive_execution_output is None:
+            return HumanApprovedRouteDecision(
+                route=(HumanApprovedSupportGraphRoute.EXECUTE_SENSITIVE_TOOL),
+            )
+        return HumanApprovedRouteDecision(
+            route=(HumanApprovedSupportGraphRoute.DRAFT_GROUNDED_RECOMMENDATION),
+        )
+
+    if state.approval_status in {
+        HumanApprovalCheckpointStatus.REJECTED,
+        HumanApprovalCheckpointStatus.EXPIRED,
+    }:
+        if state.sensitive_execution_output is not None:
+            return HumanApprovedRouteDecision(
+                route=HumanApprovedSupportGraphRoute.FAIL_WORKFLOW,
+                error_code=("human_approved_rejected_execution_output"),
+            )
+        return HumanApprovedRouteDecision(
+            route=(HumanApprovedSupportGraphRoute.DRAFT_GROUNDED_RECOMMENDATION),
+        )
+
+    return HumanApprovedRouteDecision(
+        route=HumanApprovedSupportGraphRoute.FAIL_WORKFLOW,
+        error_code="human_approved_approval_status_invalid",
     )

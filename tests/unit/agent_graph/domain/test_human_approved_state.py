@@ -115,3 +115,43 @@ def test_unknown_checkpoint_field_is_incompatible() -> None:
         HumanApprovedGraphStateIncompatibleError,
     ):
         validate_human_approved_support_state(state)
+
+
+def test_resume_payload_requires_pending_status() -> None:
+    state = create_initial_human_approved_support_state(
+        workspace_id=uuid4(),
+        ticket_id=uuid4(),
+        agent_run_id=uuid4(),
+    )
+    approval_request_id = uuid4()
+    agent_tool_call_id = uuid4()
+    state.update(
+        {
+            "decision_kind": "sensitive_tool",
+            "decision_invocation_id": str(uuid4()),
+            "decision_summary": "Escalation requires approval.",
+            "proposed_tool_provider_call_id": "call-1",
+            "proposed_tool_name": "escalate_ticket",
+            "proposed_tool_version": 1,
+            "proposed_tool_input": {
+                "target_queue": "support_operations",
+                "reason": "Needs operational handling.",
+            },
+            "proposed_tool_fingerprint": "a" * 64,
+            "approval_request_reason": "Needs operational handling.",
+            "agent_tool_call_id": str(agent_tool_call_id),
+            "approval_request_id": str(approval_request_id),
+            "approval_status": "approved",
+            "approval_expires_at": "2026-08-04T12:00:00+00:00",
+            "approval_resume_payload": {
+                "approval_request_id": str(approval_request_id),
+                "agent_tool_call_id": str(agent_tool_call_id),
+                "decision_status": "approved",
+            },
+        },
+    )
+
+    with pytest.raises(
+        HumanApprovedGraphStateIncompatibleError,
+    ):
+        validate_human_approved_support_state(state)

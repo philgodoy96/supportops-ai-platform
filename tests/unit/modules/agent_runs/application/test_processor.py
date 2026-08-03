@@ -611,7 +611,44 @@ async def test_paused_for_approval_marks_waiting_without_success_or_failure() ->
     assert command.agent_run_id == _RUN_ID
     assert command.lease_token == _LEASE_TOKEN
     assert command.finished_at == _FINISHED_AT
+    assert claim.agent_run.retryable_failure_count == 1
     agent_run_repository.mark_succeeded.assert_not_awaited()
+    agent_run_repository.record_failure.assert_not_awaited()
+
+
+async def test_successful_resume_completes_without_changing_retry_counter() -> None:
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(
+        transaction_manager=transaction_manager,
+    )
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+    agent_run_repository = AsyncMock()
+    agent_run_repository.mark_succeeded.return_value = AgentRunTransitionResult.APPLIED
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=executor,
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+    )
+
+    claim = create_claim(
+        attempt_count=2,
+        retryable_failure_count=1,
+    )
+    result = await processor.execute(claim)
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert claim.agent_run.retryable_failure_count == 1
+    agent_run_repository.mark_succeeded.assert_awaited_once()
+    agent_run_repository.mark_waiting_for_approval.assert_not_awaited()
     agent_run_repository.record_failure.assert_not_awaited()
 
 

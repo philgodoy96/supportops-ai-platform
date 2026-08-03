@@ -16,6 +16,9 @@ from pydantic import (
     model_validator,
 )
 
+from supportops.agent_graph.domain.resume_planning import (
+    ApprovalResumeDecisionStatus,
+)
 from supportops.ai.schemas.ticket_classification import (
     TicketCategory,
     TicketIntent,
@@ -118,6 +121,27 @@ class HumanApprovalCheckpointStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class HumanApprovedRecommendationStage(StrEnum):
+    """Recommendation progression after approval-aware drafting."""
+
+    DRAFTED = "drafted"
+    VALIDATED = "validated"
+    PERSISTED = "persisted"
+
+
+class HumanApprovedApprovalResumePayload(BaseModel):
+    """Bounded resume value projected into checkpoint state."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    approval_request_id: UUID
+    agent_tool_call_id: UUID
+    decision_status: ApprovalResumeDecisionStatus
+
+
 class HumanApprovedSupportGraphState(TypedDict):
     """Bounded JSON-compatible state checkpointed by LangGraph."""
 
@@ -160,11 +184,13 @@ class HumanApprovedSupportGraphState(TypedDict):
     approval_request_id: str | None
     approval_status: str | None
     approval_expires_at: str | None
+    approval_resume_payload: dict[str, JsonValue] | None
 
     sensitive_execution_output: dict[str, JsonValue] | None
 
     recommendation_invocation_id: str | None
     recommendation_id: str | None
+    recommendation_stage: str | None
     current_error_code: str | None
 
 
@@ -255,11 +281,13 @@ class HumanApprovedSupportGraphStateSnapshot(BaseModel):
     approval_request_id: UUID | None = None
     approval_status: HumanApprovalCheckpointStatus | None = None
     approval_expires_at: str | None = None
+    approval_resume_payload: HumanApprovedApprovalResumePayload | None = None
 
     sensitive_execution_output: HumanApprovedSensitiveExecutionOutput | None = None
 
     recommendation_invocation_id: UUID | None = None
     recommendation_id: UUID | None = None
+    recommendation_stage: HumanApprovedRecommendationStage | None = None
     current_error_code: GraphErrorCode | None = None
 
     @model_validator(mode="after")
@@ -368,6 +396,19 @@ class HumanApprovedSupportGraphStateSnapshot(BaseModel):
                 "Approval checkpoint fields require a sensitive proposal.",
             )
 
+        if self.approval_resume_payload is not None:
+            if self.approval_status is not HumanApprovalCheckpointStatus.PENDING:
+                raise ValueError(
+                    "approval_resume_payload requires pending approval status.",
+                )
+            if (
+                self.approval_request_id != self.approval_resume_payload.approval_request_id
+                or self.agent_tool_call_id != self.approval_resume_payload.agent_tool_call_id
+            ):
+                raise ValueError(
+                    "approval_resume_payload must match checkpoint approval identifiers.",
+                )
+
         if self.sensitive_execution_output is not None:
             if self.approval_status is not HumanApprovalCheckpointStatus.APPROVED:
                 raise ValueError(
@@ -385,6 +426,10 @@ class HumanApprovedSupportGraphStateSnapshot(BaseModel):
         if self.recommendation_id is not None and self.recommendation_invocation_id is None:
             raise ValueError(
                 "recommendation_id requires recommendation_invocation_id.",
+            )
+        if self.recommendation_stage is not None and self.recommendation_id is None:
+            raise ValueError(
+                "recommendation_stage requires recommendation_id.",
             )
 
         return self

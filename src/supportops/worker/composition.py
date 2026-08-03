@@ -17,6 +17,9 @@ from supportops.agent_graph.application.human_approved_nodes import (
     HumanApprovedDecisionExecutionOutcome,
     HumanApprovedSupportWorkflowNodes,
 )
+from supportops.agent_graph.application.human_approved_recommendation import (
+    HumanApprovedRecommendationOutcome,
+)
 from supportops.agent_graph.application.human_approved_workflow import (
     HumanApprovedSupportWorkflowExecutor,
     compile_human_approved_support_graph,
@@ -85,9 +88,14 @@ from supportops.agent_tools.tools.service_status import (
     DeterministicServiceStatusCatalog,
 )
 from supportops.ai.embeddings.contracts import EmbeddingProvider
-from supportops.ai.gateway.contracts import LLMOperation, LLMProvider
+from supportops.ai.gateway.contracts import (
+    LLMOperation,
+    LLMProvider,
+    LLMRequest,
+)
 from supportops.ai.gateway.results import (
     LLMGatewayFailure,
+    LLMGatewayResult,
     LLMInvocationTrace,
 )
 from supportops.ai.gateway.service import LLMGateway
@@ -105,6 +113,10 @@ from supportops.ai.pricing.estimation import estimate_llm_cost
 from supportops.ai.prompts.human_approved_support_decision_v1 import (
     HUMAN_APPROVED_SUPPORT_DECISION_PROMPT_VERSION,
     render_human_approved_support_decision_prompt,
+)
+from supportops.ai.prompts.human_approved_support_recommendation_v1 import (
+    HUMAN_APPROVED_SUPPORT_RECOMMENDATION_PROMPT_VERSION,
+    render_human_approved_support_recommendation_prompt,
 )
 from supportops.ai.providers.mock import (
     MOCK_TICKET_CLASSIFIER_MODEL,
@@ -166,6 +178,15 @@ from supportops.modules.support_recommendations.application.persistence import (
     PersistSupportRecommendationCommand,
     SupportRecommendationExecutionRepository,
     SupportRecommendationPersistenceResult,
+)
+from supportops.modules.support_recommendations.application.queries import (
+    SupportRecommendationQueryRepository,
+)
+from supportops.modules.support_recommendations.application.schemas import (
+    SupportRecommendationResult,
+)
+from supportops.modules.support_recommendations.domain.models import (
+    SupportRecommendation,
 )
 from supportops.modules.support_recommendations.infrastructure.invocation_query_repository import (
     SqlAlchemyAttemptLLMInvocationQueryRepository,
@@ -604,6 +625,390 @@ class HumanApprovedSupportDecisionExecutor:
         return tuple(invocations)
 
 
+class HumanApprovedSupportRecommendationExecutor:
+    """Draft and persist one approval-aware grounded recommendation."""
+
+    def __init__(
+        self,
+        *,
+        gateway: LLMGateway,
+        model: str,
+        request_timeout_seconds: float,
+        transaction_manager: TransactionManager,
+        invocation_query_repository: AttemptLLMInvocationQueryRepository,
+        recommendation_query_repository: SupportRecommendationQueryRepository,
+        execution_repository: SupportRecommendationExecutionRepository,
+        pricing_catalog: PricingCatalog = DEFAULT_PRICING_CATALOG,
+        utc_now: UtcNowProvider | None = None,
+        uuid_factory: UuidFactory = uuid4,
+    ) -> None:
+        _validate_required_text(
+            model,
+            field_name="model",
+        )
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive.")
+
+        self._gateway = gateway
+        self._model = model
+        self._request_timeout_seconds = request_timeout_seconds
+        self._transaction_manager = transaction_manager
+        self._invocation_query_repository = invocation_query_repository
+        self._recommendation_query_repository = recommendation_query_repository
+        self._execution_repository = execution_repository
+        self._pricing_catalog = pricing_catalog
+        self._utc_now = utc_now or _utc_now
+        self._uuid_factory = uuid_factory
+
+    async def execute(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+        state: HumanApprovedSupportGraphStateSnapshot,
+        workflow: Mapping[str, JsonValue],
+    ) -> HumanApprovedRecommendationOutcome:
+        """Return one durable recommendation for the approval-aware graph."""
+
+        _validate_human_approved_context_ownership(
+            state=state,
+            context=context,
+        )
+        if state.classification_id is None:
+            raise ValueError(
+                "Recommendation drafting requires a persisted classification.",
+            )
+        if state.recommendation_id is not None:
+            raise ValueError(
+                "Graph state already contains a persisted recommendation.",
+            )
+        if state.current_error_code is not None:
+            raise ValueError(
+                "Recommendation drafting cannot continue after a graph error.",
+            )
+
+        existing = await self._load_existing_recommendation(context=context)
+        if existing is not None:
+            return HumanApprovedRecommendationOutcome(
+                invocation_id=existing.accepted_llm_invocation_id,
+                recommendation=existing,
+            )
+
+        rendered_prompt = render_human_approved_support_recommendation_prompt(
+            version=HUMAN_APPROVED_SUPPORT_RECOMMENDATION_PROMPT_VERSION,
+            workflow=workflow,
+        )
+        existing_invocations = await self._load_existing_invocations(
+            context=context,
+        )
+        request = LLMRequest(
+            operation=LLMOperation.SUPPORT_RECOMMENDATION_DRAFT,
+            model=self._model,
+            instructions=rendered_prompt.instructions,
+            input=rendered_prompt.input,
+            output_schema=SupportRecommendationResult,
+            timeout_seconds=self._request_timeout_seconds,
+            metadata=_build_human_approved_recommendation_metadata(
+                context=context,
+                prompt_id=rendered_prompt.definition.prompt_id,
+                prompt_version=rendered_prompt.definition.version,
+                prompt_content_hash=(rendered_prompt.definition.content_hash),
+                schema_version=(rendered_prompt.definition.output_schema_id),
+            ),
+        )
+
+        try:
+            gateway_result = await self._gateway.generate(request)
+        except LLMGatewayFailure as failure:
+            await self._persist_gateway_failure(
+                context=context,
+                existing_invocations=existing_invocations,
+                traces=failure.invocations,
+                prompt_id=rendered_prompt.definition.prompt_id,
+                prompt_version=rendered_prompt.definition.version,
+                prompt_content_hash=(rendered_prompt.definition.content_hash),
+                schema_version=(rendered_prompt.definition.output_schema_id),
+            )
+            _raise_human_approved_gateway_failure(failure)
+
+        return await self._handle_gateway_success(
+            state=state,
+            context=context,
+            existing_invocations=existing_invocations,
+            result=gateway_result,
+            prompt_id=rendered_prompt.definition.prompt_id,
+            prompt_version=rendered_prompt.definition.version,
+            prompt_content_hash=(rendered_prompt.definition.content_hash),
+            schema_version=(rendered_prompt.definition.output_schema_id),
+        )
+
+    async def _handle_gateway_success(
+        self,
+        *,
+        state: HumanApprovedSupportGraphStateSnapshot,
+        context: AgentRunExecutionContext,
+        existing_invocations: tuple[LLMInvocation, ...],
+        result: LLMGatewayResult,
+        prompt_id: str,
+        prompt_version: int,
+        prompt_content_hash: str,
+        schema_version: str,
+    ) -> HumanApprovedRecommendationOutcome:
+        output = _require_human_approved_recommendation_output(result.output)
+        persisted_at = self._utc_now()
+        current_invocations = self._materialize_invocations(
+            context=context,
+            traces=result.invocations,
+            sequence_offset=len(existing_invocations),
+            prompt_id=prompt_id,
+            prompt_version=prompt_version,
+            prompt_content_hash=prompt_content_hash,
+            schema_version=schema_version,
+            persisted_at=persisted_at,
+        )
+        accepted_invocation = _find_human_approved_invocation(
+            invocations=current_invocations,
+            sequence_offset=len(existing_invocations),
+            local_sequence=result.accepted_invocation_sequence,
+        )
+        if state.classification_id is None:
+            raise ValueError(
+                "Recommendation drafting requires a persisted classification.",
+            )
+        recommendation = SupportRecommendation.create(
+            recommendation_id=self._uuid_factory(),
+            workspace_id=state.workspace_id,
+            ticket_id=state.ticket_id,
+            agent_run_id=state.agent_run_id,
+            classification_id=state.classification_id,
+            accepted_llm_invocation_id=accepted_invocation.id,
+            recommended_action=output.recommended_action,
+            response_text=output.response_text,
+            requires_human_review=output.requires_human_review,
+            decision_summary=output.decision_summary,
+            prompt_id=prompt_id,
+            prompt_version=prompt_version,
+            prompt_content_hash=prompt_content_hash,
+            provider=accepted_invocation.provider,
+            model=accepted_invocation.model,
+            now=persisted_at,
+        )
+        persistence_result = await self._persist(
+            PersistSupportRecommendationCommand(
+                workspace_id=state.workspace_id,
+                ticket_id=state.ticket_id,
+                agent_run_id=state.agent_run_id,
+                agent_run_attempt_id=context.attempt.id,
+                lease_token=context.attempt.lease_token,
+                persisted_at=persisted_at,
+                invocations=(
+                    *existing_invocations,
+                    *current_invocations,
+                ),
+                recommendation=recommendation,
+                citations=(),
+            )
+        )
+
+        if persistence_result is SupportRecommendationPersistenceResult.LEASE_LOST:
+            raise RetryableAgentRunExecutionError(
+                error_code="human_approved_recommendation_lease_lost",
+                error_summary=(
+                    "The AgentRun lease was lost before the human-approved "
+                    "recommendation could be persisted."
+                ),
+            )
+
+        if persistence_result is SupportRecommendationPersistenceResult.APPLIED:
+            return HumanApprovedRecommendationOutcome(
+                invocation_id=accepted_invocation.id,
+                recommendation=recommendation,
+            )
+
+        if persistence_result is (SupportRecommendationPersistenceResult.ALREADY_RECOMMENDED):
+            persisted = await self._load_existing_recommendation(
+                context=context,
+            )
+            if persisted is None:
+                raise RuntimeError(
+                    "Recommendation persistence reported an "
+                    "existing recommendation that could not be loaded."
+                )
+            return HumanApprovedRecommendationOutcome(
+                invocation_id=persisted.accepted_llm_invocation_id,
+                recommendation=persisted,
+            )
+
+        raise RuntimeError(
+            "Successful human-approved recommendation persistence returned an invalid result."
+        )
+
+    async def _persist_gateway_failure(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+        existing_invocations: tuple[LLMInvocation, ...],
+        traces: tuple[LLMInvocationTrace, ...],
+        prompt_id: str,
+        prompt_version: int,
+        prompt_content_hash: str,
+        schema_version: str,
+    ) -> None:
+        persisted_at = self._utc_now()
+        current_invocations = self._materialize_invocations(
+            context=context,
+            traces=traces,
+            sequence_offset=len(existing_invocations),
+            prompt_id=prompt_id,
+            prompt_version=prompt_version,
+            prompt_content_hash=prompt_content_hash,
+            schema_version=schema_version,
+            persisted_at=persisted_at,
+        )
+        persistence_result = await self._persist(
+            PersistSupportRecommendationCommand(
+                workspace_id=context.agent_run.workspace_id,
+                ticket_id=context.ticket.id,
+                agent_run_id=context.agent_run.id,
+                agent_run_attempt_id=context.attempt.id,
+                lease_token=context.attempt.lease_token,
+                persisted_at=persisted_at,
+                invocations=(
+                    *existing_invocations,
+                    *current_invocations,
+                ),
+                recommendation=None,
+                citations=(),
+            )
+        )
+
+        if persistence_result is SupportRecommendationPersistenceResult.LEASE_LOST:
+            raise RetryableAgentRunExecutionError(
+                error_code="human_approved_recommendation_lease_lost",
+                error_summary=(
+                    "The AgentRun lease was lost before human-approved "
+                    "recommendation failure invocations could be persisted."
+                ),
+            )
+
+        if persistence_result not in {
+            SupportRecommendationPersistenceResult.APPLIED,
+            SupportRecommendationPersistenceResult.ALREADY_RECORDED,
+        }:
+            raise RuntimeError(
+                "Failed human-approved recommendation persistence returned an invalid result."
+            )
+
+    async def _load_existing_recommendation(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+    ) -> SupportRecommendation | None:
+        async with self._transaction_manager.transaction():
+            return await self._recommendation_query_repository.get_by_agent_run_id(
+                workspace_id=context.agent_run.workspace_id,
+                agent_run_id=context.agent_run.id,
+            )
+
+    async def _load_existing_invocations(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+    ) -> tuple[LLMInvocation, ...]:
+        query = AttemptLLMInvocationQuery(
+            workspace_id=context.agent_run.workspace_id,
+            ticket_id=context.ticket.id,
+            agent_run_id=context.agent_run.id,
+            agent_run_attempt_id=context.attempt.id,
+        )
+
+        async with self._transaction_manager.transaction():
+            invocations = await self._invocation_query_repository.list_by_attempt(
+                query,
+            )
+
+        actual_sequences = tuple(invocation.invocation_sequence for invocation in invocations)
+        expected_sequences = tuple(range(1, len(invocations) + 1))
+        if actual_sequences != expected_sequences:
+            raise RuntimeError(
+                "Persisted attempt invocation sequences are not contiguous and ordered."
+            )
+
+        return invocations
+
+    async def _persist(
+        self,
+        command: PersistSupportRecommendationCommand,
+    ) -> SupportRecommendationPersistenceResult:
+        async with self._transaction_manager.transaction():
+            return await self._execution_repository.persist_fenced(command)
+
+    def _materialize_invocations(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+        traces: tuple[LLMInvocationTrace, ...],
+        sequence_offset: int,
+        prompt_id: str,
+        prompt_version: int,
+        prompt_content_hash: str,
+        schema_version: str,
+        persisted_at: datetime,
+    ) -> tuple[LLMInvocation, ...]:
+        if not traces:
+            raise ValueError("Recommendation execution requires invocation traces.")
+
+        actual_sequences = tuple(trace.invocation_sequence for trace in traces)
+        expected_sequences = tuple(range(1, len(traces) + 1))
+        if actual_sequences != expected_sequences:
+            raise RuntimeError(
+                "Gateway trace sequences must be contiguous, ordered, and start at one."
+            )
+
+        invocations: list[LLMInvocation] = []
+        for trace in traces:
+            usage = trace.usage
+            cost_estimate = estimate_llm_cost(
+                provider=trace.provider,
+                model=trace.model,
+                usage=usage,
+                catalog=self._pricing_catalog,
+            )
+            invocations.append(
+                LLMInvocation.create(
+                    invocation_id=self._uuid_factory(),
+                    workspace_id=context.agent_run.workspace_id,
+                    ticket_id=context.ticket.id,
+                    agent_run_id=context.agent_run.id,
+                    agent_run_attempt_id=context.attempt.id,
+                    invocation_sequence=(sequence_offset + trace.invocation_sequence),
+                    status=trace.status,
+                    provider=trace.provider,
+                    model=trace.model,
+                    provider_request_id=trace.provider_request_id,
+                    prompt_id=prompt_id,
+                    prompt_version=prompt_version,
+                    prompt_content_hash=prompt_content_hash,
+                    schema_version=schema_version,
+                    input_tokens=(usage.input_tokens if usage is not None else None),
+                    cached_input_tokens=(usage.cached_input_tokens if usage is not None else None),
+                    output_tokens=(usage.output_tokens if usage is not None else None),
+                    reasoning_tokens=(usage.reasoning_tokens if usage is not None else None),
+                    total_tokens=(usage.total_tokens if usage is not None else None),
+                    pricing_catalog_version=(cost_estimate.pricing_catalog_version),
+                    pricing_found=cost_estimate.pricing_found,
+                    estimated_input_cost_usd=(cost_estimate.estimated_input_cost_usd),
+                    estimated_cached_input_cost_usd=(cost_estimate.estimated_cached_input_cost_usd),
+                    estimated_output_cost_usd=(cost_estimate.estimated_output_cost_usd),
+                    estimated_total_cost_usd=(cost_estimate.estimated_total_cost_usd),
+                    latency_ms=trace.latency_ms,
+                    error_code=trace.error_code,
+                    now=persisted_at,
+                )
+            )
+
+        return tuple(invocations)
+
+
 def create_worker_llm_runtime(
     *,
     provider_name: str,
@@ -873,6 +1278,15 @@ def create_session_scoped_executor_registry(
     sensitive_tool_execution = SensitiveToolExecutionNode(
         executor=approved_escalation_executor,
     )
+    human_approved_recommendation_executor = HumanApprovedSupportRecommendationExecutor(
+        gateway=gateway,
+        model=model,
+        request_timeout_seconds=request_timeout_seconds,
+        transaction_manager=transaction_manager,
+        invocation_query_repository=(invocation_query_repository),
+        recommendation_query_repository=(recommendation_query_repository),
+        execution_repository=(recommendation_execution_repository),
+    )
     human_approved_nodes = HumanApprovedSupportWorkflowNodes(
         transaction_manager=transaction_manager,
         classification_repository=cast(
@@ -884,6 +1298,8 @@ def create_session_scoped_executor_registry(
         sensitive_tool_registry=sensitive_tool_registry,
         sensitive_proposal_service=sensitive_proposal_service,
         sensitive_tool_execution=sensitive_tool_execution,
+        approval_request_repository=(approval_request_repository),
+        recommendation_executor=(human_approved_recommendation_executor),
     )
     human_approved_graph = compile_human_approved_support_graph(
         nodes=human_approved_nodes,
@@ -1093,6 +1509,39 @@ def _build_human_approved_request_metadata(
         "supportops_prompt_content_hash": (prompt_content_hash),
         "supportops_schema_version": schema_version,
     }
+
+
+def _build_human_approved_recommendation_metadata(
+    *,
+    context: AgentRunExecutionContext,
+    prompt_id: str,
+    prompt_version: int,
+    prompt_content_hash: str,
+    schema_version: str,
+) -> dict[str, str]:
+    return {
+        "supportops_workspace_id": str(context.agent_run.workspace_id),
+        "supportops_ticket_id": str(context.ticket.id),
+        "supportops_agent_run_id": str(context.agent_run.id),
+        "supportops_agent_run_attempt_id": str(context.attempt.id),
+        "supportops_correlation_id": str(context.agent_run.correlation_id),
+        "supportops_workflow_name": (context.agent_run.workflow_name),
+        "supportops_workflow_version": (context.agent_run.workflow_version),
+        "supportops_prompt_id": prompt_id,
+        "supportops_prompt_version": str(prompt_version),
+        "supportops_prompt_content_hash": (prompt_content_hash),
+        "supportops_schema_version": schema_version,
+    }
+
+
+def _require_human_approved_recommendation_output(
+    output: object,
+) -> SupportRecommendationResult:
+    if not isinstance(output, SupportRecommendationResult):
+        raise RuntimeError(
+            "The human-approved recommendation Gateway returned an unexpected output schema."
+        )
+    return output
 
 
 def _raise_human_approved_gateway_failure(
