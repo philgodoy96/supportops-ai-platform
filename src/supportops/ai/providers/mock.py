@@ -136,6 +136,72 @@ class MockLLMOutcome:
             kind=MockLLMOutcomeKind.INCOMPLETE_RESPONSE,
         )
 
+    @classmethod
+    def human_approved_escalation_executed(
+        cls,
+        *,
+        usage: LLMTokenUsage | None = None,
+    ) -> "MockLLMOutcome":
+        """Script a recommendation after approved escalation execution."""
+
+        return cls.success(
+            {
+                "recommended_action": "recommend_escalation",
+                "response_text": (
+                    "The approved escalation was executed. "
+                    "Share the confirmed queue handoff with the requester."
+                ),
+                "requires_human_review": True,
+                "decision_summary": ("Approved escalation executed to the target queue."),
+                "schema_version": "support-recommendation-v1",
+            },
+            usage=usage,
+        )
+
+    @classmethod
+    def human_approved_escalation_rejected(
+        cls,
+        *,
+        usage: LLMTokenUsage | None = None,
+    ) -> "MockLLMOutcome":
+        """Script a recommendation after rejected escalation."""
+
+        return cls.success(
+            {
+                "recommended_action": "respond",
+                "response_text": (
+                    "The sensitive escalation was rejected and was not "
+                    "executed. Continue with a grounded non-escalation reply."
+                ),
+                "requires_human_review": False,
+                "decision_summary": ("Escalation was rejected and was not executed."),
+                "schema_version": "support-recommendation-v1",
+            },
+            usage=usage,
+        )
+
+    @classmethod
+    def human_approved_escalation_expired(
+        cls,
+        *,
+        usage: LLMTokenUsage | None = None,
+    ) -> "MockLLMOutcome":
+        """Script a recommendation after expired escalation approval."""
+
+        return cls.success(
+            {
+                "recommended_action": "respond",
+                "response_text": (
+                    "The sensitive escalation approval expired and was not "
+                    "executed. Continue with a grounded non-escalation reply."
+                ),
+                "requires_human_review": False,
+                "decision_summary": ("Escalation approval expired and was not executed."),
+                "schema_version": "support-recommendation-v1",
+            },
+            usage=usage,
+        )
+
 
 class MockLLMOutcomeQueueExhaustedError(RuntimeError):
     """Raised when a strict test outcome queue has no remaining result."""

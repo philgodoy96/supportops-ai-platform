@@ -458,6 +458,19 @@ def test_function_call_outcome_is_immutable() -> None:
         outcome.function_name = "changed"  # type: ignore[misc]
 
 
+def test_human_approved_recommendation_mock_outcomes() -> None:
+    executed = MockLLMOutcome.human_approved_escalation_executed()
+    rejected = MockLLMOutcome.human_approved_escalation_rejected()
+    expired = MockLLMOutcome.human_approved_escalation_expired()
+
+    assert executed.parsed_output is not None
+    assert executed.parsed_output["recommended_action"] == ("recommend_escalation")
+    assert rejected.parsed_output is not None
+    assert "was not" in str(rejected.parsed_output["decision_summary"])
+    assert expired.parsed_output is not None
+    assert "expired" in str(expired.parsed_output["decision_summary"]).lower()
+
+
 def test_failure_outcome_rejects_function_payload() -> None:
     with pytest.raises(
         ValueError,

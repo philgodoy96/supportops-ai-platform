@@ -6,11 +6,21 @@ from typing import Never, Protocol
 from uuid import UUID
 
 from langgraph.runtime import Runtime
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
+from supportops.agent_graph.application.approval_decision_handling import (
+    ApprovalDecisionAction,
+    ApprovalDecisionHandlingError,
+    ApprovalDecisionResumePayload,
+    handle_approval_decision,
+)
 from supportops.agent_graph.application.approval_interrupt import (
     ApprovalInterruptPayload,
     interrupt_for_approval,
+)
+from supportops.agent_graph.application.human_approved_recommendation import (
+    HumanApprovedRecommendationExecutor,
+    build_human_approved_recommendation_workflow,
 )
 from supportops.agent_graph.application.sensitive_proposal import (
     SensitiveProposalCommand,
@@ -25,7 +35,9 @@ from supportops.agent_graph.domain.human_approved_routing import (
 from supportops.agent_graph.domain.human_approved_state import (
     HUMAN_APPROVED_GRAPH_STATE_MAX_DECISION_TURNS,
     HumanApprovalCheckpointStatus,
+    HumanApprovedApprovalResumePayload,
     HumanApprovedDecisionKind,
+    HumanApprovedRecommendationStage,
     HumanApprovedSupportGraphState,
     HumanApprovedSupportGraphStateSnapshot,
     validate_human_approved_support_state,
@@ -44,6 +56,9 @@ from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
     TerminalAgentRunExecutionError,
+)
+from supportops.modules.approvals.domain.repositories import (
+    ApprovalRequestRepository,
 )
 from supportops.modules.ticket_classifications.application.executor import (
     TicketClassificationExecutor,
@@ -93,6 +108,8 @@ class HumanApprovedSupportWorkflowNodes:
     sensitive_tool_registry: SensitiveToolRegistry
     sensitive_proposal_service: SensitiveProposalService
     sensitive_tool_execution: SensitiveToolExecutionNode
+    approval_request_repository: ApprovalRequestRepository
+    recommendation_executor: HumanApprovedRecommendationExecutor
 
     async def load_run_context(
         self,
@@ -277,8 +294,8 @@ class HumanApprovedSupportWorkflowNodes:
     async def await_human_approval(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Interrupt only after durable records are checkpointed."""
+    ) -> HumanApprovedSupportGraphState:
+        """Interrupt for approval and project a valid resume payload."""
 
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
@@ -319,25 +336,89 @@ class HumanApprovedSupportWorkflowNodes:
                 "approval_expires_at",
             ),
         )
-        interrupt_for_approval(payload)
-
-        raise TerminalAgentRunExecutionError(
-            error_code="approval_resume_not_implemented",
-            error_summary=(
-                "Approval resume is intentionally deferred to the next implementation commit."
-            ),
-        )
+        resume_value = interrupt_for_approval(payload)
+        resume_payload = _parse_resume_payload(resume_value)
+        return snapshot.model_copy(
+            update={
+                "approval_resume_payload": HumanApprovedApprovalResumePayload(
+                    approval_request_id=resume_payload.approval_request_id,
+                    agent_tool_call_id=resume_payload.agent_tool_call_id,
+                    decision_status=resume_payload.decision_status,
+                ),
+            },
+        ).to_graph_state()
 
     async def handle_approval_decision(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Reserve the approval decision branch for resume work."""
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Validate the resume payload against durable approval state."""
 
-        raise TerminalAgentRunExecutionError(
-            error_code="approval_decision_handling_not_implemented",
-            error_summary=("Approval decision handling is not available yet."),
+        snapshot = _advance_graph_step(
+            validate_human_approved_support_state(state),
         )
+        _validate_context_ownership(
+            state=snapshot,
+            context=runtime.context,
+        )
+        if snapshot.approval_resume_payload is None:
+            raise TerminalAgentRunExecutionError(
+                error_code="approval_resume_payload_missing",
+                error_summary=("Approval decision handling requires a resume payload."),
+            )
+        if snapshot.approval_request_id is None:
+            raise TerminalAgentRunExecutionError(
+                error_code="approval_request_id_missing",
+                error_summary=("Approval decision handling requires an approval request."),
+            )
+
+        payload = ApprovalDecisionResumePayload(
+            approval_request_id=(snapshot.approval_resume_payload.approval_request_id),
+            agent_tool_call_id=(snapshot.approval_resume_payload.agent_tool_call_id),
+            decision_status=(snapshot.approval_resume_payload.decision_status),
+        )
+
+        async with self.transaction_manager.transaction():
+            approval_request = await self.approval_request_repository.get_by_id(
+                workspace_id=runtime.context.agent_run.workspace_id,
+                approval_request_id=payload.approval_request_id,
+            )
+        if approval_request is None:
+            raise TerminalAgentRunExecutionError(
+                error_code="approval_request_not_found",
+                error_summary=("The resumed approval request was not found."),
+            )
+        if (
+            approval_request.workspace_id != snapshot.workspace_id
+            or approval_request.ticket_id != snapshot.ticket_id
+            or approval_request.agent_run_id != snapshot.agent_run_id
+        ):
+            raise TerminalAgentRunExecutionError(
+                error_code="approval_request_ownership_mismatch",
+                error_summary=("The approval request does not belong to this workflow."),
+            )
+
+        try:
+            result = handle_approval_decision(
+                payload=payload,
+                approval_request=approval_request,
+            )
+        except ApprovalDecisionHandlingError as exc:
+            raise TerminalAgentRunExecutionError(
+                error_code="approval_decision_handling_failed",
+                error_summary=str(exc),
+            ) from exc
+
+        status = HumanApprovalCheckpointStatus(result.decision_status.value)
+        updates: dict[str, object] = {
+            "approval_status": status,
+            "decision_summary": result.decision_summary,
+            "approval_resume_payload": None,
+        }
+        if result.action is ApprovalDecisionAction.CONTINUE_WITHOUT_EXECUTION:
+            updates["sensitive_execution_output"] = None
+        return snapshot.model_copy(update=updates).to_graph_state()
 
     async def execute_sensitive_tool(
         self,
@@ -353,6 +434,11 @@ class HumanApprovedSupportWorkflowNodes:
             state=snapshot,
             context=runtime.context,
         )
+        if snapshot.approval_status is not HumanApprovalCheckpointStatus.APPROVED:
+            raise TerminalAgentRunExecutionError(
+                error_code="sensitive_execution_requires_approval",
+                error_summary=("Sensitive execution requires an approved decision."),
+            )
         return await self.sensitive_tool_execution.execute(
             snapshot.to_graph_state(),
             runtime.context,
@@ -361,35 +447,78 @@ class HumanApprovedSupportWorkflowNodes:
     async def draft_grounded_recommendation(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Reserve recommendation drafting for the resume commit."""
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Draft and persist one approval-aware recommendation."""
 
-        raise TerminalAgentRunExecutionError(
-            error_code=("human_approved_recommendation_not_implemented"),
-            error_summary=("Human-approved recommendation drafting is not available yet."),
+        snapshot = _advance_graph_step(
+            validate_human_approved_support_state(state),
         )
+        _validate_context_ownership(
+            state=snapshot,
+            context=runtime.context,
+        )
+        workflow = build_human_approved_recommendation_workflow(snapshot)
+        outcome = await self.recommendation_executor.execute(
+            context=runtime.context,
+            state=snapshot,
+            workflow=workflow,
+        )
+        return snapshot.model_copy(
+            update={
+                "recommendation_invocation_id": outcome.invocation_id,
+                "recommendation_id": outcome.recommendation.id,
+                "recommendation_stage": (HumanApprovedRecommendationStage.DRAFTED),
+            },
+        ).to_graph_state()
 
     async def validate_recommendation(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Reserve recommendation validation for the resume commit."""
+    ) -> HumanApprovedSupportGraphState:
+        """Apply the recommendation validation contract after drafting."""
 
-        raise TerminalAgentRunExecutionError(
-            error_code=("human_approved_recommendation_not_implemented"),
-            error_summary=("Human-approved recommendation validation is not available yet."),
+        snapshot = _advance_graph_step(
+            validate_human_approved_support_state(state),
         )
+        if (
+            snapshot.recommendation_invocation_id is None
+            or snapshot.recommendation_id is None
+            or snapshot.recommendation_stage is not HumanApprovedRecommendationStage.DRAFTED
+        ):
+            raise TerminalAgentRunExecutionError(
+                error_code="human_approved_recommendation_not_drafted",
+                error_summary=("Recommendation validation requires a drafted recommendation."),
+            )
+        return snapshot.model_copy(
+            update={
+                "recommendation_stage": (HumanApprovedRecommendationStage.VALIDATED),
+            },
+        ).to_graph_state()
 
     async def persist_recommendation(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Reserve recommendation persistence for the resume commit."""
+    ) -> HumanApprovedSupportGraphState:
+        """Acknowledge durable recommendation persistence for routing."""
 
-        raise TerminalAgentRunExecutionError(
-            error_code=("human_approved_recommendation_not_implemented"),
-            error_summary=("Human-approved recommendation persistence is not available yet."),
+        snapshot = _advance_graph_step(
+            validate_human_approved_support_state(state),
         )
+        if (
+            snapshot.recommendation_invocation_id is None
+            or snapshot.recommendation_id is None
+            or snapshot.recommendation_stage is not HumanApprovedRecommendationStage.VALIDATED
+        ):
+            raise TerminalAgentRunExecutionError(
+                error_code="human_approved_recommendation_not_validated",
+                error_summary=("Recommendation persistence requires a validated recommendation."),
+            )
+        return snapshot.model_copy(
+            update={
+                "recommendation_stage": (HumanApprovedRecommendationStage.PERSISTED),
+            },
+        ).to_graph_state()
 
     async def fail_workflow(
         self,
@@ -520,6 +649,23 @@ def _validate_context_ownership(
             error_code="human_approved_state_ownership_mismatch",
             error_summary=("The checkpointed state does not belong to the claimed AgentRun."),
         )
+
+
+def _parse_resume_payload(
+    value: object,
+) -> ApprovalDecisionResumePayload:
+    if not isinstance(value, Mapping):
+        raise TerminalAgentRunExecutionError(
+            error_code="approval_resume_payload_invalid",
+            error_summary=("The approval resume payload is invalid."),
+        )
+    try:
+        return ApprovalDecisionResumePayload.model_validate(dict(value))
+    except ValidationError as exc:
+        raise TerminalAgentRunExecutionError(
+            error_code="approval_resume_payload_invalid",
+            error_summary=("The approval resume payload is invalid."),
+        ) from exc
 
 
 def _require_text(

@@ -541,6 +541,12 @@ async def test_session_factory_registers_four_workflows() -> None:
         assert type(tool_repo) is SqlAlchemyAgentToolCallQueryRepository
         assert approval_repo._session is session
         assert tool_repo._session is session
+        graph_nodes = cast(Any, human_approved_executor._graph).nodes
+        assert "handle_approval_decision" in graph_nodes
+        assert "execute_sensitive_tool" in graph_nodes
+        assert "draft_grounded_recommendation" in graph_nodes
+        assert "validate_recommendation" in graph_nodes
+        assert "persist_recommendation" in graph_nodes
     finally:
         await controlled_runtime.close()
         await llm_runtime.close()
