@@ -12,6 +12,8 @@ import pytest
 
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
+    PausedForApproval,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -92,12 +94,14 @@ class RecordingExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         assert self._transaction_manager.active_depth == 0
         self.contexts.append(context)
 
         if self._error is not None:
             raise self._error
+
+        return CompletedExecution()
 
 
 class BlockingExecutor:
@@ -106,9 +110,45 @@ class BlockingExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         del context
         await asyncio.sleep(10)
+        return CompletedExecution()
+
+
+class PausingExecutor:
+    """Return a paused-for-approval execution result."""
+
+    def __init__(
+        self,
+        *,
+        approval_request_id: UUID,
+        graph_thread_id: str,
+    ) -> None:
+        self._approval_request_id = approval_request_id
+        self._graph_thread_id = graph_thread_id
+        self.contexts: list[AgentRunExecutionContext] = []
+
+    async def execute(
+        self,
+        context: AgentRunExecutionContext,
+    ) -> PausedForApproval:
+        self.contexts.append(context)
+        return PausedForApproval(
+            approval_request_id=self._approval_request_id,
+            graph_thread_id=self._graph_thread_id,
+        )
+
+
+class UnknownResultExecutor:
+    """Return an unsupported execution result object."""
+
+    async def execute(
+        self,
+        context: AgentRunExecutionContext,
+    ) -> object:
+        del context
+        return object()
 
 
 def create_ticket() -> Ticket:
@@ -195,6 +235,7 @@ def create_processor(
 
     agent_run_repository = AsyncMock()
     agent_run_repository.mark_succeeded.return_value = transition_result
+    agent_run_repository.mark_waiting_for_approval.return_value = transition_result
     agent_run_repository.record_failure.return_value = transition_result
 
     transaction_manager = RecordingTransactionManager()
@@ -534,6 +575,107 @@ async def test_lease_lost_result_is_propagated() -> None:
     result = await processor.execute(create_claim())
 
     assert result is AgentRunTransitionResult.LEASE_LOST
+
+
+async def test_paused_for_approval_marks_waiting_without_success_or_failure() -> None:
+    approval_request_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    graph_thread_id = "controlled-support:controlled-support-v1:thread"
+    transaction_manager = RecordingTransactionManager()
+    executor = PausingExecutor(
+        approval_request_id=approval_request_id,
+        graph_thread_id=graph_thread_id,
+    )
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+    agent_run_repository = AsyncMock()
+    agent_run_repository.mark_waiting_for_approval.return_value = AgentRunTransitionResult.APPLIED
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=executor,
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+    )
+
+    claim = create_claim(retryable_failure_count=1)
+    result = await processor.execute(claim)
+
+    assert result is AgentRunTransitionResult.APPLIED
+    command = agent_run_repository.mark_waiting_for_approval.await_args.args[0]
+    assert command.agent_run_id == _RUN_ID
+    assert command.lease_token == _LEASE_TOKEN
+    assert command.finished_at == _FINISHED_AT
+    agent_run_repository.mark_succeeded.assert_not_awaited()
+    agent_run_repository.record_failure.assert_not_awaited()
+
+
+async def test_paused_for_approval_lease_lost_is_propagated() -> None:
+    transaction_manager = RecordingTransactionManager()
+    executor = PausingExecutor(
+        approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        graph_thread_id="controlled-support:thread",
+    )
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+    agent_run_repository = AsyncMock()
+    agent_run_repository.mark_waiting_for_approval.return_value = (
+        AgentRunTransitionResult.LEASE_LOST
+    )
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=executor,
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+    agent_run_repository.mark_succeeded.assert_not_awaited()
+    agent_run_repository.record_failure.assert_not_awaited()
+
+
+async def test_unknown_execution_result_fails_loudly() -> None:
+    transaction_manager = RecordingTransactionManager()
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+    agent_run_repository = AsyncMock()
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=UnknownResultExecutor(),  # type: ignore[arg-type]
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="unsupported execution result",
+    ):
+        await processor.execute(create_claim())
+
+    agent_run_repository.mark_succeeded.assert_not_awaited()
+    agent_run_repository.mark_waiting_for_approval.assert_not_awaited()
+    agent_run_repository.record_failure.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

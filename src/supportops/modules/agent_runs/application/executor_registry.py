@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    AgentRunExecutionResult,
     AgentRunExecutor,
     TerminalAgentRunExecutionError,
 )
@@ -133,7 +134,7 @@ class AgentRunExecutorRegistry:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> AgentRunExecutionResult:
         """Resolve and execute the exact workflow registered for the run."""
 
         executor = self.resolve(
@@ -141,7 +142,7 @@ class AgentRunExecutorRegistry:
             workflow_version=(context.agent_run.workflow_version),
         )
 
-        await executor.execute(context)
+        return await executor.execute(context)
 
     def __len__(self) -> int:
         """Return the number of exact workflow registrations."""

@@ -8,6 +8,8 @@ from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
     AgentRunExecutor,
+    CompletedExecution,
+    PausedForApproval,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -26,6 +28,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.tickets.domain.repositories import (
     TicketRepository,
@@ -95,7 +98,7 @@ class ProcessClaimedAgentRun:
             async with asyncio.timeout(
                 self._execution_timeout_seconds,
             ):
-                await self._executor.execute(context)
+                execution_result = await self._executor.execute(context)
         except TimeoutError:
             return await self._persist_failure(
                 claim=claim,
@@ -135,14 +138,29 @@ class ProcessClaimedAgentRun:
 
         finished_at = self._utc_now()
 
-        async with self._transaction_manager.transaction():
-            return await self._agent_run_repository.mark_succeeded(
-                CompleteAgentRunCommand(
-                    agent_run_id=run.id,
-                    lease_token=claim.attempt.lease_token,
-                    finished_at=finished_at,
-                ),
-            )
+        match execution_result:
+            case CompletedExecution():
+                async with self._transaction_manager.transaction():
+                    return await self._agent_run_repository.mark_succeeded(
+                        CompleteAgentRunCommand(
+                            agent_run_id=run.id,
+                            lease_token=claim.attempt.lease_token,
+                            finished_at=finished_at,
+                        ),
+                    )
+            case PausedForApproval():
+                async with self._transaction_manager.transaction():
+                    return await self._agent_run_repository.mark_waiting_for_approval(
+                        WaitForApprovalAgentRunCommand(
+                            agent_run_id=run.id,
+                            lease_token=claim.attempt.lease_token,
+                            finished_at=finished_at,
+                        ),
+                    )
+            case _:
+                raise RuntimeError(
+                    "AgentRun executor returned an unsupported execution result.",
+                )
 
     async def _persist_failure(
         self,

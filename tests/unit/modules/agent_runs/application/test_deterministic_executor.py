@@ -11,6 +11,7 @@ from supportops.modules.agent_runs.application.deterministic_executor import (
 )
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.agent_runs.domain.models import (
@@ -104,7 +105,9 @@ def create_context() -> AgentRunExecutionContext:
 async def test_deterministic_executor_completes_supported_workflow() -> None:
     executor = DeterministicTicketProcessingExecutor()
 
-    await executor.execute(create_context())
+    result = await executor.execute(create_context())
+
+    assert result == CompletedExecution()
 
 
 @pytest.mark.parametrize(

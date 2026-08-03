@@ -30,6 +30,7 @@ from supportops.ai.schemas.ticket_classification import (
     TicketUrgency,
 )
 from supportops.modules.agent_runs.domain.models import (
+    AgentRun,
     AgentRunStatus,
 )
 from supportops.modules.controlled_support_inspection.domain.models import (
@@ -88,6 +89,10 @@ _RECOMMENDATION_ID = UUID("b0000000-0000-4000-8000-000000000011")
             ControlledSupportInspectionStatus.RETRYING,
         ),
         (
+            AgentRunStatus.WAITING_FOR_APPROVAL,
+            ControlledSupportInspectionStatus.WAITING_FOR_APPROVAL,
+        ),
+        (
             AgentRunStatus.FAILED,
             ControlledSupportInspectionStatus.FAILED,
         ),
@@ -102,6 +107,53 @@ def test_maps_every_durable_agent_run_status(
     inspection_status: ControlledSupportInspectionStatus,
 ) -> None:
     assert map_agent_run_inspection_status(durable_status) is inspection_status
+
+
+def test_maps_every_agent_run_status_exhaustively() -> None:
+    assert set(AgentRunStatus) == {
+        AgentRunStatus.QUEUED,
+        AgentRunStatus.RUNNING,
+        AgentRunStatus.RETRY_SCHEDULED,
+        AgentRunStatus.WAITING_FOR_APPROVAL,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.SUCCEEDED,
+    }
+    for status in AgentRunStatus:
+        map_agent_run_inspection_status(status)
+
+
+def test_inspection_summary_accepts_waiting_agent_run() -> None:
+    now = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+    agent_run = AgentRun(
+        id=_AGENT_RUN_ID,
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        workflow_name=CONTROLLED_SUPPORT_WORKFLOW_NAME,
+        workflow_version=CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+        trigger_key="initial-ticket-processing",
+        status=AgentRunStatus.WAITING_FOR_APPROVAL,
+        available_at=None,
+        attempt_count=1,
+        retryable_failure_count=0,
+        max_retryable_failures=3,
+        lease_owner=None,
+        lease_token=None,
+        lease_expires_at=None,
+        first_started_at=now,
+        completed_at=None,
+        last_error_code=None,
+        last_error_summary=None,
+        ingestion_request_id=UUID("c0000000-0000-4000-8000-00000000000c"),
+        correlation_id=UUID("d0000000-0000-4000-8000-00000000000d"),
+        created_at=now,
+        updated_at=now,
+    )
+
+    summary = AgentRunInspectionSummary.from_agent_run(agent_run)
+
+    assert summary.status is (ControlledSupportInspectionStatus.WAITING_FOR_APPROVAL)
+    assert summary.completed_at is None
+    assert summary.last_error_code is None
 
 
 def _agent_run(

@@ -31,6 +31,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.tickets.application.errors import (
     TicketExternalReferenceConflictApplicationError,
@@ -175,6 +176,12 @@ class FakeAgentRunRepository:
         command: CompleteAgentRunCommand,
     ) -> AgentRunTransitionResult:
         raise AssertionError("mark_succeeded must not be called")
+
+    async def mark_waiting_for_approval(
+        self,
+        command: WaitForApprovalAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        raise AssertionError("mark_waiting_for_approval must not be called")
 
     async def record_failure(
         self,

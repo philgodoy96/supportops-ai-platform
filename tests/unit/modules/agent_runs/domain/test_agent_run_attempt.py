@@ -232,3 +232,63 @@ def test_completed_attempt_is_reported_by_domain_property() -> None:
     )
 
     assert completed_attempt.is_finished
+
+
+def test_awaiting_approval_attempt_is_valid_when_closed_and_error_free() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    attempt = replace(
+        create_attempt(now=now),
+        finished_at=now + timedelta(seconds=1),
+        outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+    )
+
+    assert attempt.is_finished
+    assert attempt.outcome is AgentRunAttemptOutcome.AWAITING_APPROVAL
+    assert attempt.error_code is None
+    assert attempt.error_summary is None
+
+
+def test_awaiting_approval_requires_finished_at() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Attempt outcome and finished_at must be populated together.",
+        ),
+    ):
+        replace(
+            create_attempt(),
+            outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+        )
+
+
+def test_awaiting_approval_rejects_error_code() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Error code and summary must be populated or cleared together.",
+        ),
+    ):
+        replace(
+            create_attempt(now=now),
+            finished_at=now + timedelta(seconds=1),
+            outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+            error_code="unexpected_executor_failure",
+        )
+
+
+def test_awaiting_approval_rejects_error_details() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Awaiting-approval attempts must not contain error details.",
+        ),
+    ):
+        replace(
+            create_attempt(now=now),
+            finished_at=now + timedelta(seconds=1),
+            outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+            error_code="unexpected_executor_failure",
+            error_summary="The executor failed unexpectedly.",
+        )

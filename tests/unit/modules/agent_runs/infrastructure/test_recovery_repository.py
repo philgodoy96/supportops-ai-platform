@@ -367,3 +367,4 @@ async def test_recovery_query_uses_skip_locked_and_expiry_ordering() -> None:
     assert "agent_runs.lease_expires_at IS NOT NULL" in normalized
     assert "agent_runs.lease_expires_at <=" in normalized
     assert "LIMIT 1" in normalized
+    assert "waiting_for_approval" not in normalized

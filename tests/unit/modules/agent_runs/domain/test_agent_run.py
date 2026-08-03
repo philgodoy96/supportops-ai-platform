@@ -350,6 +350,7 @@ def test_terminal_agent_run_requires_completed_at(
         AgentRunStatus.QUEUED,
         AgentRunStatus.RUNNING,
         AgentRunStatus.RETRY_SCHEDULED,
+        AgentRunStatus.WAITING_FOR_APPROVAL,
     ],
 )
 def test_non_terminal_agent_run_rejects_completed_at(
@@ -386,6 +387,15 @@ def test_non_terminal_agent_run_rejects_completed_at(
                 first_started_at=now,
                 last_error_code="retryable_executor_failure",
                 last_error_summary=("The configured executor reported a retryable failure."),
+            )
+        elif status is AgentRunStatus.WAITING_FOR_APPROVAL:
+            replace(
+                run,
+                status=status,
+                available_at=None,
+                completed_at=now,
+                attempt_count=1,
+                first_started_at=now,
             )
         else:
             replace(
@@ -473,3 +483,149 @@ def test_terminal_status_is_reported_by_domain_property() -> None:
 
     assert succeeded_run.is_terminal
     assert succeeded_run.retryable_failures_remaining == 3
+
+
+def _waiting_run(
+    *,
+    now: datetime | None = None,
+    retryable_failure_count: int = 0,
+) -> AgentRun:
+    created_at = now or datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    run = create_agent_run(now=created_at)
+    return replace(
+        run,
+        status=AgentRunStatus.WAITING_FOR_APPROVAL,
+        available_at=None,
+        attempt_count=1,
+        retryable_failure_count=retryable_failure_count,
+        first_started_at=created_at,
+        updated_at=created_at + timedelta(seconds=10),
+    )
+
+
+def test_waiting_for_approval_with_cleared_fields_is_valid() -> None:
+    run = _waiting_run()
+
+    assert run.status is AgentRunStatus.WAITING_FOR_APPROVAL
+    assert run.available_at is None
+    assert run.lease_owner is None
+    assert run.lease_token is None
+    assert run.lease_expires_at is None
+    assert run.completed_at is None
+    assert run.last_error_code is None
+    assert run.last_error_summary is None
+    assert not run.is_terminal
+
+
+def test_waiting_for_approval_rejects_lease_owner() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Lease ownership fields must be populated or cleared together.",
+        ),
+    ):
+        replace(
+            _waiting_run(),
+            lease_owner="worker-a",
+        )
+
+
+def test_waiting_for_approval_rejects_lease_token() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Lease ownership fields must be populated or cleared together.",
+        ),
+    ):
+        replace(
+            _waiting_run(),
+            lease_token=UUID("dd0ae456-3467-41db-93d1-a908f40e8365"),
+        )
+
+
+def test_waiting_for_approval_rejects_lease_expiry() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Lease ownership fields must be populated or cleared together.",
+        ),
+    ):
+        replace(
+            _waiting_run(now=now),
+            lease_expires_at=now + timedelta(seconds=45),
+        )
+
+
+def test_waiting_for_approval_rejects_available_at() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    with pytest.raises(
+        ValueError,
+        match=escape("Waiting AgentRuns must not define available_at."),
+    ):
+        replace(
+            _waiting_run(now=now),
+            available_at=now,
+        )
+
+
+def test_waiting_for_approval_rejects_completed_at() -> None:
+    now = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Non-terminal AgentRuns must not define completed_at.",
+        ),
+    ):
+        replace(
+            _waiting_run(now=now),
+            completed_at=now,
+        )
+
+
+def test_waiting_for_approval_rejects_last_error_code() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(
+            "Error code and summary must be populated or cleared together.",
+        ),
+    ):
+        replace(
+            _waiting_run(),
+            last_error_code="unexpected_executor_failure",
+        )
+
+
+def test_waiting_for_approval_rejects_error_details() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape("Waiting AgentRuns must not contain error details."),
+    ):
+        replace(
+            _waiting_run(),
+            last_error_code="unexpected_executor_failure",
+            last_error_summary="The executor failed unexpectedly.",
+        )
+
+
+def test_non_waiting_status_rejects_available_at_none() -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape("Non-waiting AgentRuns require available_at."),
+    ):
+        replace(
+            create_agent_run(),
+            available_at=None,
+        )
+
+
+def test_waiting_for_approval_is_not_terminal() -> None:
+    assert not _waiting_run().is_terminal
+
+
+def test_waiting_does_not_consume_retryable_failure_budget() -> None:
+    run = _waiting_run(retryable_failure_count=1)
+
+    assert run.retryable_failure_count == 1
+    assert run.retryable_failures_remaining == 2
+    assert run.attempt_count == 1

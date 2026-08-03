@@ -8,6 +8,7 @@ import pytest
 
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.agent_runs.application.executor_registry import (
@@ -66,11 +67,13 @@ class RecordingExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         self.contexts.append(context)
 
         if self._error is not None:
             raise self._error
+
+        return CompletedExecution()
 
 
 def _context(
@@ -143,8 +146,9 @@ async def test_routes_exact_workflow_and_version() -> None:
     )
     context = _context()
 
-    await registry.execute(context)
+    result = await registry.execute(context)
 
+    assert result == CompletedExecution()
     assert executor.contexts == [
         context,
     ]

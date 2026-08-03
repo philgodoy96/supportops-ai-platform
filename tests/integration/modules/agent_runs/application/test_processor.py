@@ -14,6 +14,10 @@ from supportops.infrastructure.postgresql.transaction import (
 from supportops.modules.agent_runs.application.deterministic_executor import (
     DeterministicTicketProcessingExecutor,
 )
+from supportops.modules.agent_runs.application.execution import (
+    AgentRunExecutionContext,
+    PausedForApproval,
+)
 from supportops.modules.agent_runs.application.processor import (
     ProcessClaimedAgentRun,
 )
@@ -157,6 +161,7 @@ async def process_claim(
     session: AsyncSession,
     *,
     claim: AgentRunClaim,
+    executor: object | None = None,
 ) -> AgentRunTransitionResult:
     """Process one claim using real PostgreSQL repositories."""
 
@@ -165,7 +170,9 @@ async def process_claim(
         ticket_repository=SqlAlchemyTicketRepository(session),
         agent_run_repository=SqlAlchemyAgentRunRepository(session),
         transaction_manager=transaction_manager,
-        executor=DeterministicTicketProcessingExecutor(),
+        executor=(
+            DeterministicTicketProcessingExecutor() if executor is None else executor  # type: ignore[arg-type]
+        ),
         retry_policy=AgentRunRetryPolicy(
             base_delay_seconds=2.0,
             maximum_delay_seconds=60.0,
@@ -344,3 +351,55 @@ async def test_processed_run_cannot_be_completed_again(
     assert run.completed_at == _FINISHED_AT
     assert len(attempts) == 1
     assert attempts[0].outcome == AgentRunAttemptOutcome.SUCCEEDED.value
+
+
+class _PausingExecutor:
+    async def execute(
+        self,
+        context: AgentRunExecutionContext,
+    ) -> PausedForApproval:
+        del context
+        return PausedForApproval(
+            approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            graph_thread_id="controlled-support:thread",
+        )
+
+
+async def test_paused_execution_marks_waiting_for_approval(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        claim = await claim_and_commit(claim_session)
+
+    async with postgresql_session_factory() as processing_session:
+        result = await process_claim(
+            processing_session,
+            claim=claim,
+            executor=_PausingExecutor(),
+        )
+
+    assert result is AgentRunTransitionResult.APPLIED
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.WAITING_FOR_APPROVAL.value
+    assert run.available_at is None
+    assert run.completed_at is None
+    assert run.lease_owner is None
+    assert run.lease_token is None
+    assert run.lease_expires_at is None
+    assert run.last_error_code is None
+    assert run.last_error_summary is None
+    assert run.attempt_count == 1
+    assert run.retryable_failure_count == 0
+    assert len(attempts) == 1
+    assert attempts[0].outcome == (AgentRunAttemptOutcome.AWAITING_APPROVAL.value)
+    assert attempts[0].finished_at == _FINISHED_AT
+    assert attempts[0].error_code is None
+    assert attempts[0].error_summary is None

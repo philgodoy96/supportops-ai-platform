@@ -36,6 +36,7 @@ from supportops.ai.schemas.ticket_classification import (
 from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -100,13 +101,13 @@ class TicketClassificationExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         """Classify one supported ticket-processing AgentRun."""
 
         _validate_supported_workflow(context)
 
         if await self._classification_already_exists(context):
-            return
+            return CompletedExecution()
 
         rendered_prompt = render_ticket_classification_prompt(
             version=TICKET_CLASSIFICATION_PROMPT_VERSION,
@@ -142,7 +143,7 @@ class TicketClassificationExecutor:
                 prompt_content_hash=(rendered_prompt.definition.content_hash),
                 schema_version=(rendered_prompt.definition.output_schema_id),
             )
-            return
+            return CompletedExecution()
 
         await self._handle_gateway_success(
             context=context,
@@ -152,6 +153,7 @@ class TicketClassificationExecutor:
             prompt_content_hash=(rendered_prompt.definition.content_hash),
             schema_version=(rendered_prompt.definition.output_schema_id),
         )
+        return CompletedExecution()
 
     async def _classification_already_exists(
         self,

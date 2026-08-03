@@ -42,6 +42,21 @@ class CompleteAgentRunCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class WaitForApprovalAgentRunCommand:
+    """Values required to pause a leased AgentRun for human approval."""
+
+    agent_run_id: UUID
+    lease_token: UUID
+    finished_at: datetime
+
+    def __post_init__(self) -> None:
+        _validate_utc_timestamp(
+            self.finished_at,
+            field_name="finished_at",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FailAgentRunCommand:
     """Values required to persist a fenced failed execution attempt."""
 

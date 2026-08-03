@@ -8,7 +8,10 @@ from uuid import UUID
 import pytest
 
 from supportops.modules.agent_runs.application.execution import (
+    AGENT_RUN_GRAPH_THREAD_ID_MAX_LENGTH,
     AgentRunExecutionContext,
+    CompletedExecution,
+    PausedForApproval,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -386,4 +389,62 @@ def test_execution_error_rejects_unsafe_details(
         RetryableAgentRunExecutionError(
             error_code=error_code,
             error_summary=error_summary,
+        )
+
+
+def test_completed_execution_is_empty_immutable_result() -> None:
+    assert CompletedExecution() == CompletedExecution()
+
+
+def test_paused_for_approval_requires_uuid_and_normalized_thread_id() -> None:
+    approval_request_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    result = PausedForApproval(
+        approval_request_id=approval_request_id,
+        graph_thread_id="controlled-support:thread",
+    )
+
+    assert result.approval_request_id == approval_request_id
+    assert result.graph_thread_id == "controlled-support:thread"
+
+
+@pytest.mark.parametrize(
+    ("graph_thread_id", "expected_message"),
+    [
+        ("", "graph_thread_id is required."),
+        (
+            " thread",
+            "graph_thread_id must not contain surrounding whitespace.",
+        ),
+        (
+            "thread ",
+            "graph_thread_id must not contain surrounding whitespace.",
+        ),
+        (
+            "t" * (AGENT_RUN_GRAPH_THREAD_ID_MAX_LENGTH + 1),
+            "graph_thread_id exceeds the maximum length.",
+        ),
+    ],
+)
+def test_paused_for_approval_rejects_invalid_graph_thread_id(
+    graph_thread_id: str,
+    expected_message: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=escape(expected_message),
+    ):
+        PausedForApproval(
+            approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            graph_thread_id=graph_thread_id,
+        )
+
+
+def test_paused_for_approval_rejects_non_uuid_approval_request_id() -> None:
+    with pytest.raises(
+        TypeError,
+        match=escape("approval_request_id must be a UUID."),
+    ):
+        PausedForApproval(
+            approval_request_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",  # type: ignore[arg-type]
+            graph_thread_id="controlled-support:thread",
         )

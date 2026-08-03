@@ -25,6 +25,7 @@ class AgentRunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     RETRY_SCHEDULED = "retry_scheduled"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -33,6 +34,7 @@ class AgentRunAttemptOutcome(StrEnum):
     """Terminal outcomes for a claimed AgentRun attempt."""
 
     SUCCEEDED = "succeeded"
+    AWAITING_APPROVAL = "awaiting_approval"
     RETRYABLE_FAILURE = "retryable_failure"
     TERMINAL_FAILURE = "terminal_failure"
     TIMED_OUT = "timed_out"
@@ -50,7 +52,7 @@ class AgentRun:
     workflow_version: str
     trigger_key: str
     status: AgentRunStatus
-    available_at: datetime
+    available_at: datetime | None
     attempt_count: int
     retryable_failure_count: int
     max_retryable_failures: int
@@ -83,7 +85,7 @@ class AgentRun:
             maximum_length=AGENT_RUN_TRIGGER_KEY_MAX_LENGTH,
         )
         _validate_agent_run_status(self.status)
-        _validate_utc_timestamp(
+        _validate_optional_utc_timestamp(
             self.available_at,
             field_name="available_at",
         )
@@ -326,9 +328,19 @@ def _validate_agent_run_timestamps(run: AgentRun) -> None:
             "completed_at must not be earlier than created_at.",
         )
 
-    if run.available_at < run.created_at:
+    if run.available_at is not None and run.available_at < run.created_at:
         raise ValueError(
             "available_at must not be earlier than created_at.",
+        )
+
+    if run.status is AgentRunStatus.WAITING_FOR_APPROVAL and run.available_at is not None:
+        raise ValueError(
+            "Waiting AgentRuns must not define available_at.",
+        )
+
+    if run.status is not AgentRunStatus.WAITING_FOR_APPROVAL and run.available_at is None:
+        raise ValueError(
+            "Non-waiting AgentRuns require available_at.",
         )
 
 
@@ -419,6 +431,11 @@ def _validate_error_state(run: AgentRun) -> None:
             "Queued and succeeded AgentRuns must not contain error details.",
         )
 
+    if run.status is AgentRunStatus.WAITING_FOR_APPROVAL and run.last_error_code is not None:
+        raise ValueError(
+            "Waiting AgentRuns must not contain error details.",
+        )
+
     if (
         run.status
         in {
@@ -461,6 +478,14 @@ def _validate_attempt_completion_state(
     if attempt.outcome is AgentRunAttemptOutcome.SUCCEEDED and attempt.error_code is not None:
         raise ValueError(
             "Succeeded attempts must not contain error details.",
+        )
+
+    if (
+        attempt.outcome is AgentRunAttemptOutcome.AWAITING_APPROVAL
+        and attempt.error_code is not None
+    ):
+        raise ValueError(
+            "Awaiting-approval attempts must not contain error details.",
         )
 
     failure_outcomes = {

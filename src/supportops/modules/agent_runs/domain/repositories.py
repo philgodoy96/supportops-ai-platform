@@ -17,6 +17,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 
 
@@ -41,6 +42,14 @@ class AgentRunRepository(Protocol):
         command: CompleteAgentRunCommand,
     ) -> AgentRunTransitionResult:
         """Persist a successful fenced AgentRun transition."""
+
+        ...
+
+    async def mark_waiting_for_approval(
+        self,
+        command: WaitForApprovalAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a fenced waiting-for-approval AgentRun transition."""
 
         ...
 

@@ -630,3 +630,51 @@ async def test_retry_claim_increments_attempt_and_changes_lease_token(
     assert attempts[1].attempt_number == 2
     assert attempts[0].lease_token == previous_lease_token
     assert attempts[1].lease_token == new_lease_token
+
+
+async def test_claim_excludes_waiting_for_approval_runs(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    claimed_at = _BASE_TIMESTAMP + timedelta(minutes=10)
+
+    def make_waiting(run: AgentRun) -> AgentRun:
+        return replace(
+            run,
+            status=AgentRunStatus.WAITING_FOR_APPROVAL,
+            available_at=None,
+            attempt_count=1,
+            first_started_at=_BASE_TIMESTAMP + timedelta(minutes=1),
+            updated_at=_BASE_TIMESTAMP + timedelta(minutes=2),
+        )
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace(setup_session)
+        await persist_ticket_and_run(
+            setup_session,
+            ticket_id=UUID(
+                "a1000000-0000-4000-8000-000000000001",
+            ),
+            run_id=UUID(
+                "a2000000-0000-4000-8000-000000000002",
+            ),
+            created_at=_BASE_TIMESTAMP,
+            run_transform=make_waiting,
+        )
+
+    async with postgresql_session_factory() as claim_session:
+        claim = await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=UUID(
+                    "a3000000-0000-4000-8000-000000000003",
+                ),
+                execution_request_id=UUID(
+                    "a4000000-0000-4000-8000-000000000004",
+                ),
+                claimed_at=claimed_at,
+            ),
+        )
+
+    assert claim is None

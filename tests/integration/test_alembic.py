@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import Table, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from supportops.core.settings import Settings
@@ -16,9 +17,10 @@ from supportops.modules.agent_runs.infrastructure.models import (
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "f3a9c1d7e5b2"
+EXPECTED_HEAD = "b7c4d2e9a1f6"
 CONTROLLED_WORKFLOW_REVISION = "e8b7c6d5a4f3"
 PRE_CONTROLLED_WORKFLOW_REVISION = "d4e8f2a6c901"
+RETRYABLE_FAILURE_BUDGET_REVISION = "f3a9c1d7e5b2"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -730,6 +732,328 @@ async def test_alembic_retryable_failure_budget_migration_upgrades_and_downgrade
             table_name="agent_runs",
             column_name="retryable_failure_count",
         )
+    finally:
+        await engine.dispose()
+        run_alembic_command("upgrade", "head")
+
+
+async def test_alembic_waiting_for_approval_migration_upgrades_and_downgrades(
+    exclusive_integration_database: None,
+) -> None:
+    settings = Settings()
+    engine = create_async_engine(str(settings.postgresql_url))
+
+    upgrade_head = run_alembic_command("upgrade", "head")
+    assert upgrade_head.returncode == 0, upgrade_head.stderr
+
+    downgrade_to_budget = run_alembic_command(
+        "downgrade",
+        RETRYABLE_FAILURE_BUDGET_REVISION,
+    )
+    assert downgrade_to_budget.returncode == 0, downgrade_to_budget.stderr
+
+    workspace_id = uuid4()
+    ticket_id = uuid4()
+    run_id = uuid4()
+    attempt_id = uuid4()
+
+    try:
+        upgrade_waiting = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert upgrade_waiting.returncode == 0, upgrade_waiting.stderr
+
+        assert await constraint_exists(
+            engine,
+            table_name="agent_runs",
+            constraint_name="ck_agent_runs_agent_run_available_at_state",
+        )
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (
+                        id, name, slug, created_at, updated_at
+                    ) VALUES (
+                        :workspace_id,
+                        'Waiting Workspace',
+                        'waiting-workspace',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                    )
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO tickets (
+                        id, workspace_id, subject, description, status,
+                        external_reference, ingestion_request_id,
+                        correlation_id, created_at, updated_at
+                    ) VALUES (
+                        :ticket_id,
+                        :workspace_id,
+                        'Waiting subject',
+                        'Waiting description',
+                        'open',
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                    )
+                    """
+                ),
+                {
+                    "ticket_id": ticket_id,
+                    "workspace_id": workspace_id,
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_runs (
+                        id, workspace_id, ticket_id, workflow_name,
+                        workflow_version, trigger_key, status, available_at,
+                        attempt_count, retryable_failure_count,
+                        max_retryable_failures, lease_owner, lease_token,
+                        lease_expires_at, first_started_at, completed_at,
+                        last_error_code, last_error_summary,
+                        ingestion_request_id, correlation_id,
+                        created_at, updated_at
+                    ) VALUES (
+                        :run_id,
+                        :workspace_id,
+                        :ticket_id,
+                        'ticket-processing',
+                        'controlled-support-v1',
+                        'initial-ticket-processing',
+                        'waiting_for_approval',
+                        NULL,
+                        1,
+                        0,
+                        3,
+                        NULL,
+                        NULL,
+                        NULL,
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:02:00+00'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_attempts (
+                        id, agent_run_id, attempt_number, worker_id,
+                        lease_token, execution_request_id, started_at,
+                        finished_at, outcome, error_code, error_summary
+                    ) VALUES (
+                        :attempt_id,
+                        :run_id,
+                        1,
+                        'worker-a',
+                        :lease_token,
+                        :execution_request_id,
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:02:00+00',
+                        'awaiting_approval',
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "attempt_id": attempt_id,
+                    "run_id": run_id,
+                    "lease_token": uuid4(),
+                    "execution_request_id": uuid4(),
+                },
+            )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE agent_runs
+                        SET available_at = TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                        WHERE id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id},
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO agent_runs (
+                            id, workspace_id, ticket_id, workflow_name,
+                            workflow_version, trigger_key, status, available_at,
+                            attempt_count, retryable_failure_count,
+                            max_retryable_failures, lease_owner, lease_token,
+                            lease_expires_at, first_started_at, completed_at,
+                            last_error_code, last_error_summary,
+                            ingestion_request_id, correlation_id,
+                            created_at, updated_at
+                        ) VALUES (
+                            :run_id,
+                            :workspace_id,
+                            :ticket_id,
+                            'ticket-processing',
+                            'controlled-support-v1',
+                            'queued-null-available',
+                            'queued',
+                            NULL,
+                            0,
+                            0,
+                            3,
+                            NULL,
+                            NULL,
+                            NULL,
+                            NULL,
+                            NULL,
+                            NULL,
+                            NULL,
+                            :ingestion_request_id,
+                            :correlation_id,
+                            TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                            TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "run_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "ingestion_request_id": uuid4(),
+                        "correlation_id": uuid4(),
+                    },
+                )
+
+        downgrade_blocked = run_alembic_command(
+            "downgrade",
+            RETRYABLE_FAILURE_BUDGET_REVISION,
+        )
+        assert downgrade_blocked.returncode != 0
+        assert (
+            "Cannot downgrade while AgentRuns are waiting for approval" in downgrade_blocked.stderr
+            or "Cannot downgrade while AgentRuns are waiting for approval"
+            in downgrade_blocked.stdout
+        )
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM agent_run_attempts WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'queued',
+                        available_at = TIMESTAMPTZ '2026-08-02 00:00:00+00',
+                        attempt_count = 0,
+                        first_started_at = NULL,
+                        updated_at = TIMESTAMPTZ '2026-08-02 00:00:00+00'
+                    WHERE id = :run_id
+                    """
+                ),
+                {"run_id": run_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_attempts (
+                        id, agent_run_id, attempt_number, worker_id,
+                        lease_token, execution_request_id, started_at,
+                        finished_at, outcome, error_code, error_summary
+                    ) VALUES (
+                        :attempt_id,
+                        :run_id,
+                        1,
+                        'worker-a',
+                        :lease_token,
+                        :execution_request_id,
+                        TIMESTAMPTZ '2026-08-02 00:01:00+00',
+                        TIMESTAMPTZ '2026-08-02 00:02:00+00',
+                        'awaiting_approval',
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "attempt_id": attempt_id,
+                    "run_id": run_id,
+                    "lease_token": uuid4(),
+                    "execution_request_id": uuid4(),
+                },
+            )
+
+        downgrade_blocked_attempt = run_alembic_command(
+            "downgrade",
+            RETRYABLE_FAILURE_BUDGET_REVISION,
+        )
+        assert downgrade_blocked_attempt.returncode != 0
+        assert (
+            "Cannot downgrade while awaiting-approval attempts exist"
+            in downgrade_blocked_attempt.stderr
+            or "Cannot downgrade while awaiting-approval attempts exist"
+            in downgrade_blocked_attempt.stdout
+        )
+
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM agent_run_attempts WHERE id = :attempt_id"),
+                {"attempt_id": attempt_id},
+            )
+
+        downgrade_clean = run_alembic_command(
+            "downgrade",
+            RETRYABLE_FAILURE_BUDGET_REVISION,
+        )
+        assert downgrade_clean.returncode == 0, downgrade_clean.stderr
+
+        assert not await constraint_exists(
+            engine,
+            table_name="agent_runs",
+            constraint_name="ck_agent_runs_agent_run_available_at_state",
+        )
+
+        reupgrade = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert reupgrade.returncode == 0, reupgrade.stderr
+
+        assert await constraint_exists(
+            engine,
+            table_name="agent_runs",
+            constraint_name="ck_agent_runs_agent_run_available_at_state",
+        )
+
+        table = cast(Table, AgentRunRecord.__table__)
+        constraint_names = {constraint.name for constraint in table.constraints}
+        assert "ck_agent_runs_agent_run_available_at_state" in constraint_names
+        assert "ck_agent_runs_agent_run_status" in constraint_names
+        assert table.c.available_at.nullable is True
     finally:
         await engine.dispose()
         run_alembic_command("upgrade", "head")

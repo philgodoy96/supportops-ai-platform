@@ -54,6 +54,7 @@ from supportops.ai.gateway.tool_decisions import (
 from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -351,7 +352,7 @@ class ControlledSupportWorkflowExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         """Execute or resume the controlled graph to recommendation persistence."""
 
         _validate_supported_workflow(context)
@@ -424,6 +425,8 @@ class ControlledSupportWorkflowExecutor:
                     "The controlled support graph completed without a persisted recommendation."
                 ),
             )
+
+        return CompletedExecution()
 
 
 def _tool_execution_context(

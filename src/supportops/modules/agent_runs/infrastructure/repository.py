@@ -31,6 +31,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
@@ -191,6 +192,61 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
         record.lease_owner = None
         record.lease_token = None
         record.lease_expires_at = None
+        record.last_error_code = None
+        record.last_error_summary = None
+        record.updated_at = command.finished_at
+
+        await self._session.flush()
+        return AgentRunTransitionResult.APPLIED
+
+    async def mark_waiting_for_approval(
+        self,
+        command: WaitForApprovalAgentRunCommand,
+    ) -> AgentRunTransitionResult:
+        """Persist a fenced waiting-for-approval AgentRun transition."""
+
+        run_statement = (
+            select(AgentRunRecord)
+            .where(
+                and_(
+                    AgentRunRecord.id == command.agent_run_id,
+                    AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                    AgentRunRecord.lease_token == command.lease_token,
+                    AgentRunRecord.lease_expires_at > command.finished_at,
+                )
+            )
+            .with_for_update()
+        )
+        run_result = await self._session.execute(run_statement)
+        record = run_result.scalar_one_or_none()
+        if record is None:
+            return AgentRunTransitionResult.LEASE_LOST
+
+        attempt = await self._load_active_attempt_for_lease(
+            agent_run_id=command.agent_run_id,
+            lease_token=command.lease_token,
+        )
+        if attempt is None:
+            raise RuntimeError(
+                "Active AgentRun attempt was not found for the current lease.",
+            )
+
+        if attempt.attempt_number != record.attempt_count:
+            raise RuntimeError(
+                "Active AgentRun attempt does not match the current attempt count.",
+            )
+
+        attempt.finished_at = command.finished_at
+        attempt.outcome = AgentRunAttemptOutcome.AWAITING_APPROVAL.value
+        attempt.error_code = None
+        attempt.error_summary = None
+
+        record.status = AgentRunStatus.WAITING_FOR_APPROVAL.value
+        record.lease_owner = None
+        record.lease_token = None
+        record.lease_expires_at = None
+        record.available_at = None
+        record.completed_at = None
         record.last_error_code = None
         record.last_error_summary = None
         record.updated_at = command.finished_at

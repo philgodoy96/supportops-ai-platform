@@ -66,9 +66,9 @@ class AgentRunRecord(Base):
         String(32),
         nullable=False,
     )
-    available_at: Mapped[datetime] = mapped_column(
+    available_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
+        nullable=True,
     )
     attempt_count: Mapped[int] = mapped_column(
         Integer,
@@ -164,7 +164,16 @@ class AgentRunRecord(Base):
             name="agent_run_trigger_key_format",
         ),
         CheckConstraint(
-            ("status IN ('queued', 'running', 'retry_scheduled', 'succeeded', 'failed')"),
+            (
+                "status IN ("
+                "'queued', "
+                "'running', "
+                "'retry_scheduled', "
+                "'waiting_for_approval', "
+                "'succeeded', "
+                "'failed'"
+                ")"
+            ),
             name="agent_run_status",
         ),
         CheckConstraint(
@@ -272,7 +281,11 @@ class AgentRunRecord(Base):
             name="agent_run_error_summary_format",
         ),
         CheckConstraint(
-            ("status NOT IN ('queued', 'succeeded') OR last_error_code IS NULL"),
+            (
+                "status NOT IN ('queued', 'waiting_for_approval', 'succeeded') "
+                "OR "
+                "(last_error_code IS NULL AND last_error_summary IS NULL)"
+            ),
             name="agent_run_success_error_state",
         ),
         CheckConstraint(
@@ -285,7 +298,7 @@ class AgentRunRecord(Base):
         ),
         CheckConstraint(
             (
-                "available_at >= created_at "
+                "(available_at IS NULL OR available_at >= created_at) "
                 "AND ("
                 "first_started_at IS NULL "
                 "OR first_started_at >= created_at"
@@ -296,6 +309,14 @@ class AgentRunRecord(Base):
                 ")"
             ),
             name="agent_run_lifecycle_timestamp_order",
+        ),
+        CheckConstraint(
+            (
+                "(status = 'waiting_for_approval' AND available_at IS NULL) "
+                "OR "
+                "(status <> 'waiting_for_approval' AND available_at IS NOT NULL)"
+            ),
+            name="agent_run_available_at_state",
         ),
         CheckConstraint(
             (
@@ -467,6 +488,7 @@ class AgentRunAttemptRecord(Base):
             (
                 "outcome IS NULL OR outcome IN ("
                 "'succeeded', "
+                "'awaiting_approval', "
                 "'retryable_failure', "
                 "'terminal_failure', "
                 "'timed_out', "
@@ -522,11 +544,18 @@ class AgentRunAttemptRecord(Base):
             name="agent_run_attempt_error_summary_format",
         ),
         CheckConstraint(
-            ("outcome <> 'succeeded' OR error_code IS NULL"),
+            (
+                "outcome NOT IN ('succeeded', 'awaiting_approval') "
+                "OR (error_code IS NULL AND error_summary IS NULL)"
+            ),
             name="agent_run_attempt_success_error_state",
         ),
         CheckConstraint(
-            ("outcome IS NULL OR outcome = 'succeeded' OR error_code IS NOT NULL"),
+            (
+                "outcome IS NULL "
+                "OR outcome IN ('succeeded', 'awaiting_approval') "
+                "OR (error_code IS NOT NULL AND error_summary IS NOT NULL)"
+            ),
             name="agent_run_attempt_failure_error_state",
         ),
         CheckConstraint(
