@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from supportops.api.application import create_application
@@ -114,3 +115,105 @@ def test_get_approval_returns_workspace_detail() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "approved"
+    payload = response.json()
+    assert "grant_id" not in payload
+    assert "lease_token" not in payload
+    assert "checkpoint" not in payload
+    assert "execution_output" not in payload
+    assert "raw_prompt" not in payload
+    assert "raw_model_output" not in payload
+
+
+def test_list_approvals_rejects_malformed_cursor() -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    app.dependency_overrides[get_list_approval_requests] = lambda: SimpleNamespace(
+        execute=AsyncMock(),
+    )
+
+    response = TestClient(app).get(
+        f"/api/v1/workspaces/{workspace_id}/approvals",
+        params={"cursor": "not-a-valid-cursor"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ("invalid_pagination_cursor")
+    assert response.json()["error"]["request_id"] == (response.headers["X-Request-ID"])
+
+
+def test_list_approvals_rejects_cross_endpoint_cursor() -> None:
+    from supportops.modules.tickets.api.escalation_pagination import (
+        encode_ticket_escalation_cursor,
+    )
+    from supportops.modules.tickets.application.escalation_queries import (
+        TicketEscalationPageCursor,
+    )
+
+    app = create_application()
+    workspace_id = uuid4()
+    app.dependency_overrides[get_list_approval_requests] = lambda: SimpleNamespace(
+        execute=AsyncMock(),
+    )
+    foreign_cursor = encode_ticket_escalation_cursor(
+        TicketEscalationPageCursor(
+            created_at=datetime(2026, 8, 3, 21, 0, tzinfo=UTC),
+            ticket_escalation_id=uuid4(),
+        ),
+    )
+
+    response = TestClient(app).get(
+        f"/api/v1/workspaces/{workspace_id}/approvals",
+        params={"cursor": foreign_cursor},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ("invalid_pagination_cursor")
+
+
+def test_list_approvals_rejects_unsupported_cursor_version() -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    app.dependency_overrides[get_list_approval_requests] = lambda: SimpleNamespace(
+        execute=AsyncMock(),
+    )
+    encoded = (
+        "eyJ2ZXJzaW9uIjoyLCJjcmVhdGVkX2F0Ijoi"
+        "MjAyNi0wOC0wM1QyMTowMDowMFoiLCJhcHBy"
+        "b3ZhbF9yZXF1ZXN0X2lkIjoiMDAwMDAwMDAt"
+        "MDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx"
+        "In0="
+    )
+
+    response = TestClient(app).get(
+        f"/api/v1/workspaces/{workspace_id}/approvals",
+        params={"cursor": encoded},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == ("invalid_pagination_cursor")
+
+
+@pytest.mark.parametrize("page_size", [0, 101])
+def test_list_approvals_rejects_invalid_page_size(page_size: int) -> None:
+    app = create_application()
+    workspace_id = uuid4()
+    app.dependency_overrides[get_list_approval_requests] = lambda: SimpleNamespace(
+        execute=AsyncMock(),
+    )
+
+    response = TestClient(app).get(
+        f"/api/v1/workspaces/{workspace_id}/approvals",
+        params={"page_size": page_size},
+    )
+
+    assert response.status_code == 422
+
+
+def test_approvals_are_registered_in_openapi() -> None:
+    app = create_application()
+    paths = app.openapi()["paths"]
+
+    assert "/api/v1/workspaces/{workspace_id}/approvals" in paths
+    assert ("/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}") in paths
+    assert ("/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/approve") in paths
+    assert ("/api/v1/workspaces/{workspace_id}/approvals/{approval_request_id}/reject") in paths
