@@ -71,7 +71,7 @@ class AgentRunResponse(BaseModel):
     attempt_count: int
     retryable_failure_count: int
     max_retryable_failures: int
-    available_at: datetime
+    available_at: datetime | None
     first_started_at: datetime | None
     completed_at: datetime | None
     last_error: AgentRunErrorResponse | None

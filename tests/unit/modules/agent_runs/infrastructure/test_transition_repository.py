@@ -20,6 +20,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
@@ -511,6 +512,86 @@ async def test_record_failure_requires_active_attempt() -> None:
                 error_code="retryable_executor_failure",
                 error_summary=("The configured executor reported a retryable failure."),
                 retry_available_at=_FINISHED_AT + timedelta(seconds=2),
+            ),
+        )
+
+    session.flush.assert_not_awaited()
+
+
+async def test_mark_waiting_for_approval_closes_attempt_and_clears_lease() -> None:
+    run_record = create_running_run_record()
+    attempt_record = create_active_attempt_record()
+    original_attempt_count = run_record.attempt_count
+    original_retryable_failure_count = run_record.retryable_failure_count
+    session = create_session(
+        run_record=run_record,
+        attempt_record=attempt_record,
+    )
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.mark_waiting_for_approval(
+        WaitForApprovalAgentRunCommand(
+            agent_run_id=_RUN_ID,
+            lease_token=_LEASE_TOKEN,
+            finished_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert run_record.status == AgentRunStatus.WAITING_FOR_APPROVAL.value
+    assert run_record.available_at is None
+    assert run_record.completed_at is None
+    assert run_record.lease_owner is None
+    assert run_record.lease_token is None
+    assert run_record.lease_expires_at is None
+    assert run_record.last_error_code is None
+    assert run_record.last_error_summary is None
+    assert run_record.attempt_count == original_attempt_count
+    assert run_record.retryable_failure_count == (original_retryable_failure_count)
+    assert run_record.updated_at == _FINISHED_AT
+    assert attempt_record.finished_at == _FINISHED_AT
+    assert attempt_record.outcome == (AgentRunAttemptOutcome.AWAITING_APPROVAL.value)
+    assert attempt_record.error_code is None
+    assert attempt_record.error_summary is None
+    session.flush.assert_awaited_once_with()
+    session.commit.assert_not_awaited()
+
+
+async def test_mark_waiting_for_approval_returns_lease_lost_for_stale_token() -> None:
+    session = create_session(run_record=None)
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.mark_waiting_for_approval(
+        WaitForApprovalAgentRunCommand(
+            agent_run_id=_RUN_ID,
+            lease_token=_LEASE_TOKEN,
+            finished_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+    session.flush.assert_not_awaited()
+
+
+async def test_mark_waiting_for_approval_requires_active_attempt() -> None:
+    session = create_session(
+        run_record=create_running_run_record(),
+        attempt_record=None,
+    )
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Active AgentRun attempt was not found "
+            r"for the current lease\."
+        ),
+    ):
+        await repository.mark_waiting_for_approval(
+            WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_LEASE_TOKEN,
+                finished_at=_FINISHED_AT,
             ),
         )
 

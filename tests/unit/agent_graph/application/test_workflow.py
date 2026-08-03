@@ -33,6 +33,7 @@ from supportops.ai.schemas.ticket_classification import (
 )
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.agent_runs.domain.models import (
@@ -210,8 +211,9 @@ async def test_starts_new_graph_with_exact_checkpoint_identity() -> None:
     context = _context()
     executor = ControlledSupportWorkflowExecutor(graph=graph)
 
-    await executor.execute(context)
+    result = await executor.execute(context)
 
+    assert result == CompletedExecution()
     assert len(graph.inputs) == 1
     initial_input = graph.inputs[0]
 
@@ -239,8 +241,9 @@ async def test_resumes_existing_checkpoint_with_none_input() -> None:
     )
     executor = ControlledSupportWorkflowExecutor(graph=graph)
 
-    await executor.execute(_context())
+    result = await executor.execute(_context())
 
+    assert result == CompletedExecution()
     assert graph.inputs == [None]
 
 

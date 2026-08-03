@@ -2,15 +2,45 @@
 
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from supportops.modules.agent_runs.domain.models import (
     AGENT_RUN_ERROR_CODE_MAX_LENGTH,
     AGENT_RUN_ERROR_SUMMARY_MAX_LENGTH,
+    AGENT_RUN_LEASE_OWNER_MAX_LENGTH,
     AgentRun,
     AgentRunAttempt,
     AgentRunStatus,
 )
 from supportops.modules.tickets.domain.models import Ticket
+
+AGENT_RUN_GRAPH_THREAD_ID_MAX_LENGTH = AGENT_RUN_LEASE_OWNER_MAX_LENGTH
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedExecution:
+    """Executor finished the claimed workflow successfully."""
+
+
+@dataclass(frozen=True, slots=True)
+class PausedForApproval:
+    """Executor paused for human approval without completing the run."""
+
+    approval_request_id: UUID
+    graph_thread_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.approval_request_id, UUID):
+            raise TypeError("approval_request_id must be a UUID.")
+
+        _validate_bounded_identifier(
+            self.graph_thread_id,
+            field_name="graph_thread_id",
+            maximum_length=AGENT_RUN_GRAPH_THREAD_ID_MAX_LENGTH,
+        )
+
+
+AgentRunExecutionResult = CompletedExecution | PausedForApproval
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +104,7 @@ class AgentRunExecutor(Protocol):
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> AgentRunExecutionResult:
         """Execute the claimed workflow or raise a typed execution error."""
 
         ...
@@ -112,6 +142,26 @@ class RetryableAgentRunExecutionError(AgentRunExecutionError):
 
 class TerminalAgentRunExecutionError(AgentRunExecutionError):
     """Failure that must terminate the AgentRun immediately."""
+
+
+def _validate_bounded_identifier(
+    value: str,
+    *,
+    field_name: str,
+    maximum_length: int,
+) -> None:
+    if not value:
+        raise ValueError(f"{field_name} is required.")
+
+    if value != value.strip():
+        raise ValueError(
+            f"{field_name} must not contain surrounding whitespace.",
+        )
+
+    if len(value) > maximum_length:
+        raise ValueError(
+            f"{field_name} exceeds the maximum length.",
+        )
 
 
 def _validate_error_text(

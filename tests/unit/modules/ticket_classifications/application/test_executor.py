@@ -42,6 +42,7 @@ from supportops.ai.schemas.ticket_classification import (
 )
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
@@ -422,8 +423,9 @@ async def test_executes_gateway_and_persists_classification() -> None:
         transaction_manager,
     ) = _executor(gateway=gateway)
 
-    await executor.execute(_context())
+    result = await executor.execute(_context())
 
+    assert result == CompletedExecution()
     assert query_repository.queries == [
         (
             _WORKSPACE_ID,

@@ -25,6 +25,7 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
@@ -163,6 +164,19 @@ async def mark_succeeded_and_commit(
 
     async with SqlAlchemyTransactionManager(session).transaction():
         return await repository.mark_succeeded(command)
+
+
+async def mark_waiting_and_commit(
+    session: AsyncSession,
+    *,
+    command: WaitForApprovalAgentRunCommand,
+) -> AgentRunTransitionResult:
+    """Persist and commit a waiting-for-approval transition."""
+
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    async with SqlAlchemyTransactionManager(session).transaction():
+        return await repository.mark_waiting_for_approval(command)
 
 
 async def record_failure_and_commit(
@@ -654,6 +668,152 @@ async def test_expired_lease_cannot_complete_run(
     assert run.status == AgentRunStatus.RUNNING.value
     assert run.lease_token == _FIRST_LEASE_TOKEN
     assert run.completed_at is None
+    assert len(attempts) == 1
+    assert attempts[0].finished_at is None
+    assert attempts[0].outcome is None
+
+
+async def test_waiting_for_approval_closes_attempt_and_clears_lease(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        result = await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    assert result is AgentRunTransitionResult.APPLIED
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.WAITING_FOR_APPROVAL.value
+    assert run.available_at is None
+    assert run.completed_at is None
+    assert run.lease_owner is None
+    assert run.lease_token is None
+    assert run.lease_expires_at is None
+    assert run.last_error_code is None
+    assert run.last_error_summary is None
+    assert run.attempt_count == 1
+    assert run.retryable_failure_count == 0
+    assert len(attempts) == 1
+    assert attempts[0].finished_at == finished_at
+    assert attempts[0].outcome == (AgentRunAttemptOutcome.AWAITING_APPROVAL.value)
+    assert attempts[0].error_code is None
+    assert attempts[0].error_summary is None
+
+
+async def test_stale_token_cannot_mark_waiting_for_approval(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+    stale_token = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        result = await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=stale_token,
+                finished_at=finished_at,
+            ),
+        )
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.RUNNING.value
+    assert run.lease_token == _FIRST_LEASE_TOKEN
+    assert run.available_at is not None
+    assert run.completed_at is None
+    assert len(attempts) == 1
+    assert attempts[0].finished_at is None
+    assert attempts[0].outcome is None
+
+
+async def test_expired_lease_cannot_mark_waiting_for_approval(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    lease_seconds = 5
+    finished_at = _FIRST_CLAIMED_AT + timedelta(
+        seconds=lease_seconds + 1,
+    )
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+                lease_seconds=lease_seconds,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        result = await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.RUNNING.value
+    assert run.lease_token == _FIRST_LEASE_TOKEN
     assert len(attempts) == 1
     assert attempts[0].finished_at is None
     assert attempts[0].outcome is None

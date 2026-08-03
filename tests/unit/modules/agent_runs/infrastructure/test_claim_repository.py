@@ -284,3 +284,5 @@ async def test_claim_query_uses_postgresql_skip_locked_ordering() -> None:
     assert "agent_runs.available_at <=" in normalized
     assert "agent_runs.retryable_failure_count < agent_runs.max_retryable_failures" in normalized
     assert "LIMIT 1" in normalized
+    assert "IN ('queued', 'retry_scheduled')" in normalized
+    assert "waiting_for_approval" not in normalized

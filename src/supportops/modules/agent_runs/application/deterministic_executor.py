@@ -2,6 +2,7 @@
 
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    CompletedExecution,
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.agent_runs.domain.models import (
@@ -17,7 +18,7 @@ class DeterministicTicketProcessingExecutor:
     async def execute(
         self,
         context: AgentRunExecutionContext,
-    ) -> None:
+    ) -> CompletedExecution:
         """Complete the supported baseline workflow without external I/O."""
 
         run = context.agent_run
@@ -43,3 +44,5 @@ class DeterministicTicketProcessingExecutor:
                 error_code="unsupported_trigger",
                 error_summary=("The AgentRun trigger is not supported by the configured executor."),
             )
+
+        return CompletedExecution()

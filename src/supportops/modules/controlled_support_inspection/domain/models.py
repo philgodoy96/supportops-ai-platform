@@ -53,6 +53,7 @@ class ControlledSupportInspectionStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     RETRYING = "retrying"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     FAILED = "failed"
     COMPLETED = "completed"
 
@@ -66,6 +67,9 @@ def map_agent_run_inspection_status(
         AgentRunStatus.QUEUED: (ControlledSupportInspectionStatus.QUEUED),
         AgentRunStatus.RUNNING: (ControlledSupportInspectionStatus.RUNNING),
         AgentRunStatus.RETRY_SCHEDULED: (ControlledSupportInspectionStatus.RETRYING),
+        AgentRunStatus.WAITING_FOR_APPROVAL: (
+            ControlledSupportInspectionStatus.WAITING_FOR_APPROVAL
+        ),
         AgentRunStatus.FAILED: (ControlledSupportInspectionStatus.FAILED),
         AgentRunStatus.SUCCEEDED: (ControlledSupportInspectionStatus.COMPLETED),
     }
@@ -188,6 +192,12 @@ class AgentRunInspectionSummary:
             and self.last_error_code is not None
         ):
             raise ValueError("Queued inspection status must not define last_error_code.")
+
+        if (
+            self.status is ControlledSupportInspectionStatus.WAITING_FOR_APPROVAL
+            and self.last_error_code is not None
+        ):
+            raise ValueError("Waiting inspection status must not define last_error_code.")
 
     @classmethod
     def from_agent_run(

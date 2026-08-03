@@ -684,3 +684,41 @@ async def test_skip_locked_allows_recovery_workers_to_recover_distinct_runs(
     assert second_run.status == AgentRunStatus.RETRY_SCHEDULED.value
     assert first_run.attempt_count == 1
     assert second_run.attempt_count == 1
+
+
+async def test_recovery_excludes_waiting_for_approval_runs(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    recovered_at = _BASE_TIMESTAMP + timedelta(minutes=10)
+    run_id = UUID("b2000000-0000-4000-8000-000000000002")
+    ticket_id = UUID("b1000000-0000-4000-8000-000000000001")
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace(setup_session)
+        await persist_ticket_and_run(
+            setup_session,
+            ticket_id=ticket_id,
+            run_id=run_id,
+        )
+        async with SqlAlchemyTransactionManager(setup_session).transaction():
+            record = await setup_session.get(AgentRunRecord, run_id)
+            assert record is not None
+            record.status = AgentRunStatus.WAITING_FOR_APPROVAL.value
+            record.available_at = None
+            record.attempt_count = 1
+            record.first_started_at = _BASE_TIMESTAMP + timedelta(minutes=1)
+            record.lease_owner = None
+            record.lease_token = None
+            record.lease_expires_at = None
+            record.updated_at = _BASE_TIMESTAMP + timedelta(minutes=2)
+            await setup_session.flush()
+
+    async with postgresql_session_factory() as recovery_session:
+        repository = SqlAlchemyAgentRunRepository(recovery_session)
+        async with SqlAlchemyTransactionManager(recovery_session).transaction():
+            result = await repository.recover_next_expired(
+                create_recovery_command(recovered_at=recovered_at),
+            )
+
+    assert result is None

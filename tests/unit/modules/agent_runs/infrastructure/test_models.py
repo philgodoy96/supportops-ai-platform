@@ -131,6 +131,29 @@ def test_agent_run_record_round_trip_preserves_failed_run() -> None:
     assert record.last_error_code == "terminal_executor_failure"
 
 
+def test_agent_run_record_round_trip_preserves_waiting_run() -> None:
+    run = create_initial_run()
+    started_at = datetime(2026, 7, 31, 12, 1, tzinfo=UTC)
+
+    waiting_run = replace(
+        run,
+        status=AgentRunStatus.WAITING_FOR_APPROVAL,
+        available_at=None,
+        attempt_count=1,
+        first_started_at=started_at,
+        updated_at=started_at,
+    )
+
+    record = AgentRunRecord.from_domain(waiting_run)
+    restored = record.to_domain()
+
+    assert restored == waiting_run
+    assert record.status == AgentRunStatus.WAITING_FOR_APPROVAL.value
+    assert record.available_at is None
+    assert record.completed_at is None
+    assert record.lease_token is None
+
+
 def test_attempt_record_round_trip_preserves_active_attempt() -> None:
     attempt = create_active_attempt()
 
@@ -157,6 +180,24 @@ def test_attempt_record_round_trip_preserves_successful_attempt() -> None:
 
     assert restored == succeeded_attempt
     assert record.outcome == AgentRunAttemptOutcome.SUCCEEDED.value
+    assert record.error_code is None
+
+
+def test_attempt_record_round_trip_preserves_awaiting_approval_attempt() -> None:
+    attempt = create_active_attempt()
+    finished_at = attempt.started_at + timedelta(seconds=1)
+
+    awaiting_attempt = replace(
+        attempt,
+        finished_at=finished_at,
+        outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+    )
+
+    record = AgentRunAttemptRecord.from_domain(awaiting_attempt)
+    restored = record.to_domain()
+
+    assert restored == awaiting_attempt
+    assert record.outcome == AgentRunAttemptOutcome.AWAITING_APPROVAL.value
     assert record.error_code is None
 
 
@@ -211,6 +252,7 @@ def test_agent_run_metadata_declares_expected_constraints() -> None:
         "ck_agent_runs_agent_run_failure_error_state",
         "ck_agent_runs_agent_run_timestamp_order",
         "ck_agent_runs_agent_run_lifecycle_timestamp_order",
+        "ck_agent_runs_agent_run_available_at_state",
         "ck_agent_runs_agent_run_lease_owner_format",
     }.issubset(constraint_names)
 

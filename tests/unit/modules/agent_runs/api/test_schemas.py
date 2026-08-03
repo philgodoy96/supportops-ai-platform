@@ -244,6 +244,32 @@ def test_agent_run_response_omits_internal_fields() -> None:
     assert "ingestion_request_id" not in payload
     assert "max_attempts" not in payload
     assert "execution_request_id" not in payload
+    assert "approval_request_id" not in payload
+    assert "graph_thread_id" not in payload
+
+
+def test_agent_run_response_serializes_waiting_for_approval_with_null_available_at() -> None:
+    agent_run = replace(
+        create_agent_run(),
+        status=AgentRunStatus.WAITING_FOR_APPROVAL,
+        available_at=None,
+        attempt_count=1,
+        first_started_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    response = AgentRunResponse.from_domain(agent_run)
+    payload = response.model_dump(mode="json")
+
+    assert response.status is AgentRunStatus.WAITING_FOR_APPROVAL
+    assert response.available_at is None
+    assert response.completed_at is None
+    assert response.last_error is None
+    assert payload["status"] == "waiting_for_approval"
+    assert payload["available_at"] is None
+    assert "lease_token" not in payload
+    assert "approval_request_id" not in payload
+    assert "graph_thread_id" not in payload
 
 
 def test_agent_run_response_requires_complete_safe_error_pair() -> None:
@@ -293,6 +319,23 @@ def test_attempt_response_supports_active_attempt() -> None:
     assert response.finished_at is None
     assert response.outcome is None
     assert response.error is None
+
+
+def test_attempt_response_serializes_awaiting_approval() -> None:
+    attempt = replace(
+        create_attempt(),
+        finished_at=_NOW + timedelta(seconds=1),
+        outcome=AgentRunAttemptOutcome.AWAITING_APPROVAL,
+    )
+
+    response = AgentRunAttemptResponse.from_domain(attempt)
+    payload = response.model_dump(mode="json")
+
+    assert response.outcome is AgentRunAttemptOutcome.AWAITING_APPROVAL
+    assert response.error is None
+    assert payload["outcome"] == "awaiting_approval"
+    assert "lease_token" not in payload
+    assert "approval_request_id" not in payload
 
 
 def test_llm_invocation_response_projects_successful_invocation() -> None:
