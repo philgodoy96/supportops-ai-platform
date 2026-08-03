@@ -11,7 +11,13 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+)
 
 from supportops.api.application import create_application
 from supportops.core.settings import Settings
@@ -37,6 +43,48 @@ if sys.platform == "win32":
 # local PostgreSQL database. Concurrent pytest processes otherwise race on
 # cleanup and flake with foreign-key / unique violations.
 _INTEGRATION_DATABASE_LOCK_KEY = 742_891_305
+
+# Citations RESTRICT-reference knowledge_document_chunks, so clear them first.
+BUSINESS_DATA_DELETE_STATEMENTS: tuple[str, ...] = (
+    "DELETE FROM support_recommendation_citations",
+    "DELETE FROM support_recommendations",
+    "DELETE FROM approval_requests",
+    "DELETE FROM agent_tool_calls",
+    "DELETE FROM knowledge_document_chunks",
+    "UPDATE knowledge_documents SET active_version_id = NULL",
+    "DELETE FROM knowledge_document_versions",
+    "DELETE FROM knowledge_documents",
+    "DELETE FROM ticket_classifications",
+    "DELETE FROM llm_invocations",
+    "DELETE FROM agent_run_attempts",
+    "DELETE FROM agent_runs",
+    "DELETE FROM tickets",
+    "DELETE FROM workspaces",
+)
+
+
+def run_alembic_upgrade_head() -> None:
+    """Apply Alembic migrations through head or raise on failure."""
+
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Failed to upgrade integration database to Alembic head:\n{result.stderr}"
+        )
+
+
+async def clear_integration_business_data(
+    connection: AsyncConnection,
+) -> None:
+    """Delete all shared business rows in FK-safe order."""
+
+    for statement in BUSINESS_DATA_DELETE_STATEMENTS:
+        await connection.execute(text(statement))
 
 
 @pytest.fixture
@@ -75,14 +123,10 @@ async def integration_client(
 def migrated_database() -> Iterator[None]:
     """Apply Alembic migrations to the shared local integration database."""
 
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.fail(result.stderr)
+    try:
+        run_alembic_upgrade_head()
+    except RuntimeError as error:
+        pytest.fail(str(error))
 
     yield None
 
@@ -142,6 +186,10 @@ async def exclusive_integration_database(
     try:
         yield None
     finally:
+        # Schema-mutating tests may leave the shared DB below head on failure
+        # or interrupt; restore before releasing the lock so later fixtures
+        # (e.g. clean_business_tables) do not hit missing relations.
+        run_alembic_upgrade_head()
         await connection.execute(
             text(f"SELECT pg_advisory_unlock({_INTEGRATION_DATABASE_LOCK_KEY})"),
         )
@@ -162,24 +210,16 @@ async def clean_business_tables(
     )
 
     async def cleanup() -> None:
-        # Citations RESTRICT-reference knowledge_document_chunks, so clear them first.
-        await lock_connection.execute(text("DELETE FROM support_recommendation_citations"))
-        await lock_connection.execute(text("DELETE FROM support_recommendations"))
-        await lock_connection.execute(text("DELETE FROM approval_requests"))
-        await lock_connection.execute(text("DELETE FROM agent_tool_calls"))
-        await lock_connection.execute(text("DELETE FROM knowledge_document_chunks"))
-        await lock_connection.execute(
-            text("UPDATE knowledge_documents SET active_version_id = NULL"),
-        )
-        await lock_connection.execute(text("DELETE FROM knowledge_document_versions"))
-        await lock_connection.execute(text("DELETE FROM knowledge_documents"))
-        await lock_connection.execute(text("DELETE FROM ticket_classifications"))
-        await lock_connection.execute(text("DELETE FROM llm_invocations"))
-        await lock_connection.execute(text("DELETE FROM agent_run_attempts"))
-        await lock_connection.execute(text("DELETE FROM agent_runs"))
-        await lock_connection.execute(text("DELETE FROM tickets"))
-        await lock_connection.execute(text("DELETE FROM workspaces"))
-        await lock_connection.commit()
+        try:
+            await clear_integration_business_data(lock_connection)
+            await lock_connection.commit()
+        except ProgrammingError:
+            # A prior schema-mutating test/interrupt can leave head-shaped code
+            # pointed at a DB missing newer relations such as approval_requests.
+            await lock_connection.rollback()
+            run_alembic_upgrade_head()
+            await clear_integration_business_data(lock_connection)
+            await lock_connection.commit()
 
     try:
         await cleanup()

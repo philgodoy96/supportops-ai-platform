@@ -271,6 +271,155 @@ class LLMToolDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMHumanApprovedToolDecisionRequest:
+    """Application request for human-approved terminal or sensitive decisions."""
+
+    operation: LLMOperation
+    model: str
+    instructions: str
+    input: str
+    sensitive_tools: tuple[ToolDefinition, ...]
+    terminal_control: LLMTerminalControlDefinition
+    timeout_seconds: float
+    prompt_id: str
+    prompt_version: int
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    read_only_tools: tuple[ToolDefinition, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.operation is not LLMOperation.SUPPORT_ACTION_DECISION:
+            raise ValueError(
+                "Tool decision requests require the support_action_decision operation."
+            )
+
+        _validate_required_text(
+            self.model,
+            field_name="model",
+        )
+        _validate_required_text(
+            self.instructions,
+            field_name="instructions",
+        )
+        _validate_required_text(
+            self.input,
+            field_name="input",
+        )
+        _validate_required_text(
+            self.prompt_id,
+            field_name="prompt_id",
+        )
+
+        if self.prompt_version <= 0:
+            raise ValueError("prompt_version must be positive.")
+
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive.")
+
+        normalized_sensitive_tools = tuple(
+            sorted(
+                self.sensitive_tools,
+                key=lambda definition: (
+                    definition.name,
+                    definition.version,
+                ),
+            )
+        )
+        normalized_read_only_tools = tuple(
+            sorted(
+                self.read_only_tools,
+                key=lambda definition: (
+                    definition.name,
+                    definition.version,
+                ),
+            )
+        )
+
+        if len(normalized_sensitive_tools) + len(normalized_read_only_tools) > 10:
+            raise ValueError("Too many executable tools were provided.")
+
+        tool_names: set[str] = set()
+
+        for definition in normalized_sensitive_tools:
+            if definition.safety_level is not ToolSafetyLevel.SENSITIVE_WRITE:
+                raise ValueError(
+                    "Human-approved sensitive tool requests may expose only sensitive_write tools."
+                )
+
+            if definition.name in tool_names:
+                raise ValueError("Only one version of each tool may be model-visible.")
+
+            if definition.name == self.terminal_control.name:
+                raise ValueError("Terminal control name must not collide with an executable tool.")
+
+            tool_names.add(definition.name)
+
+        for definition in normalized_read_only_tools:
+            if definition.safety_level is not ToolSafetyLevel.READ_ONLY:
+                raise ValueError(
+                    "Human-approved read-only tool requests may expose only read-only tools."
+                )
+
+            if definition.name in tool_names:
+                raise ValueError("Only one version of each tool may be model-visible.")
+
+            if definition.name == self.terminal_control.name:
+                raise ValueError("Terminal control name must not collide with an executable tool.")
+
+            tool_names.add(definition.name)
+
+        normalized_metadata = dict(self.metadata)
+
+        for key, value in normalized_metadata.items():
+            _validate_required_text(
+                key,
+                field_name="metadata key",
+            )
+            _validate_required_text(
+                value,
+                field_name=f"metadata[{key!r}]",
+            )
+
+        object.__setattr__(
+            self,
+            "sensitive_tools",
+            normalized_sensitive_tools,
+        )
+        object.__setattr__(
+            self,
+            "read_only_tools",
+            normalized_read_only_tools,
+        )
+        object.__setattr__(
+            self,
+            "metadata",
+            MappingProxyType(normalized_metadata),
+        )
+
+    def to_provider_request(
+        self,
+    ) -> LLMProviderToolDecisionRequest:
+        """Project application policy into provider-only metadata."""
+
+        functions = (
+            *(definition.to_provider_definition() for definition in self.read_only_tools),
+            *(definition.to_provider_definition() for definition in self.sensitive_tools),
+            self.terminal_control.to_provider_definition(),
+        )
+
+        return LLMProviderToolDecisionRequest(
+            operation=self.operation,
+            model=self.model,
+            instructions=self.instructions,
+            input=self.input,
+            functions=functions,
+            timeout_seconds=self.timeout_seconds,
+            metadata=self.metadata,
+            tool_choice="required",
+            parallel_tool_calls=False,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LLMProviderFunctionCallResponse:
     """One provider-selected function without SDK-specific types."""
 
@@ -511,6 +660,94 @@ class LLMToolDecisionGateway:
             accepted_invocation_sequence=(invocation_sequence),
         )
 
+    async def decide_human_approved(
+        self,
+        request: LLMHumanApprovedToolDecisionRequest,
+    ) -> LLMToolDecisionGatewayResult:
+        """Request and validate one human-approved control decision."""
+
+        provider_request = request.to_provider_request()
+        invocation_sequence = 1
+        started_at = self._clock()
+
+        try:
+            response = await self._provider.decide(provider_request)
+        except LLMError as error:
+            latency_ms = _elapsed_milliseconds(
+                started_at,
+                self._clock(),
+            )
+            trace = _trace_from_error(
+                request=provider_request,
+                provider_name=self._provider.provider_name,
+                invocation_sequence=invocation_sequence,
+                latency_ms=latency_ms,
+                error=error,
+            )
+
+            raise LLMGatewayFailure(
+                error=error,
+                invocations=(trace,),
+            ) from error
+
+        latency_ms = _elapsed_milliseconds(
+            started_at,
+            self._clock(),
+        )
+
+        _validate_response_provenance(
+            request=provider_request,
+            expected_provider=self._provider.provider_name,
+            response=response,
+        )
+
+        try:
+            decision = _validate_human_approved_function_call(
+                request=request,
+                response=response,
+            )
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ) as error:
+            normalized_error = LLMToolDecisionValidationError(
+                provider_request_id=(response.provider_request_id),
+            )
+            trace = LLMInvocationTrace(
+                invocation_sequence=invocation_sequence,
+                status=(LLMInvocationStatus.VALIDATION_FAILED),
+                provider=response.provider,
+                model=response.model,
+                provider_request_id=(response.provider_request_id),
+                usage=response.usage,
+                latency_ms=latency_ms,
+                error_code=normalized_error.error_code,
+            )
+
+            raise LLMGatewayFailure(
+                error=normalized_error,
+                invocations=(trace,),
+            ) from error
+
+        trace = LLMInvocationTrace(
+            invocation_sequence=invocation_sequence,
+            status=LLMInvocationStatus.SUCCEEDED,
+            provider=response.provider,
+            model=response.model,
+            provider_request_id=(response.provider_request_id),
+            usage=response.usage,
+            latency_ms=latency_ms,
+            error_code=None,
+        )
+
+        return LLMToolDecisionGatewayResult(
+            decision=decision,
+            invocations=(trace,),
+            accepted_invocation_sequence=(invocation_sequence),
+        )
+
 
 def _validate_function_call(
     *,
@@ -547,6 +784,54 @@ def _validate_function_call(
         tool_name=definition.name,
         tool_version=definition.version,
         arguments=validated_arguments,
+    )
+
+
+def _validate_human_approved_function_call(
+    *,
+    request: LLMHumanApprovedToolDecisionRequest,
+    response: LLMProviderFunctionCallResponse,
+) -> LLMExecutableToolCallDecision | LLMTerminalControlDecision:
+    arguments = json.loads(response.arguments_json)
+
+    if not isinstance(arguments, dict):
+        raise ValueError("Function arguments must be a JSON object.")
+
+    if response.function_name == request.terminal_control.name:
+        validated_output = request.terminal_control.input_schema.model_validate(arguments)
+
+        return LLMTerminalControlDecision(
+            provider_tool_call_id=(response.provider_tool_call_id),
+            control_name=request.terminal_control.name,
+            control_version=(request.terminal_control.version),
+            output=validated_output,
+        )
+
+    sensitive_definition = next(
+        (tool for tool in request.sensitive_tools if tool.name == response.function_name),
+        None,
+    )
+
+    if sensitive_definition is not None:
+        validated_arguments = sensitive_definition.input_schema.model_validate(arguments)
+
+        return LLMExecutableToolCallDecision(
+            provider_tool_call_id=(response.provider_tool_call_id),
+            tool_name=sensitive_definition.name,
+            tool_version=sensitive_definition.version,
+            arguments=validated_arguments,
+        )
+
+    read_only_definition = next(
+        (tool for tool in request.read_only_tools if tool.name == response.function_name),
+        None,
+    )
+
+    if read_only_definition is None:
+        raise ValueError("Provider selected an unknown function.")
+
+    raise ValueError(
+        "Human-approved read-only decisions are unavailable in the current workflow surface."
     )
 
 
