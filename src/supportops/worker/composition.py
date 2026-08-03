@@ -24,6 +24,9 @@ from supportops.agent_graph.application.human_approved_workflow import (
 from supportops.agent_graph.application.recommendation_execution import (
     ControlledSupportRecommendationExecutor,
 )
+from supportops.agent_graph.application.resume_planning import (
+    HumanApprovedGraphResumePlanner,
+)
 from supportops.agent_graph.application.sensitive_proposal import (
     SensitiveProposalService,
 )
@@ -857,8 +860,13 @@ def create_session_scoped_executor_registry(
         nodes=human_approved_nodes,
         checkpointer=(controlled_runtime.checkpoint_runtime.checkpointer),
     )
+    human_approved_resume_planner = HumanApprovedGraphResumePlanner(
+        approval_request_repository=(approval_request_repository),
+        tool_call_query_repository=(tool_call_query_repository),
+    )
     human_approved_executor = HumanApprovedSupportWorkflowExecutor(
         graph=human_approved_graph,
+        resume_planner=human_approved_resume_planner,
     )
 
     return AgentRunExecutorRegistry(

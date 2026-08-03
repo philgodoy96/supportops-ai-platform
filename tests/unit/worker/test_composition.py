@@ -13,6 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from supportops.agent_graph.application.human_approved_workflow import (
     HumanApprovedSupportWorkflowExecutor,
 )
+from supportops.agent_graph.application.resume_planning import (
+    HumanApprovedGraphResumePlanner,
+)
 from supportops.agent_graph.application.workflow import (
     ControlledSupportWorkflowExecutor,
 )
@@ -21,6 +24,9 @@ from supportops.agent_graph.domain.human_approved_state import (
 )
 from supportops.agent_graph.domain.state import (
     CONTROLLED_SUPPORT_WORKFLOW_VERSION,
+)
+from supportops.agent_tools.infrastructure.query_repository import (
+    SqlAlchemyAgentToolCallQueryRepository,
 )
 from supportops.ai.providers.mock import (
     MOCK_TICKET_CLASSIFIER_MODEL,
@@ -38,6 +44,9 @@ from supportops.modules.agent_runs.domain.models import (
     DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
     INITIAL_TICKET_PROCESSING_WORKFLOW_NAME,
     TICKET_CLASSIFICATION_WORKFLOW_VERSION,
+)
+from supportops.modules.approvals.infrastructure.repository import (
+    SqlAlchemyApprovalRequestRepository,
 )
 from supportops.modules.knowledge_documents.domain.models import (
     KnowledgeIndexProfile,
@@ -426,7 +435,7 @@ async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() 
     )
 
 
-async def _build_registry_with_stubs() -> tuple[Any, Any]:
+async def _build_registry_with_stubs() -> tuple[Any, Any, AsyncSession]:
     llm_runtime = create_worker_llm_runtime(
         provider_name="mock",
         openai_api_key=None,
@@ -481,11 +490,11 @@ async def _build_registry_with_stubs() -> tuple[Any, Any]:
         embedding_timeout_seconds=12,
     )
 
-    return registry, (llm_runtime, controlled_runtime)
+    return registry, (llm_runtime, controlled_runtime), session
 
 
 async def test_session_factory_registers_four_workflows() -> None:
-    registry, runtimes = await _build_registry_with_stubs()
+    registry, runtimes, session = await _build_registry_with_stubs()
     llm_runtime, controlled_runtime = runtimes
 
     try:
@@ -523,13 +532,22 @@ async def test_session_factory_registers_four_workflows() -> None:
             human_approved_executor,
             HumanApprovedSupportWorkflowExecutor,
         )
+        assert not hasattr(controlled_executor, "_resume_planner")
+        planner = human_approved_executor._resume_planner
+        assert isinstance(planner, HumanApprovedGraphResumePlanner)
+        approval_repo = planner._approval_request_repository
+        tool_repo = planner._tool_call_query_repository
+        assert type(approval_repo) is SqlAlchemyApprovalRequestRepository
+        assert type(tool_repo) is SqlAlchemyAgentToolCallQueryRepository
+        assert approval_repo._session is session
+        assert tool_repo._session is session
     finally:
         await controlled_runtime.close()
         await llm_runtime.close()
 
 
 async def test_session_factory_rejects_unsupported_workflow_version() -> None:
-    registry, runtimes = await _build_registry_with_stubs()
+    registry, runtimes, _session = await _build_registry_with_stubs()
     llm_runtime, controlled_runtime = runtimes
 
     try:
