@@ -11,6 +11,9 @@ from supportops.modules.tickets.api.dependencies import (
     GetTicketDependency,
     ListTicketsDependency,
 )
+from supportops.modules.tickets.api.escalation_router import (
+    router as ticket_escalations_router,
+)
 from supportops.modules.tickets.api.pagination import (
     decode_ticket_cursor,
     encode_ticket_cursor,
@@ -24,13 +27,16 @@ from supportops.modules.tickets.api.schemas import (
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 100
 
-router = APIRouter(
+tickets_router = APIRouter(
     prefix="/workspaces/{workspace_id}/tickets",
     tags=["tickets"],
 )
+router = APIRouter()
+router.include_router(tickets_router)
+router.include_router(ticket_escalations_router)
 
 
-@router.post(
+@tickets_router.post(
     "",
     response_model=TicketResponse,
     status_code=status.HTTP_201_CREATED,
@@ -61,7 +67,7 @@ async def create_ticket(
     return TicketResponse.from_domain(result.ticket)
 
 
-@router.get(
+@tickets_router.get(
     "/{ticket_id}",
     response_model=TicketResponse,
 )
@@ -80,7 +86,7 @@ async def get_ticket(
     return TicketResponse.from_domain(ticket)
 
 
-@router.get(
+@tickets_router.get(
     "",
     response_model=TicketListResponse,
 )
