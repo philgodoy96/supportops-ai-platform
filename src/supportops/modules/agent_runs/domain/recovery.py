@@ -20,7 +20,8 @@ class RecoverExpiredAgentRunCommand:
     """Values required to recover one expired AgentRun ownership."""
 
     recovered_at: datetime
-    retry_delay_seconds: float
+    retry_base_delay_seconds: float
+    retry_maximum_delay_seconds: float
     error_code: str
     error_summary: str
 
@@ -30,9 +31,19 @@ class RecoverExpiredAgentRunCommand:
             field_name="recovered_at",
         )
 
-        if self.retry_delay_seconds <= 0:
+        if self.retry_base_delay_seconds <= 0:
             raise ValueError(
-                "retry_delay_seconds must be greater than zero.",
+                "retry_base_delay_seconds must be greater than zero.",
+            )
+
+        if self.retry_maximum_delay_seconds <= 0:
+            raise ValueError(
+                "retry_maximum_delay_seconds must be greater than zero.",
+            )
+
+        if self.retry_maximum_delay_seconds < self.retry_base_delay_seconds:
+            raise ValueError(
+                "retry_maximum_delay_seconds must not be smaller than retry_base_delay_seconds.",
             )
 
         _validate_error_text(
@@ -75,6 +86,39 @@ class RecoverExpiredAgentRunResult:
             raise ValueError(
                 "Recovered AgentRun must not retain lease expiration.",
             )
+
+
+def bounded_exponential_retry_delay_seconds(
+    *,
+    failure_number: int,
+    base_delay_seconds: float,
+    maximum_delay_seconds: float,
+) -> float:
+    """Return the bounded exponential delay for one failure ordinal."""
+
+    if failure_number < 1:
+        raise ValueError("failure_number must be at least one.")
+
+    if base_delay_seconds <= 0:
+        raise ValueError(
+            "base_delay_seconds must be greater than zero.",
+        )
+
+    if maximum_delay_seconds <= 0:
+        raise ValueError(
+            "maximum_delay_seconds must be greater than zero.",
+        )
+
+    if maximum_delay_seconds < base_delay_seconds:
+        raise ValueError(
+            "maximum_delay_seconds must not be smaller than base_delay_seconds.",
+        )
+
+    exponential_delay = base_delay_seconds * (2.0 ** (failure_number - 1))
+    return min(
+        exponential_delay,
+        maximum_delay_seconds,
+    )
 
 
 def _validate_error_text(

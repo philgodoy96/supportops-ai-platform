@@ -122,7 +122,7 @@ async def persist_ticket_and_run(
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=created_at,
     )
 
@@ -358,6 +358,7 @@ async def test_claim_excludes_terminal_and_exhausted_runs(
             run,
             status=AgentRunStatus.RETRY_SCHEDULED,
             attempt_count=3,
+            retryable_failure_count=3,
             first_started_at=_BASE_TIMESTAMP + timedelta(minutes=1),
             last_error_code="retryable_executor_failure",
             last_error_summary=("The configured executor reported a retryable failure."),

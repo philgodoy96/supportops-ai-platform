@@ -53,7 +53,8 @@ class AgentRunInspectionResponse(BaseModel):
     workflow_version: str
     status: ControlledSupportInspectionStatus
     attempt_count: int
-    max_attempts: int
+    retryable_failure_count: int
+    max_retryable_failures: int
     created_at: datetime
     first_started_at: datetime | None
     completed_at: datetime | None
@@ -74,7 +75,8 @@ class AgentRunInspectionResponse(BaseModel):
             workflow_version=value.workflow_version,
             status=value.status,
             attempt_count=value.attempt_count,
-            max_attempts=value.max_attempts,
+            retryable_failure_count=value.retryable_failure_count,
+            max_retryable_failures=value.max_retryable_failures,
             created_at=value.created_at,
             first_started_at=value.first_started_at,
             completed_at=value.completed_at,

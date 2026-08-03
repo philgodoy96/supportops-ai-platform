@@ -66,7 +66,7 @@ def _create_initial_agent_run(ticket: Ticket) -> AgentRun:
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_TIMESTAMP,
     )
 
@@ -147,7 +147,7 @@ def test_ticket_processing_run_response_maps_domain_entity() -> None:
     assert response.workflow_version == (DETERMINISTIC_BASELINE_WORKFLOW_VERSION)
     assert response.workflow_version == "deterministic-baseline-v1"
     assert "attempt_count" not in payload
-    assert "max_attempts" not in payload
+    assert "max_retryable_failures" not in payload
     assert "lease_token" not in payload
 
 

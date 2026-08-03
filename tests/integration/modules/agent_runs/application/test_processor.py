@@ -113,7 +113,7 @@ async def persist_workspace_ticket_and_run(
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_BASE_TIMESTAMP,
     )
 

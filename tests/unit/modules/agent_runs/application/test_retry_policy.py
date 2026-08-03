@@ -17,7 +17,7 @@ def create_policy() -> AgentRunRetryPolicy:
 
 
 @pytest.mark.parametrize(
-    ("attempt_number", "expected_delay"),
+    ("failure_number", "expected_delay"),
     [
         (1, 2.0),
         (2, 4.0),
@@ -27,20 +27,20 @@ def create_policy() -> AgentRunRetryPolicy:
     ],
 )
 def test_retry_delay_grows_exponentially(
-    attempt_number: int,
+    failure_number: int,
     expected_delay: float,
 ) -> None:
     policy = create_policy()
 
-    delay = policy.delay_seconds_for_attempt(
-        attempt_number=attempt_number,
+    delay = policy.delay_seconds_for_failure(
+        failure_number=failure_number,
     )
 
     assert delay == expected_delay
 
 
 @pytest.mark.parametrize(
-    "attempt_number",
+    "failure_number",
     [
         6,
         7,
@@ -49,75 +49,91 @@ def test_retry_delay_grows_exponentially(
     ],
 )
 def test_retry_delay_is_bounded_by_maximum(
-    attempt_number: int,
+    failure_number: int,
 ) -> None:
     policy = create_policy()
 
-    delay = policy.delay_seconds_for_attempt(
-        attempt_number=attempt_number,
+    delay = policy.delay_seconds_for_failure(
+        failure_number=failure_number,
     )
 
     assert delay == 60.0
 
 
 @pytest.mark.parametrize(
-    "attempt_number",
+    "failure_number",
     [
         0,
         -1,
     ],
 )
-def test_retry_delay_rejects_invalid_attempt_number(
-    attempt_number: int,
+def test_retry_delay_rejects_invalid_failure_number(
+    failure_number: int,
 ) -> None:
     policy = create_policy()
 
     with pytest.raises(
         ValueError,
-        match=escape("attempt_number must be at least one."),
+        match=escape("failure_number must be at least one."),
     ):
-        policy.delay_seconds_for_attempt(
-            attempt_number=attempt_number,
+        policy.delay_seconds_for_failure(
+            failure_number=failure_number,
         )
 
 
 @pytest.mark.parametrize(
-    ("attempt_count", "max_attempts", "expected"),
+    ("retryable_failure_count", "max_retryable_failures", "expected"),
     [
         (0, 3, True),
         (1, 3, True),
-        (2, 3, True),
-        (3, 3, False),
+        (2, 3, False),
+        (0, 1, False),
         (1, 1, False),
     ],
 )
-def test_retry_eligibility_respects_attempt_budget(
-    attempt_count: int,
-    max_attempts: int,
+def test_retry_eligibility_respects_failure_budget(
+    retryable_failure_count: int,
+    max_retryable_failures: int,
     expected: bool,
 ) -> None:
     policy = create_policy()
 
     assert (
-        policy.can_retry(
-            attempt_count=attempt_count,
-            max_attempts=max_attempts,
+        policy.can_retry_after_failure(
+            retryable_failure_count=retryable_failure_count,
+            max_retryable_failures=max_retryable_failures,
         )
         is expected
     )
 
 
 @pytest.mark.parametrize(
-    ("attempt_count", "max_attempts", "expected_message"),
+    (
+        "retryable_failure_count",
+        "max_retryable_failures",
+        "expected_message",
+    ),
     [
-        (-1, 3, "attempt_count must not be negative."),
-        (0, 0, "max_attempts must be at least one."),
-        (4, 3, "attempt_count must not exceed max_attempts."),
+        (
+            -1,
+            3,
+            "retryable_failure_count must not be negative.",
+        ),
+        (
+            0,
+            0,
+            "max_retryable_failures must be at least one.",
+        ),
+        (
+            4,
+            3,
+            ("retryable_failure_count must not exceed max_retryable_failures."),
+        ),
     ],
 )
-def test_retry_eligibility_rejects_invalid_attempt_budget(
-    attempt_count: int,
-    max_attempts: int,
+def test_retry_eligibility_rejects_invalid_failure_budget(
+    retryable_failure_count: int,
+    max_retryable_failures: int,
     expected_message: str,
 ) -> None:
     policy = create_policy()
@@ -126,9 +142,9 @@ def test_retry_eligibility_rejects_invalid_attempt_budget(
         ValueError,
         match=escape(expected_message),
     ):
-        policy.can_retry(
-            attempt_count=attempt_count,
-            max_attempts=max_attempts,
+        policy.can_retry_after_failure(
+            retryable_failure_count=retryable_failure_count,
+            max_retryable_failures=max_retryable_failures,
         )
 
 
@@ -184,14 +200,14 @@ def test_retry_policy_accepts_equal_base_and_maximum_delay() -> None:
     )
 
     assert (
-        policy.delay_seconds_for_attempt(
-            attempt_number=1,
+        policy.delay_seconds_for_failure(
+            failure_number=1,
         )
         == 5.0
     )
     assert (
-        policy.delay_seconds_for_attempt(
-            attempt_number=10,
+        policy.delay_seconds_for_failure(
+            failure_number=10,
         )
         == 5.0
     )

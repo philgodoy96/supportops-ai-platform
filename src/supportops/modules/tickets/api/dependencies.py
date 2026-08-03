@@ -51,7 +51,7 @@ def get_create_ticket(
         agent_run_repository=SqlAlchemyAgentRunRepository(session),
         transaction_manager=SqlAlchemyTransactionManager(session),
         workflow_version=(state.settings.ticket_processing_workflow_version),
-        max_attempts=state.settings.worker_max_attempts,
+        max_retryable_failures=(state.settings.worker_max_retryable_failures),
     )
 
 

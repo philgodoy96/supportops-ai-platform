@@ -130,7 +130,8 @@ def create_ticket() -> Ticket:
 def create_claim(
     *,
     attempt_count: int = 1,
-    max_attempts: int = 3,
+    retryable_failure_count: int = 0,
+    max_retryable_failures: int = 3,
 ) -> AgentRunClaim:
     initial_run = AgentRun.create_initial(
         agent_run_id=_RUN_ID,
@@ -143,13 +144,14 @@ def create_claim(
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         now=_NOW - timedelta(minutes=1),
     )
     running_run = replace(
         initial_run,
         status=AgentRunStatus.RUNNING,
         attempt_count=attempt_count,
+        retryable_failure_count=retryable_failure_count,
         lease_owner="worker-a",
         lease_token=_LEASE_TOKEN,
         lease_expires_at=_NOW + timedelta(seconds=45),
@@ -359,8 +361,9 @@ async def test_retryable_error_fails_when_budget_is_exhausted() -> None:
 
     await processor.execute(
         create_claim(
-            attempt_count=3,
-            max_attempts=3,
+            attempt_count=5,
+            retryable_failure_count=2,
+            max_retryable_failures=3,
         ),
     )
 
@@ -368,6 +371,46 @@ async def test_retryable_error_fails_when_budget_is_exhausted() -> None:
     assert command.outcome is AgentRunAttemptOutcome.RETRYABLE_FAILURE
     assert command.disposition is AgentRunFailureDisposition.FAILED
     assert command.retry_available_at is None
+
+
+async def test_retryable_error_uses_failure_count_not_attempt_count() -> None:
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(
+        transaction_manager=transaction_manager,
+        error=RetryableAgentRunExecutionError(
+            error_code="provider_unavailable",
+            error_summary="The processing provider is temporarily unavailable.",
+        ),
+    )
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+    agent_run_repository = AsyncMock()
+    agent_run_repository.record_failure.return_value = AgentRunTransitionResult.APPLIED
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=executor,
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+    )
+
+    await processor.execute(
+        create_claim(
+            attempt_count=10,
+            retryable_failure_count=1,
+            max_retryable_failures=3,
+        ),
+    )
+
+    command = agent_run_repository.record_failure.await_args.args[0]
+    assert command.disposition is AgentRunFailureDisposition.RETRY_SCHEDULED
+    assert command.retry_available_at == _FINISHED_AT + timedelta(seconds=4)
 
 
 async def test_terminal_error_fails_without_retry() -> None:

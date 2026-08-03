@@ -2,6 +2,10 @@
 
 from dataclasses import dataclass
 
+from supportops.modules.agent_runs.domain.recovery import (
+    bounded_exponential_retry_delay_seconds,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentRunRetryPolicy:
@@ -26,49 +30,46 @@ class AgentRunRetryPolicy:
                 "maximum_delay_seconds must not be smaller than base_delay_seconds.",
             )
 
-    def can_retry(
+    def can_retry_after_failure(
         self,
         *,
-        attempt_count: int,
-        max_attempts: int,
+        retryable_failure_count: int,
+        max_retryable_failures: int,
     ) -> bool:
-        """Return whether another execution attempt may be started."""
+        """Return whether another claim remains after counting this failure."""
 
-        _validate_attempt_budget(
-            attempt_count=attempt_count,
-            max_attempts=max_attempts,
+        _validate_failure_budget(
+            retryable_failure_count=retryable_failure_count,
+            max_retryable_failures=max_retryable_failures,
         )
-        return attempt_count < max_attempts
+        return (retryable_failure_count + 1) < max_retryable_failures
 
-    def delay_seconds_for_attempt(
+    def delay_seconds_for_failure(
         self,
         *,
-        attempt_number: int,
+        failure_number: int,
     ) -> float:
-        """Return the bounded delay after a failed attempt."""
+        """Return the bounded delay after a retryable failure ordinal."""
 
-        if attempt_number < 1:
-            raise ValueError("attempt_number must be at least one.")
-
-        exponential_delay = self.base_delay_seconds * (2.0 ** (attempt_number - 1))
-        return min(
-            exponential_delay,
-            self.maximum_delay_seconds,
+        return bounded_exponential_retry_delay_seconds(
+            failure_number=failure_number,
+            base_delay_seconds=self.base_delay_seconds,
+            maximum_delay_seconds=self.maximum_delay_seconds,
         )
 
 
-def _validate_attempt_budget(
+def _validate_failure_budget(
     *,
-    attempt_count: int,
-    max_attempts: int,
+    retryable_failure_count: int,
+    max_retryable_failures: int,
 ) -> None:
-    if attempt_count < 0:
-        raise ValueError("attempt_count must not be negative.")
+    if retryable_failure_count < 0:
+        raise ValueError("retryable_failure_count must not be negative.")
 
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be at least one.")
+    if max_retryable_failures < 1:
+        raise ValueError("max_retryable_failures must be at least one.")
 
-    if attempt_count > max_attempts:
+    if retryable_failure_count > max_retryable_failures:
         raise ValueError(
-            "attempt_count must not exceed max_attempts.",
+            "retryable_failure_count must not exceed max_retryable_failures.",
         )

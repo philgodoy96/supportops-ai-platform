@@ -74,7 +74,11 @@ class AgentRunRecord(Base):
         Integer,
         nullable=False,
     )
-    max_attempts: Mapped[int] = mapped_column(
+    retryable_failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    max_retryable_failures: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
     )
@@ -168,12 +172,16 @@ class AgentRunRecord(Base):
             name="agent_run_attempt_count_non_negative",
         ),
         CheckConstraint(
-            "max_attempts >= 1",
-            name="agent_run_max_attempts_positive",
+            "retryable_failure_count >= 0",
+            name="agent_run_retryable_failure_count_non_negative",
         ),
         CheckConstraint(
-            "attempt_count <= max_attempts",
-            name="agent_run_attempt_limit",
+            "max_retryable_failures >= 1",
+            name="agent_run_max_retryable_failures_positive",
+        ),
+        CheckConstraint(
+            "retryable_failure_count <= max_retryable_failures",
+            name="agent_run_retryable_failure_limit",
         ),
         CheckConstraint(
             (
@@ -338,7 +346,8 @@ class AgentRunRecord(Base):
             status=agent_run.status.value,
             available_at=agent_run.available_at,
             attempt_count=agent_run.attempt_count,
-            max_attempts=agent_run.max_attempts,
+            retryable_failure_count=agent_run.retryable_failure_count,
+            max_retryable_failures=agent_run.max_retryable_failures,
             lease_owner=agent_run.lease_owner,
             lease_token=agent_run.lease_token,
             lease_expires_at=agent_run.lease_expires_at,
@@ -365,7 +374,8 @@ class AgentRunRecord(Base):
             status=AgentRunStatus(self.status),
             available_at=self.available_at,
             attempt_count=self.attempt_count,
-            max_attempts=self.max_attempts,
+            retryable_failure_count=self.retryable_failure_count,
+            max_retryable_failures=self.max_retryable_failures,
             lease_owner=self.lease_owner,
             lease_token=self.lease_token,
             lease_expires_at=self.lease_expires_at,

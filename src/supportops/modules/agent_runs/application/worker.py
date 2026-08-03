@@ -123,15 +123,12 @@ class RunAgentWorkerCycle:
     async def _recover_one_expired_run(self) -> bool:
         recovered_at = self._utc_now()
 
-        retry_delay_seconds = self._retry_policy.delay_seconds_for_attempt(
-            attempt_number=1,
-        )
-
         async with self._transaction_manager.transaction():
             result = await self._agent_run_repository.recover_next_expired(
                 RecoverExpiredAgentRunCommand(
                     recovered_at=recovered_at,
-                    retry_delay_seconds=retry_delay_seconds,
+                    retry_base_delay_seconds=(self._retry_policy.base_delay_seconds),
+                    retry_maximum_delay_seconds=(self._retry_policy.maximum_delay_seconds),
                     error_code=_EXPIRED_LEASE_ERROR_CODE,
                     error_summary=_EXPIRED_LEASE_ERROR_SUMMARY,
                 ),

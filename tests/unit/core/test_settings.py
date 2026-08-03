@@ -30,7 +30,7 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_WORKER_LEASE_SECONDS",
     "SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS",
     "SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS",
-    "SUPPORTOPS_WORKER_MAX_ATTEMPTS",
+    "SUPPORTOPS_WORKER_MAX_RETRYABLE_FAILURES",
     "SUPPORTOPS_WORKER_RETRY_BASE_SECONDS",
     "SUPPORTOPS_WORKER_RETRY_MAX_SECONDS",
     "SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION",
@@ -101,7 +101,7 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.worker_lease_seconds == 150.0
     assert settings.worker_execution_timeout_seconds == 135.0
     assert settings.worker_shutdown_grace_seconds == 10.0
-    assert settings.worker_max_attempts == 3
+    assert settings.worker_max_retryable_failures == 3
     assert settings.worker_retry_base_seconds == 2.0
     assert settings.worker_retry_max_seconds == 60.0
     assert settings.ticket_processing_workflow_version == "controlled-support-v1"
@@ -136,7 +136,8 @@ def test_settings_load_worker_configuration_from_environment(
     monkeypatch.setenv("SUPPORTOPS_WORKER_LEASE_SECONDS", "80")
     monkeypatch.setenv("SUPPORTOPS_WORKER_EXECUTION_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("SUPPORTOPS_WORKER_SHUTDOWN_GRACE_SECONDS", "15")
-    monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_ATTEMPTS", "9")
+    monkeypatch.setenv("SUPPORTOPS_WORKER_MAX_RETRYABLE_FAILURES", "5")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_BASE_SECONDS", "4")
     monkeypatch.setenv("SUPPORTOPS_WORKER_RETRY_MAX_SECONDS", "120")
     monkeypatch.setenv(
@@ -163,7 +164,7 @@ def test_settings_load_worker_configuration_from_environment(
     assert settings.worker_lease_seconds == 80.0
     assert settings.worker_execution_timeout_seconds == 60.0
     assert settings.worker_shutdown_grace_seconds == 15.0
-    assert settings.worker_max_attempts == 5
+    assert settings.worker_max_retryable_failures == 5
     assert settings.worker_retry_base_seconds == 4.0
     assert settings.worker_retry_max_seconds == 120.0
 
@@ -564,8 +565,8 @@ def test_settings_reject_blank_required_strings(
         ("worker_execution_timeout_seconds", 1801),
         ("worker_shutdown_grace_seconds", -1),
         ("worker_shutdown_grace_seconds", 301),
-        ("worker_max_attempts", 0),
-        ("worker_max_attempts", 101),
+        ("worker_max_retryable_failures", 0),
+        ("worker_max_retryable_failures", 101),
         ("worker_retry_base_seconds", 0),
         ("worker_retry_base_seconds", 3601),
         ("worker_retry_max_seconds", 0),

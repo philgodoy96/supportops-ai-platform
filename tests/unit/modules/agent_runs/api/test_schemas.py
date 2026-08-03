@@ -81,7 +81,7 @@ def create_agent_run() -> AgentRun:
         ingestion_request_id=_INGESTION_REQUEST_ID,
         correlation_id=_CORRELATION_ID,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
 
@@ -210,7 +210,8 @@ def test_agent_run_response_projects_safe_fields() -> None:
     assert response.classification.schema_version == TICKET_CLASSIFICATION_SCHEMA_VERSION
     assert response.classification.created_at == _NOW
     assert response.attempt_count == 1
-    assert response.max_attempts == 3
+    assert response.retryable_failure_count == 0
+    assert response.max_retryable_failures == 3
     assert response.correlation_id == _CORRELATION_ID
     assert response.last_error is not None
     assert response.last_error.code == "unexpected_executor_failure"
@@ -241,6 +242,8 @@ def test_agent_run_response_omits_internal_fields() -> None:
     assert "lease_token" not in payload
     assert "lease_expires_at" not in payload
     assert "ingestion_request_id" not in payload
+    assert "max_attempts" not in payload
+    assert "execution_request_id" not in payload
 
 
 def test_agent_run_response_requires_complete_safe_error_pair() -> None:

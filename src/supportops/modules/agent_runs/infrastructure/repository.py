@@ -21,6 +21,7 @@ from supportops.modules.agent_runs.domain.recovery import (
     ExpiredAgentRunDisposition,
     RecoverExpiredAgentRunCommand,
     RecoverExpiredAgentRunResult,
+    bounded_exponential_retry_delay_seconds,
 )
 from supportops.modules.agent_runs.domain.repositories import (
     AgentRunRepository,
@@ -35,6 +36,11 @@ from supportops.modules.agent_runs.infrastructure.models import (
     AgentRunAttemptRecord,
     AgentRunRecord,
 )
+
+_FAILURE_BUDGET_OUTCOMES = {
+    AgentRunAttemptOutcome.RETRYABLE_FAILURE,
+    AgentRunAttemptOutcome.TIMED_OUT,
+}
 
 
 class SqlAlchemyAgentRunRepository(AgentRunRepository):
@@ -102,7 +108,7 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
             .where(
                 AgentRunRecord.status.in_(("queued", "retry_scheduled")),
                 AgentRunRecord.available_at <= command.claimed_at,
-                AgentRunRecord.attempt_count < AgentRunRecord.max_attempts,
+                (AgentRunRecord.retryable_failure_count < AgentRunRecord.max_retryable_failures),
             )
             .order_by(
                 AgentRunRecord.available_at.asc(),
@@ -224,10 +230,30 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
                 "Active AgentRun attempt was not found for the current lease.",
             )
 
+        consumes_failure_budget = command.outcome in _FAILURE_BUDGET_OUTCOMES
+        if consumes_failure_budget:
+            prospective_failure_count = record.retryable_failure_count + 1
+        else:
+            prospective_failure_count = record.retryable_failure_count
+
+        expected_disposition = _expected_failure_disposition(
+            consumes_failure_budget=consumes_failure_budget,
+            prospective_failure_count=prospective_failure_count,
+            max_retryable_failures=record.max_retryable_failures,
+        )
+        if command.disposition is not expected_disposition:
+            raise RuntimeError(
+                "FailAgentRunCommand disposition does not match the "
+                "prospective retryable failure budget.",
+            )
+
         attempt.finished_at = command.finished_at
         attempt.outcome = command.outcome.value
         attempt.error_code = command.error_code
         attempt.error_summary = command.error_summary
+
+        if consumes_failure_budget:
+            record.retryable_failure_count = prospective_failure_count
 
         record.lease_owner = None
         record.lease_token = None
@@ -289,11 +315,14 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
                 "Active AgentRun attempt was not found for the expired lease.",
             )
 
+        prospective_failure_count = record.retryable_failure_count + 1
+
         attempt.finished_at = command.recovered_at
         attempt.outcome = AgentRunAttemptOutcome.LEASE_EXPIRED.value
         attempt.error_code = command.error_code
         attempt.error_summary = command.error_summary
 
+        record.retryable_failure_count = prospective_failure_count
         record.lease_owner = None
         record.lease_token = None
         record.lease_expires_at = None
@@ -301,10 +330,15 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
         record.last_error_summary = command.error_summary
         record.updated_at = command.recovered_at
 
-        if record.attempt_count < record.max_attempts:
+        if prospective_failure_count < record.max_retryable_failures:
+            retry_delay_seconds = bounded_exponential_retry_delay_seconds(
+                failure_number=prospective_failure_count,
+                base_delay_seconds=command.retry_base_delay_seconds,
+                maximum_delay_seconds=(command.retry_maximum_delay_seconds),
+            )
             record.status = AgentRunStatus.RETRY_SCHEDULED.value
             record.available_at = command.recovered_at + timedelta(
-                seconds=command.retry_delay_seconds,
+                seconds=retry_delay_seconds,
             )
             record.completed_at = None
             disposition = ExpiredAgentRunDisposition.RETRY_SCHEDULED
@@ -342,3 +376,18 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
         )
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
+
+
+def _expected_failure_disposition(
+    *,
+    consumes_failure_budget: bool,
+    prospective_failure_count: int,
+    max_retryable_failures: int,
+) -> AgentRunFailureDisposition:
+    if not consumes_failure_budget:
+        return AgentRunFailureDisposition.FAILED
+
+    if prospective_failure_count < max_retryable_failures:
+        return AgentRunFailureDisposition.RETRY_SCHEDULED
+
+    return AgentRunFailureDisposition.FAILED

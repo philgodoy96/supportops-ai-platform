@@ -73,7 +73,7 @@ _FIRST_EXECUTION_REQUEST_ID = UUID(
 async def persist_workspace_ticket_and_run(
     session: AsyncSession,
     *,
-    max_attempts: int = 3,
+    max_retryable_failures: int = 3,
 ) -> AgentRun:
     """Persist one queued AgentRun with its workspace and ticket."""
 
@@ -105,7 +105,7 @@ async def persist_workspace_ticket_and_run(
         ingestion_request_id=ticket.ingestion_request_id,
         correlation_id=ticket.correlation_id,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=max_attempts,
+        max_retryable_failures=max_retryable_failures,
         now=_BASE_TIMESTAMP,
     )
 
@@ -480,7 +480,7 @@ async def test_exhausted_retryable_failure_marks_run_failed(
     async with postgresql_session_factory() as setup_session:
         await persist_workspace_ticket_and_run(
             setup_session,
-            max_attempts=1,
+            max_retryable_failures=1,
         )
 
     async with postgresql_session_factory() as claim_session:
@@ -495,7 +495,7 @@ async def test_exhausted_retryable_failure_marks_run_failed(
         )
 
     assert claim.agent_run.attempt_count == 1
-    assert claim.agent_run.max_attempts == 1
+    assert claim.agent_run.max_retryable_failures == 1
 
     async with postgresql_session_factory() as failure_session:
         result = await record_failure_and_commit(

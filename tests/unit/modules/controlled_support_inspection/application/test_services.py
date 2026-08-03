@@ -98,7 +98,7 @@ def _agent_run(
         ingestion_request_id=UUID("40000000-0000-4000-8000-000000000004"),
         correlation_id=UUID("50000000-0000-4000-8000-000000000005"),
         workflow_version=workflow_version,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
 

@@ -124,7 +124,7 @@ def create_agent_run() -> AgentRun:
         ingestion_request_id=_INGESTION_REQUEST_ID,
         correlation_id=_CORRELATION_ID,
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         agent_run_id=_AGENT_RUN_ID,
         now=_NOW,
     )

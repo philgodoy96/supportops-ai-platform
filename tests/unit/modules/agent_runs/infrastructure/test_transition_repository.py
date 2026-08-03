@@ -72,7 +72,7 @@ def create_running_run_record() -> AgentRunRecord:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_STARTED_AT - timedelta(minutes=1),
     )
 
@@ -86,7 +86,8 @@ def create_running_run_record() -> AgentRunRecord:
         status=AgentRunStatus.RUNNING,
         available_at=initial_run.available_at,
         attempt_count=1,
-        max_attempts=initial_run.max_attempts,
+        retryable_failure_count=0,
+        max_retryable_failures=initial_run.max_retryable_failures,
         lease_owner="worker-a",
         lease_token=_LEASE_TOKEN,
         lease_expires_at=_STARTED_AT + timedelta(seconds=45),
@@ -351,9 +352,8 @@ async def test_record_failure_marks_terminal_run_failed() -> None:
 
 async def test_record_failure_can_fail_exhausted_retryable_run() -> None:
     run_record = create_running_run_record()
-    run_record.attempt_count = run_record.max_attempts
+    run_record.retryable_failure_count = run_record.max_retryable_failures - 1
     attempt_record = create_active_attempt_record()
-    attempt_record.attempt_number = run_record.max_attempts
     session = create_session(
         run_record=run_record,
         attempt_record=attempt_record,
@@ -376,7 +376,93 @@ async def test_record_failure_can_fail_exhausted_retryable_run() -> None:
     assert result is AgentRunTransitionResult.APPLIED
     assert run_record.status == AgentRunStatus.FAILED.value
     assert run_record.completed_at == _FINISHED_AT
+    assert run_record.retryable_failure_count == run_record.max_retryable_failures
     assert attempt_record.outcome == AgentRunAttemptOutcome.RETRYABLE_FAILURE.value
+
+
+async def test_record_failure_increments_retryable_failure_count() -> None:
+    run_record = create_running_run_record()
+    attempt_record = create_active_attempt_record()
+    session = create_session(
+        run_record=run_record,
+        attempt_record=attempt_record,
+    )
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.record_failure(
+        FailAgentRunCommand(
+            agent_run_id=_RUN_ID,
+            lease_token=_LEASE_TOKEN,
+            finished_at=_FINISHED_AT,
+            outcome=AgentRunAttemptOutcome.RETRYABLE_FAILURE,
+            disposition=AgentRunFailureDisposition.RETRY_SCHEDULED,
+            error_code="unexpected_executor_failure",
+            error_summary=("The executor failed unexpectedly and may be retried."),
+            retry_available_at=_FINISHED_AT + timedelta(seconds=2),
+        ),
+    )
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert run_record.retryable_failure_count == 1
+    assert run_record.status == AgentRunStatus.RETRY_SCHEDULED.value
+
+
+async def test_terminal_failure_does_not_increment_failure_count() -> None:
+    run_record = create_running_run_record()
+    attempt_record = create_active_attempt_record()
+    session = create_session(
+        run_record=run_record,
+        attempt_record=attempt_record,
+    )
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.record_failure(
+        FailAgentRunCommand(
+            agent_run_id=_RUN_ID,
+            lease_token=_LEASE_TOKEN,
+            finished_at=_FINISHED_AT,
+            outcome=AgentRunAttemptOutcome.TERMINAL_FAILURE,
+            disposition=AgentRunFailureDisposition.FAILED,
+            error_code="terminal_executor_failure",
+            error_summary=("The configured executor reported a terminal failure."),
+            retry_available_at=None,
+        ),
+    )
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert run_record.retryable_failure_count == 0
+    assert run_record.status == AgentRunStatus.FAILED.value
+
+
+async def test_record_failure_rejects_inconsistent_disposition() -> None:
+    run_record = create_running_run_record()
+    attempt_record = create_active_attempt_record()
+    session = create_session(
+        run_record=run_record,
+        attempt_record=attempt_record,
+    )
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    with pytest.raises(
+        RuntimeError,
+        match=("disposition does not match the prospective retryable failure budget"),
+    ):
+        await repository.record_failure(
+            FailAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_LEASE_TOKEN,
+                finished_at=_FINISHED_AT,
+                outcome=AgentRunAttemptOutcome.RETRYABLE_FAILURE,
+                disposition=AgentRunFailureDisposition.FAILED,
+                error_code="unexpected_executor_failure",
+                error_summary=("The executor failed unexpectedly and may be retried."),
+                retry_available_at=None,
+            ),
+        )
+
+    assert run_record.retryable_failure_count == 0
+    session.flush.assert_not_awaited()
+    session.commit.assert_not_awaited()
 
 
 async def test_record_failure_returns_lease_lost_for_stale_ownership() -> None:

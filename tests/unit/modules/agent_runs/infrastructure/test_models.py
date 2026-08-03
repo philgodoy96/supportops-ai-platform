@@ -38,7 +38,7 @@ def create_initial_run() -> AgentRun:
             "1038c98e-62fd-45df-9839-138f7105cb78",
         ),
         workflow_version=DETERMINISTIC_BASELINE_WORKFLOW_VERSION,
-        max_attempts=3,
+        max_retryable_failures=3,
         now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
     )
 
@@ -196,8 +196,9 @@ def test_agent_run_metadata_declares_expected_constraints() -> None:
         "uq_agent_runs_ticket_trigger",
         "ck_agent_runs_agent_run_status",
         "ck_agent_runs_agent_run_attempt_count_non_negative",
-        "ck_agent_runs_agent_run_max_attempts_positive",
-        "ck_agent_runs_agent_run_attempt_limit",
+        "ck_agent_runs_agent_run_retryable_failure_count_non_negative",
+        "ck_agent_runs_agent_run_max_retryable_failures_positive",
+        "ck_agent_runs_agent_run_retryable_failure_limit",
         "ck_agent_runs_agent_run_started_attempt_state",
         "ck_agent_runs_agent_run_lease_fields_complete",
         "ck_agent_runs_agent_run_lease_state",

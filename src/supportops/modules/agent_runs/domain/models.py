@@ -52,7 +52,8 @@ class AgentRun:
     status: AgentRunStatus
     available_at: datetime
     attempt_count: int
-    max_attempts: int
+    retryable_failure_count: int
+    max_retryable_failures: int
     lease_owner: str | None
     lease_token: UUID | None
     lease_expires_at: datetime | None
@@ -86,9 +87,10 @@ class AgentRun:
             self.available_at,
             field_name="available_at",
         )
-        _validate_attempt_counts(
+        _validate_retry_budget(
             attempt_count=self.attempt_count,
-            max_attempts=self.max_attempts,
+            retryable_failure_count=self.retryable_failure_count,
+            max_retryable_failures=self.max_retryable_failures,
         )
         _validate_optional_bounded_text(
             self.lease_owner,
@@ -140,7 +142,7 @@ class AgentRun:
         ingestion_request_id: UUID,
         correlation_id: UUID,
         workflow_version: str,
-        max_attempts: int,
+        max_retryable_failures: int,
         agent_run_id: UUID | None = None,
         now: datetime | None = None,
     ) -> "AgentRun":
@@ -157,7 +159,8 @@ class AgentRun:
             status=AgentRunStatus.QUEUED,
             available_at=created_at,
             attempt_count=0,
-            max_attempts=max_attempts,
+            retryable_failure_count=0,
+            max_retryable_failures=max_retryable_failures,
             lease_owner=None,
             lease_token=None,
             lease_expires_at=None,
@@ -181,10 +184,10 @@ class AgentRun:
         }
 
     @property
-    def attempts_remaining(self) -> int:
-        """Return the number of attempts that may still be started."""
+    def retryable_failures_remaining(self) -> int:
+        """Return retryable failures that may still be consumed."""
 
-        return self.max_attempts - self.attempt_count
+        return self.max_retryable_failures - self.retryable_failure_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,20 +289,24 @@ def _validate_optional_attempt_outcome(
         )
 
 
-def _validate_attempt_counts(
+def _validate_retry_budget(
     *,
     attempt_count: int,
-    max_attempts: int,
+    retryable_failure_count: int,
+    max_retryable_failures: int,
 ) -> None:
     if attempt_count < 0:
         raise ValueError("attempt_count must not be negative.")
 
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be at least one.")
+    if retryable_failure_count < 0:
+        raise ValueError("retryable_failure_count must not be negative.")
 
-    if attempt_count > max_attempts:
+    if max_retryable_failures < 1:
+        raise ValueError("max_retryable_failures must be at least one.")
+
+    if retryable_failure_count > max_retryable_failures:
         raise ValueError(
-            "attempt_count must not exceed max_attempts.",
+            "retryable_failure_count must not exceed max_retryable_failures.",
         )
 
 

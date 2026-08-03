@@ -46,7 +46,7 @@ def _queued_run() -> AgentRun:
         ingestion_request_id=UUID("60000000-0000-4000-8000-000000000006"),
         correlation_id=UUID("70000000-0000-4000-8000-000000000007"),
         workflow_version=(CONTROLLED_SUPPORT_WORKFLOW_VERSION),
-        max_attempts=3,
+        max_retryable_failures=3,
         now=_NOW,
     )
 
