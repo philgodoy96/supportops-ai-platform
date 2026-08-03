@@ -82,6 +82,25 @@ GraphErrorCode = Annotated[
 ]
 
 
+class HumanApprovedSensitiveExecutionOutput(BaseModel):
+    """Safe projection of one granted escalate_ticket execution."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    escalation_id: UUID
+    ticket_id: UUID
+    target_queue: Literal[
+        "billing_operations",
+        "engineering_support",
+        "security_operations",
+        "support_operations",
+    ]
+    status: Literal["escalated"]
+
+
 class HumanApprovedDecisionKind(StrEnum):
     """Decision kinds understood by the human-approved graph."""
 
@@ -141,6 +160,8 @@ class HumanApprovedSupportGraphState(TypedDict):
     approval_request_id: str | None
     approval_status: str | None
     approval_expires_at: str | None
+
+    sensitive_execution_output: dict[str, JsonValue] | None
 
     recommendation_invocation_id: str | None
     recommendation_id: str | None
@@ -234,6 +255,8 @@ class HumanApprovedSupportGraphStateSnapshot(BaseModel):
     approval_request_id: UUID | None = None
     approval_status: HumanApprovalCheckpointStatus | None = None
     approval_expires_at: str | None = None
+
+    sensitive_execution_output: HumanApprovedSensitiveExecutionOutput | None = None
 
     recommendation_invocation_id: UUID | None = None
     recommendation_id: UUID | None = None
@@ -344,6 +367,16 @@ class HumanApprovedSupportGraphStateSnapshot(BaseModel):
             raise ValueError(
                 "Approval checkpoint fields require a sensitive proposal.",
             )
+
+        if self.sensitive_execution_output is not None:
+            if self.approval_status is not HumanApprovalCheckpointStatus.APPROVED:
+                raise ValueError(
+                    "sensitive_execution_output requires approved status.",
+                )
+            if self.proposed_tool_name != "escalate_ticket" or self.proposed_tool_version != 1:
+                raise ValueError(
+                    "sensitive_execution_output requires escalate_ticket v1.",
+                )
 
         if self.recommendation_invocation_id is not None and self.decision_kind is None:
             raise ValueError(

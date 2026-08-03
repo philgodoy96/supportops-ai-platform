@@ -30,3 +30,10 @@ def test_repository_exposes_approval_outcome_persistence() -> None:
             None,
         )
     )
+    assert callable(
+        getattr(
+            SqlAlchemyAgentToolCallExecutionRepository,
+            "save_granted_execution_success",
+            None,
+        )
+    )

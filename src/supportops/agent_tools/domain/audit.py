@@ -277,6 +277,55 @@ class AgentToolCall:
             finished_at=decided_at,
         )
 
+    def complete_granted_execution_success(
+        self,
+        *,
+        executed_by_agent_run_attempt_id: UUID,
+        execution_started_at: datetime,
+        finished_at: datetime,
+        safe_output: Mapping[str, JsonValue],
+    ) -> "AgentToolCall":
+        """Transition a pending sensitive proposal to granted success."""
+
+        if self.status is not AgentToolCallStatus.PENDING_APPROVAL:
+            raise ValueError(
+                "Only pending approval proposals can complete granted execution.",
+            )
+
+        if not isinstance(executed_by_agent_run_attempt_id, UUID):
+            raise TypeError(
+                "executed_by_agent_run_attempt_id must be a UUID.",
+            )
+
+        _validate_utc_timestamp(
+            execution_started_at,
+            field_name="execution_started_at",
+        )
+        _validate_utc_timestamp(
+            finished_at,
+            field_name="finished_at",
+        )
+
+        if finished_at < execution_started_at:
+            raise ValueError(
+                "finished_at must not precede execution_started_at.",
+            )
+
+        latency_ms = int(
+            (finished_at - execution_started_at).total_seconds() * 1_000,
+        )
+
+        return replace(
+            self,
+            status=AgentToolCallStatus.SUCCEEDED,
+            executed_by_agent_run_attempt_id=(executed_by_agent_run_attempt_id),
+            execution_started_at=execution_started_at,
+            finished_at=finished_at,
+            latency_ms=latency_ms,
+            safe_output=safe_output,
+            error_code=None,
+        )
+
 
 def _validate_lifecycle_outcome(
     tool_call: AgentToolCall,

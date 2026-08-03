@@ -16,6 +16,9 @@ from supportops.agent_graph.application.sensitive_proposal import (
     SensitiveProposalCommand,
     SensitiveProposalService,
 )
+from supportops.agent_graph.application.sensitive_tool_execution import (
+    SensitiveToolExecutionNode,
+)
 from supportops.agent_graph.domain.human_approved_routing import (
     select_human_approved_support_route,
 )
@@ -89,6 +92,7 @@ class HumanApprovedSupportWorkflowNodes:
     decision_executor: HumanApprovedDecisionExecutor
     sensitive_tool_registry: SensitiveToolRegistry
     sensitive_proposal_service: SensitiveProposalService
+    sensitive_tool_execution: SensitiveToolExecutionNode
 
     async def load_run_context(
         self,
@@ -338,12 +342,20 @@ class HumanApprovedSupportWorkflowNodes:
     async def execute_sensitive_tool(
         self,
         state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Prevent sensitive execution before persisted grants exist."""
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Execute one approved escalation through the grant-backed adapter."""
 
-        raise TerminalAgentRunExecutionError(
-            error_code="sensitive_execution_not_implemented",
-            error_summary=("Sensitive tool execution requires a persisted execution grant."),
+        snapshot = _advance_graph_step(
+            validate_human_approved_support_state(state),
+        )
+        _validate_context_ownership(
+            state=snapshot,
+            context=runtime.context,
+        )
+        return await self.sensitive_tool_execution.execute(
+            snapshot.to_graph_state(),
+            runtime.context,
         )
 
     async def draft_grounded_recommendation(
