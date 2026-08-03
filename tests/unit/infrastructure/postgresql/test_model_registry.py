@@ -21,6 +21,7 @@ def test_register_persistence_models_populates_shared_metadata() -> None:
         "ticket_classifications",
         "agent_tool_calls",
         "approval_requests",
+        "sensitive_execution_grants",
         "support_recommendations",
         "support_recommendation_citations",
     }

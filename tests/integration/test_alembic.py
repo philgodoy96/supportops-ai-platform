@@ -12,6 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tests.integration.conftest import clear_integration_business_data
 
+from supportops.agent_tools.infrastructure.grant_models import (
+    SensitiveExecutionGrantRecord,
+)
 from supportops.agent_tools.infrastructure.models import (
     AgentToolCallRecord,
 )
@@ -25,12 +28,13 @@ from supportops.modules.approvals.infrastructure.models import (
 
 pytestmark = pytest.mark.integration
 
-EXPECTED_HEAD = "d6f1a8c3e5b7"
+EXPECTED_HEAD = "e4a7c9d2f1b6"
 CONTROLLED_WORKFLOW_REVISION = "e8b7c6d5a4f3"
 PRE_CONTROLLED_WORKFLOW_REVISION = "d4e8f2a6c901"
 RETRYABLE_FAILURE_BUDGET_REVISION = "f3a9c1d7e5b2"
 WAITING_FOR_APPROVAL_REVISION = "b7c4d2e9a1f6"
 TOOL_CALL_LIFECYCLE_REVISION = "c9e2f4a7b6d1"
+APPROVAL_REQUEST_REVISION = "d6f1a8c3e5b7"
 
 
 def run_alembic_command(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -153,6 +157,7 @@ async def test_alembic_upgrade_creates_business_tables(
         )
         assert await relation_exists(engine, "public.agent_tool_calls")
         assert await relation_exists(engine, "public.approval_requests")
+        assert await relation_exists(engine, "public.sensitive_execution_grants")
         assert await relation_exists(engine, "public.support_recommendations")
         assert await relation_exists(
             engine,
@@ -224,6 +229,10 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
         assert not await relation_exists(engine, "public.approval_requests")
         assert not await relation_exists(
             engine,
+            "public.sensitive_execution_grants",
+        )
+        assert not await relation_exists(
+            engine,
             "public.support_recommendations",
         )
         assert not await relation_exists(
@@ -248,6 +257,7 @@ async def test_alembic_downgrade_removes_business_tables_and_can_reupgrade(
         )
         assert await relation_exists(engine, "public.agent_tool_calls")
         assert await relation_exists(engine, "public.approval_requests")
+        assert await relation_exists(engine, "public.sensitive_execution_grants")
         assert await relation_exists(engine, "public.support_recommendations")
         assert await relation_exists(
             engine,
@@ -320,6 +330,7 @@ async def test_alembic_downgrade_controlled_workflow_revision_removes_only_those
 
         assert await relation_exists(engine, "public.agent_tool_calls")
         assert await relation_exists(engine, "public.approval_requests")
+        assert await relation_exists(engine, "public.sensitive_execution_grants")
         assert await relation_exists(engine, "public.support_recommendations")
         assert await relation_exists(
             engine,
@@ -2702,6 +2713,914 @@ async def test_alembic_approval_request_migration_upgrades_and_downgrades(
         assert "uq_approval_requests_agent_tool_call" in constraint_names
         index_names = {index.name for index in table.indexes}
         assert "ix_approval_requests_pending_expiration" in index_names
+    finally:
+        await engine.dispose()
+        run_alembic_command("upgrade", "head")
+
+
+async def test_alembic_sensitive_execution_grant_migration_upgrades_and_downgrades(
+    exclusive_integration_database: None,
+) -> None:
+    settings = Settings()
+    engine = create_async_engine(str(settings.postgresql_url))
+
+    upgrade_head = run_alembic_command("upgrade", "head")
+    assert upgrade_head.returncode == 0, upgrade_head.stderr
+
+    async with engine.begin() as connection:
+        await clear_integration_business_data(connection)
+
+    downgrade_prior = run_alembic_command(
+        "downgrade",
+        APPROVAL_REQUEST_REVISION,
+    )
+    assert downgrade_prior.returncode == 0, downgrade_prior.stderr
+    assert not await relation_exists(
+        engine,
+        "public.sensitive_execution_grants",
+    )
+
+    workspace_id = uuid4()
+    ticket_id = uuid4()
+    run_id = uuid4()
+    attempt_id = uuid4()
+    tool_call_id = uuid4()
+    second_tool_call_id = uuid4()
+    invocation_id = uuid4()
+    approval_id = uuid4()
+    second_approval_id = uuid4()
+    fingerprint = "a" * 64
+    lease_token = uuid4()
+
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (
+                        id, name, slug, created_at, updated_at
+                    ) VALUES (
+                        :workspace_id,
+                        'Grant Workspace',
+                        'grant-workspace',
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00'
+                    )
+                    """
+                ),
+                {"workspace_id": workspace_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO tickets (
+                        id, workspace_id, subject, description, status,
+                        external_reference, ingestion_request_id,
+                        correlation_id, created_at, updated_at
+                    ) VALUES (
+                        :ticket_id,
+                        :workspace_id,
+                        'Grant subject',
+                        'Grant description',
+                        'open',
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00'
+                    )
+                    """
+                ),
+                {
+                    "ticket_id": ticket_id,
+                    "workspace_id": workspace_id,
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_runs (
+                        id, workspace_id, ticket_id, workflow_name,
+                        workflow_version, trigger_key, status, available_at,
+                        attempt_count, retryable_failure_count,
+                        max_retryable_failures, lease_owner, lease_token,
+                        lease_expires_at, first_started_at, completed_at,
+                        last_error_code, last_error_summary,
+                        ingestion_request_id, correlation_id,
+                        created_at, updated_at
+                    ) VALUES (
+                        :run_id,
+                        :workspace_id,
+                        :ticket_id,
+                        'ticket-processing',
+                        'controlled-support-v1',
+                        'initial-ticket-processing',
+                        'running',
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00',
+                        1,
+                        0,
+                        3,
+                        'worker-a',
+                        :lease_token,
+                        TIMESTAMPTZ '2026-08-03 00:10:00+00',
+                        TIMESTAMPTZ '2026-08-03 00:01:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        :ingestion_request_id,
+                        :correlation_id,
+                        TIMESTAMPTZ '2026-08-03 00:00:00+00',
+                        TIMESTAMPTZ '2026-08-03 00:01:00+00'
+                    )
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "lease_token": lease_token,
+                    "ingestion_request_id": uuid4(),
+                    "correlation_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO agent_run_attempts (
+                        id, agent_run_id, attempt_number, worker_id,
+                        lease_token, execution_request_id, started_at,
+                        finished_at, outcome, error_code, error_summary
+                    ) VALUES (
+                        :attempt_id,
+                        :run_id,
+                        1,
+                        'worker-a',
+                        :lease_token,
+                        :execution_request_id,
+                        TIMESTAMPTZ '2026-08-03 00:01:00+00',
+                        NULL,
+                        NULL,
+                        NULL,
+                        NULL
+                    )
+                    """
+                ),
+                {
+                    "attempt_id": attempt_id,
+                    "run_id": run_id,
+                    "lease_token": lease_token,
+                    "execution_request_id": uuid4(),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO llm_invocations (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        agent_run_attempt_id, invocation_sequence, status,
+                        provider, model, provider_request_id, prompt_id,
+                        prompt_version, prompt_content_hash, schema_version,
+                        input_tokens, cached_input_tokens, output_tokens,
+                        reasoning_tokens, total_tokens,
+                        pricing_catalog_version, pricing_found,
+                        estimated_input_cost_usd,
+                        estimated_cached_input_cost_usd,
+                        estimated_output_cost_usd,
+                        estimated_total_cost_usd, latency_ms, error_code,
+                        created_at
+                    ) VALUES (
+                        :invocation_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        1,
+                        'timed_out',
+                        'mock',
+                        'mock-model',
+                        'mock-request-1',
+                        'controlled-support',
+                        1,
+                        :prompt_hash,
+                        'ticket-classification-v1',
+                        NULL, NULL, NULL, NULL, NULL,
+                        'supportops-pricing-2026-08-01',
+                        TRUE,
+                        NULL, NULL, NULL, NULL,
+                        12000,
+                        'llm_timeout',
+                        TIMESTAMPTZ '2026-08-03 00:02:00+00'
+                    )
+                    """
+                ),
+                {
+                    "invocation_id": invocation_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_id,
+                    "prompt_hash": "d" * 64,
+                },
+            )
+            for call_id, seq, provider_id, fp, safe_input in (
+                (
+                    tool_call_id,
+                    1,
+                    "provider-1",
+                    fingerprint,
+                    '{"target_queue":"engineering_support"}',
+                ),
+                (
+                    second_tool_call_id,
+                    2,
+                    "provider-2",
+                    "b" * 64,
+                    '{"target_queue":"support_operations"}',
+                ),
+            ):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO agent_tool_calls (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            proposed_by_agent_run_attempt_id,
+                            executed_by_agent_run_attempt_id, sequence,
+                            provider_tool_call_id, tool_name, tool_version,
+                            safety_level, status, input_fingerprint,
+                            safe_input, safe_output, latency_ms, error_code,
+                            proposed_at, execution_started_at, finished_at
+                        ) VALUES (
+                            :tool_call_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            NULL,
+                            :sequence,
+                            :provider_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            'pending_approval',
+                            :fingerprint,
+                            CAST(:safe_input AS jsonb),
+                            NULL,
+                            NULL,
+                            NULL,
+                            TIMESTAMPTZ '2026-08-03 00:02:00+00',
+                            NULL,
+                            NULL
+                        )
+                        """
+                    ),
+                    {
+                        "tool_call_id": call_id,
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "sequence": seq,
+                        "provider_id": provider_id,
+                        "fingerprint": fp,
+                        "safe_input": safe_input,
+                    },
+                )
+            for approval, call_id, fp, proposed in (
+                (
+                    approval_id,
+                    tool_call_id,
+                    fingerprint,
+                    '{"target_queue":"engineering_support"}',
+                ),
+                (
+                    second_approval_id,
+                    second_tool_call_id,
+                    "b" * 64,
+                    '{"target_queue":"support_operations"}',
+                ),
+            ):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO approval_requests (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            agent_tool_call_id, requested_by_llm_invocation_id,
+                            status, tool_name, tool_version, safety_level,
+                            input_fingerprint, proposed_input, request_reason,
+                            expires_at, decision_actor_reference,
+                            decision_comment, decision_request_id,
+                            decision_correlation_id, decided_at,
+                            created_at, updated_at
+                        ) VALUES (
+                            :approval_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :tool_call_id,
+                            :invocation_id,
+                            'approved',
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:proposed_input AS jsonb),
+                            'Requires human review.',
+                            TIMESTAMPTZ '2026-08-04 00:00:00+00',
+                            'operator:alice',
+                            NULL,
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:03:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "approval_id": approval,
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "tool_call_id": call_id,
+                        "invocation_id": invocation_id,
+                        "fingerprint": fp,
+                        "proposed_input": proposed,
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        upgrade = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert upgrade.returncode == 0, upgrade.stderr
+        assert await relation_exists(
+            engine,
+            "public.sensitive_execution_grants",
+        )
+
+        for column_name in (
+            "id",
+            "workspace_id",
+            "ticket_id",
+            "agent_run_id",
+            "executed_by_agent_run_attempt_id",
+            "approval_request_id",
+            "agent_tool_call_id",
+            "tool_name",
+            "tool_version",
+            "safety_level",
+            "input_fingerprint",
+            "granted_input",
+            "decision_actor_reference",
+            "decision_request_id",
+            "decision_correlation_id",
+            "approved_at",
+            "created_at",
+        ):
+            assert await column_exists(
+                engine,
+                table_name="sensitive_execution_grants",
+                column_name=column_name,
+            )
+
+        for constraint_name in (
+            "ck_sensitive_execution_grants_safety_level",
+            "ck_sensitive_execution_grants_input_fingerprint",
+            "ck_sensitive_execution_grants_granted_input_object",
+            "ck_sensitive_execution_grants_granted_input_size",
+            "ck_sensitive_execution_grants_creation_order",
+            "uq_sensitive_execution_grants_approval_request",
+            "uq_sensitive_execution_grants_agent_tool_call",
+            "uq_sensitive_execution_grants_workspace_id",
+            "fk_sensitive_execution_grants_workspace_ticket_agent_run",
+            "fk_sensitive_execution_grants_execution_attempt",
+            "fk_sensitive_execution_grants_approval_request",
+            "fk_sensitive_execution_grants_agent_tool_call",
+        ):
+            assert await constraint_exists(
+                engine,
+                table_name="sensitive_execution_grants",
+                constraint_name=constraint_name,
+            )
+
+        grant_id = uuid4()
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO sensitive_execution_grants (
+                        id, workspace_id, ticket_id, agent_run_id,
+                        executed_by_agent_run_attempt_id,
+                        approval_request_id, agent_tool_call_id,
+                        tool_name, tool_version, safety_level,
+                        input_fingerprint, granted_input,
+                        decision_actor_reference, decision_request_id,
+                        decision_correlation_id, approved_at, created_at
+                    ) VALUES (
+                        :grant_id,
+                        :workspace_id,
+                        :ticket_id,
+                        :run_id,
+                        :attempt_id,
+                        :approval_id,
+                        :tool_call_id,
+                        'escalate_ticket',
+                        1,
+                        'sensitive_write',
+                        :fingerprint,
+                        CAST(:granted_input AS jsonb),
+                        'operator:alice',
+                        :decision_request_id,
+                        :decision_correlation_id,
+                        TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                        TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                    )
+                    """
+                ),
+                {
+                    "grant_id": grant_id,
+                    "workspace_id": workspace_id,
+                    "ticket_id": ticket_id,
+                    "run_id": run_id,
+                    "attempt_id": attempt_id,
+                    "approval_id": approval_id,
+                    "tool_call_id": tool_call_id,
+                    "fingerprint": fingerprint,
+                    "granted_input": '{"target_queue":"engineering_support"}',
+                    "decision_request_id": uuid4(),
+                    "decision_correlation_id": uuid4(),
+                },
+            )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'read_only',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            'NOT-A-FINGERPRINT',
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST('"not-an-object"' AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:04:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": fingerprint,
+                        "granted_input": '{"target_queue":"engineering_support"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": grant_id,
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": uuid4(),
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": '{"target_queue":"support_operations"}',
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        async with engine.begin() as connection:
+            oversized = "{" + (",".join(f'"k{i}":"{i}"' for i in range(2000))) + "}"
+            with pytest.raises(IntegrityError):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sensitive_execution_grants (
+                            id, workspace_id, ticket_id, agent_run_id,
+                            executed_by_agent_run_attempt_id,
+                            approval_request_id, agent_tool_call_id,
+                            tool_name, tool_version, safety_level,
+                            input_fingerprint, granted_input,
+                            decision_actor_reference, decision_request_id,
+                            decision_correlation_id, approved_at, created_at
+                        ) VALUES (
+                            :grant_id,
+                            :workspace_id,
+                            :ticket_id,
+                            :run_id,
+                            :attempt_id,
+                            :approval_id,
+                            :tool_call_id,
+                            'escalate_ticket',
+                            1,
+                            'sensitive_write',
+                            :fingerprint,
+                            CAST(:granted_input AS jsonb),
+                            'operator:alice',
+                            :decision_request_id,
+                            :decision_correlation_id,
+                            TIMESTAMPTZ '2026-08-03 00:05:00+00',
+                            TIMESTAMPTZ '2026-08-03 00:06:00+00'
+                        )
+                        """
+                    ),
+                    {
+                        "grant_id": uuid4(),
+                        "workspace_id": workspace_id,
+                        "ticket_id": ticket_id,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "approval_id": second_approval_id,
+                        "tool_call_id": second_tool_call_id,
+                        "fingerprint": "b" * 64,
+                        "granted_input": oversized,
+                        "decision_request_id": uuid4(),
+                        "decision_correlation_id": uuid4(),
+                    },
+                )
+
+        downgrade = run_alembic_command(
+            "downgrade",
+            APPROVAL_REQUEST_REVISION,
+        )
+        assert downgrade.returncode == 0, downgrade.stderr
+        assert not await relation_exists(
+            engine,
+            "public.sensitive_execution_grants",
+        )
+
+        reupgrade = run_alembic_command("upgrade", EXPECTED_HEAD)
+        assert reupgrade.returncode == 0, reupgrade.stderr
+        assert await relation_exists(
+            engine,
+            "public.sensitive_execution_grants",
+        )
+
+        table = cast(Table, SensitiveExecutionGrantRecord.__table__)
+        column_names = {column.name for column in table.c}
+        assert "executed_by_agent_run_attempt_id" in column_names
+        assert "granted_input" in column_names
+        assert "approved_at" in column_names
+        constraint_names = {constraint.name for constraint in table.constraints}
+        assert "ck_sensitive_execution_grants_safety_level" in constraint_names
+        assert "uq_sensitive_execution_grants_approval_request" in constraint_names
+        assert "fk_sensitive_execution_grants_execution_attempt" in constraint_names
+        index_names = {index.name for index in table.indexes}
+        assert "ix_sensitive_execution_grants_workspace_created_id" in index_names
     finally:
         await engine.dispose()
         run_alembic_command("upgrade", "head")
