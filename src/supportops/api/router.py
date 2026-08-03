@@ -7,6 +7,7 @@ from supportops.knowledge_retrieval.api.router import (
     router as knowledge_retrieval_router,
 )
 from supportops.modules.agent_runs.api.router import router as agent_runs_router
+from supportops.modules.approvals.api.router import router as approvals_router
 from supportops.modules.controlled_support_inspection.api.router import (
     router as controlled_support_inspection_router,
 )
@@ -34,3 +35,4 @@ api_router.include_router(
     controlled_support_inspection_router,
     prefix="/api/v1",
 )
+api_router.include_router(approvals_router, prefix="/api/v1")
