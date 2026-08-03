@@ -50,10 +50,16 @@ from supportops.modules.ticket_classifications.application.errors import (
 from supportops.modules.ticket_classifications.application.pagination import (
     InvalidClassificationPaginationCursorError,
 )
+from supportops.modules.tickets.api.escalation_pagination import (
+    InvalidTicketEscalationPaginationCursor,
+)
 from supportops.modules.tickets.api.pagination import InvalidPaginationCursorError
 from supportops.modules.tickets.application.errors import (
     TicketExternalReferenceConflictApplicationError,
     TicketNotFoundError,
+)
+from supportops.modules.tickets.application.escalation_queries import (
+    TicketEscalationNotFoundError,
 )
 from supportops.modules.workspaces.application.errors import (
     WorkspaceNotFoundError,
@@ -191,6 +197,14 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         InvalidApprovalPaginationCursor,
         _invalid_approval_pagination_cursor_handler,
+    )
+    app.add_exception_handler(
+        TicketEscalationNotFoundError,
+        _ticket_escalation_not_found_handler,
+    )
+    app.add_exception_handler(
+        InvalidTicketEscalationPaginationCursor,
+        _invalid_ticket_escalation_pagination_cursor_handler,
     )
 
 
@@ -555,6 +569,34 @@ async def _invalid_approval_pagination_cursor_handler(
         status_code=400,
         code="invalid_pagination_cursor",
         message="Approval pagination cursor is invalid.",
+    )
+
+
+async def _ticket_escalation_not_found_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=404,
+        code="ticket_escalation_not_found",
+        message="Ticket escalation was not found.",
+    )
+
+
+async def _invalid_ticket_escalation_pagination_cursor_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=400,
+        code="invalid_pagination_cursor",
+        message="Ticket escalation pagination cursor is invalid.",
     )
 
 
