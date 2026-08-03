@@ -1,5 +1,6 @@
 """Integration tests for fenced PostgreSQL AgentRun transitions."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -959,3 +960,267 @@ async def test_requeue_waiting_for_approval_rejects_cross_scope(
         )
 
     assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+    async with postgresql_session_factory() as requeue_session:
+        wrong_ticket = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                agent_run_id=_RUN_ID,
+                requeued_at=finished_at + timedelta(minutes=1),
+            ),
+        )
+
+    assert wrong_ticket is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+
+async def test_requeue_waiting_for_approval_preserves_lease_and_error_fields(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+    requeued_at = finished_at + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        result = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=requeued_at,
+            ),
+        )
+
+    assert result is AgentRunApprovalRequeueResult.APPLIED
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.QUEUED.value
+    assert run.available_at == requeued_at
+    assert run.lease_owner is None
+    assert run.lease_token is None
+    assert run.lease_expires_at is None
+    assert run.completed_at is None
+    assert run.last_error_code is None
+    assert run.last_error_summary is None
+    assert run.attempt_count == 1
+    assert run.retryable_failure_count == 0
+    assert len(attempts) == 1
+
+
+async def test_repeated_requeue_waiting_for_approval_is_conflict(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+    first_requeued_at = finished_at + timedelta(minutes=1)
+    second_requeued_at = first_requeued_at + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        first = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=first_requeued_at,
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        second = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=second_requeued_at,
+            ),
+        )
+
+    assert first is AgentRunApprovalRequeueResult.APPLIED
+    assert second is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+
+    assert run.available_at == first_requeued_at
+    assert run.updated_at == first_requeued_at
+    assert run.status == AgentRunStatus.QUEUED.value
+
+
+async def test_requeue_waiting_for_approval_rejects_running_and_terminal(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        running_conflict = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=_FIRST_CLAIMED_AT + timedelta(minutes=1),
+            ),
+        )
+
+    assert running_conflict is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+    async with postgresql_session_factory() as complete_session:
+        await mark_succeeded_and_commit(
+            complete_session,
+            command=CompleteAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=_FIRST_CLAIMED_AT + timedelta(seconds=10),
+            ),
+        )
+
+    async with postgresql_session_factory() as requeue_session:
+        succeeded_conflict = await requeue_waiting_and_commit(
+            requeue_session,
+            command=RequeueWaitingAgentRunCommand(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_RUN_ID,
+                requeued_at=_FIRST_CLAIMED_AT + timedelta(minutes=2),
+            ),
+        )
+
+    assert succeeded_conflict is AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+
+async def test_concurrent_requeue_waiting_for_approval_has_one_winner(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    finished_at = _FIRST_CLAIMED_AT + timedelta(seconds=10)
+    requeued_at = finished_at + timedelta(minutes=1)
+
+    async with postgresql_session_factory() as setup_session:
+        await persist_workspace_ticket_and_run(setup_session)
+
+    async with postgresql_session_factory() as claim_session:
+        await claim_and_commit(
+            claim_session,
+            command=create_claim_command(
+                worker_id="worker-a",
+                lease_token=_FIRST_LEASE_TOKEN,
+                execution_request_id=_FIRST_EXECUTION_REQUEST_ID,
+                claimed_at=_FIRST_CLAIMED_AT,
+            ),
+        )
+
+    async with postgresql_session_factory() as waiting_session:
+        await mark_waiting_and_commit(
+            waiting_session,
+            command=WaitForApprovalAgentRunCommand(
+                agent_run_id=_RUN_ID,
+                lease_token=_FIRST_LEASE_TOKEN,
+                finished_at=finished_at,
+            ),
+        )
+
+    ready = 0
+    ready_lock = asyncio.Lock()
+    release = asyncio.Event()
+
+    async def attempt_requeue() -> AgentRunApprovalRequeueResult:
+        nonlocal ready
+
+        async with postgresql_session_factory() as session:
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    release.set()
+            await release.wait()
+            return await requeue_waiting_and_commit(
+                session,
+                command=RequeueWaitingAgentRunCommand(
+                    workspace_id=_WORKSPACE_ID,
+                    ticket_id=_TICKET_ID,
+                    agent_run_id=_RUN_ID,
+                    requeued_at=requeued_at,
+                ),
+            )
+
+    results = await asyncio.gather(attempt_requeue(), attempt_requeue())
+
+    assert set(results) == {
+        AgentRunApprovalRequeueResult.APPLIED,
+        AgentRunApprovalRequeueResult.STATE_CONFLICT,
+    }
+
+    async with postgresql_session_factory() as verification_session:
+        run = await load_run(verification_session)
+        attempts = await load_attempts(verification_session)
+
+    assert run.status == AgentRunStatus.QUEUED.value
+    assert run.available_at == requeued_at
+    assert len(attempts) == 1

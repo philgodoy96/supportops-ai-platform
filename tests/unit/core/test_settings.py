@@ -615,6 +615,36 @@ def test_settings_reject_invalid_numeric_configuration(
         create_required_settings(**{field_name: field_value})
 
 
+def test_settings_accept_approval_policy_boundaries() -> None:
+    settings = create_required_settings(
+        approval_ttl_seconds=1,
+        approval_expiration_batch_size=1,
+    )
+    assert settings.approval_ttl_seconds == 1.0
+    assert settings.approval_expiration_batch_size == 1
+
+    maximum = create_required_settings(
+        approval_ttl_seconds=2592000,
+        approval_expiration_batch_size=1000,
+    )
+    assert maximum.approval_ttl_seconds == 2592000.0
+    assert maximum.approval_expiration_batch_size == 1000
+
+
+def test_settings_ignore_unrelated_legacy_approval_environment_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPPORTOPS_APPROVAL_TTL", "30")
+    monkeypatch.setenv("SUPPORTOPS_APPROVAL_BATCH_SIZE", "9")
+    monkeypatch.setenv("APPROVAL_TTL_SECONDS", "120")
+    monkeypatch.setenv("APPROVAL_EXPIRATION_BATCH_SIZE", "50")
+
+    settings = create_required_settings()
+
+    assert settings.approval_ttl_seconds == 86400.0
+    assert settings.approval_expiration_batch_size == 100
+
+
 def test_settings_reject_max_steps_below_tool_loop_budget() -> None:
     with pytest.raises(
         ValidationError,

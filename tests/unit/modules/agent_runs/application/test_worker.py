@@ -372,6 +372,48 @@ async def test_expiration_runs_before_claim_with_configured_batch_size() -> None
     assert call_order == ["recover", "expire", "claim"]
 
 
+async def test_expiration_failure_prevents_claim() -> None:
+    worker, repository, processor, expire_pending_approvals, _ = create_worker(
+        claim=create_claim(),
+    )
+    expire_pending_approvals.execute.side_effect = RuntimeError(
+        "expiration failed",
+    )
+
+    with pytest.raises(RuntimeError, match="expiration failed"):
+        await worker.execute()
+
+    repository.recover_next_expired.assert_awaited_once()
+    expire_pending_approvals.execute.assert_awaited_once()
+    repository.claim_next_available.assert_not_awaited()
+    processor.execute.assert_not_awaited()
+
+
+async def test_expired_approvals_do_not_change_idle_result_shape() -> None:
+    worker, repository, _, expire_pending_approvals, _ = create_worker()
+    expire_pending_approvals.execute.return_value = ApprovalExpirationBatchResult(
+        approval_request_ids=(
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        ),
+    )
+
+    result = await worker.execute()
+
+    assert result == WorkerCycleResult(
+        outcome=WorkerCycleOutcome.IDLE,
+        recovered_expired_run=False,
+        agent_run_id=None,
+    )
+    assert not hasattr(result, "expired_count")
+    assert set(WorkerCycleResult.__dataclass_fields__) == {
+        "outcome",
+        "recovered_expired_run",
+        "agent_run_id",
+    }
+    repository.claim_next_available.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "worker_id",
     [

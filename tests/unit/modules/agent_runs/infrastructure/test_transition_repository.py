@@ -716,3 +716,89 @@ async def test_requeue_waiting_for_approval_returns_conflict_for_cross_scope() -
 
     assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
     session.flush.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        AgentRunStatus.QUEUED,
+        AgentRunStatus.RUNNING,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+    ],
+)
+async def test_requeue_waiting_for_approval_conflicts_for_non_waiting_status(
+    status: AgentRunStatus,
+) -> None:
+    run_record = create_waiting_run_record()
+    run_record.status = status.value
+    if status is AgentRunStatus.RUNNING:
+        run_record.lease_owner = "worker-a"
+        run_record.lease_token = _LEASE_TOKEN
+        run_record.lease_expires_at = _FINISHED_AT + timedelta(seconds=45)
+    if status in {AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED}:
+        run_record.completed_at = _FINISHED_AT
+    session = create_session(run_record=run_record)
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=run_record.ticket_id,
+            agent_run_id=_RUN_ID,
+            requeued_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
+    assert run_record.status == status.value
+    session.flush.assert_not_awaited()
+
+
+async def test_requeue_waiting_for_approval_conflicts_for_wrong_ticket() -> None:
+    run_record = create_waiting_run_record()
+    session = create_session(run_record=None)
+    repository = SqlAlchemyAgentRunRepository(session)
+
+    result = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            agent_run_id=_RUN_ID,
+            requeued_at=_FINISHED_AT,
+        ),
+    )
+
+    assert result is AgentRunApprovalRequeueResult.STATE_CONFLICT
+    session.flush.assert_not_awaited()
+
+
+async def test_repeated_requeue_waiting_for_approval_conflicts() -> None:
+    run_record = create_waiting_run_record()
+    session = create_session(run_record=run_record)
+    repository = SqlAlchemyAgentRunRepository(session)
+    first_requeued_at = _FINISHED_AT + timedelta(minutes=1)
+
+    first = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=run_record.ticket_id,
+            agent_run_id=_RUN_ID,
+            requeued_at=first_requeued_at,
+        ),
+    )
+    assert first is AgentRunApprovalRequeueResult.APPLIED
+
+    second = await repository.requeue_waiting_for_approval(
+        RequeueWaitingAgentRunCommand(
+            workspace_id=run_record.workspace_id,
+            ticket_id=run_record.ticket_id,
+            agent_run_id=_RUN_ID,
+            requeued_at=first_requeued_at + timedelta(minutes=1),
+        ),
+    )
+
+    assert second is AgentRunApprovalRequeueResult.STATE_CONFLICT
+    assert run_record.available_at == first_requeued_at
+    assert run_record.updated_at == first_requeued_at
+    assert run_record.status == AgentRunStatus.QUEUED.value
