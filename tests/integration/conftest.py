@@ -48,6 +48,7 @@ _INTEGRATION_DATABASE_LOCK_KEY = 742_891_305
 BUSINESS_DATA_DELETE_STATEMENTS: tuple[str, ...] = (
     "DELETE FROM support_recommendation_citations",
     "DELETE FROM support_recommendations",
+    "DELETE FROM ticket_escalations",
     "DELETE FROM sensitive_execution_grants",
     "DELETE FROM approval_requests",
     "DELETE FROM agent_tool_calls",

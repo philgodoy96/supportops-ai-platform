@@ -15,6 +15,7 @@ def test_register_persistence_models_populates_shared_metadata() -> None:
         "knowledge_document_versions",
         "knowledge_document_chunks",
         "tickets",
+        "ticket_escalations",
         "agent_runs",
         "agent_run_attempts",
         "llm_invocations",

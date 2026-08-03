@@ -28,6 +28,9 @@ def register_persistence_models() -> None:
         LLMInvocationRecord,
         TicketClassificationRecord,
     )
+    from supportops.modules.tickets.infrastructure.escalation_models import (
+        TicketEscalationRecord,
+    )
     from supportops.modules.tickets.infrastructure.models import (
         TicketRecord,
     )
@@ -41,6 +44,7 @@ def register_persistence_models() -> None:
         DocumentVersionRecord,
         DocumentChunkRecord,
         TicketRecord,
+        TicketEscalationRecord,
         AgentRunRecord,
         AgentRunAttemptRecord,
         LLMInvocationRecord,
