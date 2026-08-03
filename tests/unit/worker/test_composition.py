@@ -532,6 +532,7 @@ async def test_session_factory_registers_four_workflows() -> None:
             human_approved_executor,
             HumanApprovedSupportWorkflowExecutor,
         )
+        assert CONTROLLED_SUPPORT_WORKFLOW_VERSION == ("controlled-support-v1")
         assert not hasattr(controlled_executor, "_resume_planner")
         planner = human_approved_executor._resume_planner
         assert isinstance(planner, HumanApprovedGraphResumePlanner)
@@ -547,6 +548,9 @@ async def test_session_factory_registers_four_workflows() -> None:
         assert "draft_grounded_recommendation" in graph_nodes
         assert "validate_recommendation" in graph_nodes
         assert "persist_recommendation" in graph_nodes
+        assert "prepare_sensitive_action" in graph_nodes
+        assert "await_human_approval" in graph_nodes
+        assert "execute_read_only_tool" in graph_nodes
     finally:
         await controlled_runtime.close()
         await llm_runtime.close()

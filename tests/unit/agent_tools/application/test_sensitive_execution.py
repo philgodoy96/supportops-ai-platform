@@ -651,3 +651,172 @@ async def test_succeeded_without_escalation_fails_closed() -> None:
             approval_request_id=approval.id,
             agent_tool_call_id=tool_call.id,
         )
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_never_creates_grant() -> None:
+    context, tool_call, _approval = _records()
+    expired = ApprovalRequest.create_pending(
+        tool_call=tool_call,
+        requested_by_llm_invocation_id=uuid4(),
+        request_reason="A product defect requires review.",
+        expires_at=_NOW + timedelta(days=1),
+        now=_NOW,
+    ).expire(
+        decided_at=_NOW + timedelta(days=1),
+    )
+    grant_repository = SimpleNamespace(
+        persist=AsyncMock(),
+        get_by_agent_tool_call_id=AsyncMock(),
+    )
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=expired,
+        grant_repository=grant_repository,
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+    )
+
+    with pytest.raises(
+        SensitiveExecutionConsistencyError,
+        match="approved",
+    ):
+        await executor.execute(
+            context=context,
+            approval_request_id=expired.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    grant_repository.persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execution_locks_approval_before_tool_call() -> None:
+    context, tool_call, approval = _records()
+    order: list[str] = []
+
+    async def lock_approval(**kwargs: object) -> ApprovalRequest:
+        del kwargs
+        order.append("approval")
+        return approval
+
+    async def lock_tool(**kwargs: object) -> AgentToolCall:
+        del kwargs
+        order.append("tool_call")
+        return tool_call
+
+    async def persist_grant(grant: object) -> SensitiveExecutionGrantPersistenceResult:
+        del grant
+        order.append("grant")
+        return SensitiveExecutionGrantPersistenceResult.APPLIED
+
+    async def persist_escalation(
+        escalation: object,
+    ) -> TicketEscalationPersistenceResult:
+        del escalation
+        order.append("escalation")
+        return TicketEscalationPersistenceResult.APPLIED
+
+    async def save_success(*, tool_call: AgentToolCall) -> None:
+        del tool_call
+        order.append("tool_success")
+
+    executor = ExecuteApprovedTicketEscalation(
+        transaction_manager=FakeTransactionManager(),
+        approval_request_repository=SimpleNamespace(
+            get_by_id_for_update=AsyncMock(side_effect=lock_approval),
+        ),
+        tool_call_repository=SimpleNamespace(
+            get_by_id_for_update=AsyncMock(side_effect=lock_tool),
+            save_granted_execution_success=AsyncMock(
+                side_effect=save_success,
+            ),
+        ),
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(side_effect=persist_grant),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(side_effect=persist_escalation),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        utc_now=lambda: _NOW + timedelta(minutes=6),
+        uuid_factory=uuid4,
+    )
+
+    result = await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is SensitiveExecutionStatus.APPLIED
+    assert order == [
+        "approval",
+        "tool_call",
+        "grant",
+        "escalation",
+        "tool_success",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_returns_already_recorded() -> None:
+    context, tool_call, approval = _records()
+    durable_grant = _grant(
+        approval,
+        tool_call,
+        executed_by_agent_run_attempt_id=context.attempt.id,
+    )
+    durable_escalation = _escalation(durable_grant)
+    succeeded = tool_call.complete_granted_execution_success(
+        executed_by_agent_run_attempt_id=context.attempt.id,
+        execution_started_at=_NOW + timedelta(minutes=6),
+        finished_at=_NOW + timedelta(minutes=6),
+        safe_output={
+            "escalation_id": str(durable_escalation.id),
+            "ticket_id": str(durable_escalation.ticket_id),
+            "target_queue": "engineering_support",
+            "status": "escalated",
+        },
+    )
+    grant_repository = SimpleNamespace(
+        persist=AsyncMock(),
+        get_by_agent_tool_call_id=AsyncMock(
+            return_value=durable_grant,
+        ),
+    )
+    escalation_repository = SimpleNamespace(
+        persist=AsyncMock(),
+        get_by_agent_tool_call_id=AsyncMock(
+            return_value=durable_escalation,
+        ),
+    )
+    tool_repository = SimpleNamespace(
+        get_by_id_for_update=AsyncMock(return_value=succeeded),
+        save_granted_execution_success=AsyncMock(),
+    )
+    executor = _executor(
+        context=context,
+        tool_call=succeeded,
+        approval=approval,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+        tool_repository=tool_repository,
+    )
+
+    result = await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is (SensitiveExecutionStatus.ALREADY_RECORDED)
+    assert result.grant.id == durable_grant.id
+    assert result.escalation.id == durable_escalation.id
+    grant_repository.persist.assert_not_awaited()
+    escalation_repository.persist.assert_not_awaited()
+    tool_repository.save_granted_execution_success.assert_not_awaited()

@@ -216,3 +216,121 @@ def test_extra_payload_fields_rejected() -> None:
                 "actor_reference": "operator:alice",
             },
         )
+
+
+def test_approved_summary_authorizes_sensitive_execution() -> None:
+    tool_call, pending = _records()
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=uuid4(),
+        correlation_id=uuid4(),
+        decided_at=_NOW + timedelta(minutes=5),
+    )
+    payload = ApprovalDecisionResumePayload(
+        approval_request_id=approved.id,
+        agent_tool_call_id=tool_call.id,
+        decision_status=ApprovalResumeDecisionStatus.APPROVED,
+    )
+
+    result = handle_approval_decision(
+        payload=payload,
+        approval_request=approved,
+    )
+
+    assert result.decision_summary == ("The sensitive action was approved for execution.")
+    assert result.decision_status is (ApprovalResumeDecisionStatus.APPROVED)
+
+
+def test_rejected_summary_says_action_was_not_executed() -> None:
+    tool_call, pending = _records()
+    rejected = pending.reject(
+        actor_reference="operator:alice",
+        comment="Do not escalate.",
+        request_id=uuid4(),
+        correlation_id=uuid4(),
+        decided_at=_NOW + timedelta(minutes=5),
+    )
+    payload = ApprovalDecisionResumePayload(
+        approval_request_id=rejected.id,
+        agent_tool_call_id=tool_call.id,
+        decision_status=ApprovalResumeDecisionStatus.REJECTED,
+    )
+
+    result = handle_approval_decision(
+        payload=payload,
+        approval_request=rejected,
+    )
+
+    assert result.decision_summary == ("The sensitive action was rejected and was not executed.")
+
+
+def test_expired_summary_says_approval_expired() -> None:
+    tool_call, pending = _records()
+    expired = pending.expire(
+        decided_at=_NOW + timedelta(days=1),
+    )
+    payload = ApprovalDecisionResumePayload(
+        approval_request_id=expired.id,
+        agent_tool_call_id=tool_call.id,
+        decision_status=ApprovalResumeDecisionStatus.EXPIRED,
+    )
+
+    result = handle_approval_decision(
+        payload=payload,
+        approval_request=expired,
+    )
+
+    assert result.decision_summary == (
+        "The sensitive action approval expired and was not executed."
+    )
+
+
+def test_payload_rejected_postgresql_approved_fails_closed() -> None:
+    tool_call, pending = _records()
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=uuid4(),
+        correlation_id=uuid4(),
+        decided_at=_NOW + timedelta(minutes=5),
+    )
+    payload = ApprovalDecisionResumePayload(
+        approval_request_id=approved.id,
+        agent_tool_call_id=tool_call.id,
+        decision_status=ApprovalResumeDecisionStatus.REJECTED,
+    )
+
+    with pytest.raises(
+        ApprovalDecisionHandlingError,
+        match="does not match PostgreSQL",
+    ):
+        handle_approval_decision(
+            payload=payload,
+            approval_request=approved,
+        )
+
+
+def test_payload_approved_postgresql_rejected_fails_closed() -> None:
+    tool_call, pending = _records()
+    rejected = pending.reject(
+        actor_reference="operator:alice",
+        comment="Do not escalate.",
+        request_id=uuid4(),
+        correlation_id=uuid4(),
+        decided_at=_NOW + timedelta(minutes=5),
+    )
+    payload = ApprovalDecisionResumePayload(
+        approval_request_id=rejected.id,
+        agent_tool_call_id=tool_call.id,
+        decision_status=ApprovalResumeDecisionStatus.APPROVED,
+    )
+
+    with pytest.raises(
+        ApprovalDecisionHandlingError,
+        match="does not match PostgreSQL",
+    ):
+        handle_approval_decision(
+            payload=payload,
+            approval_request=rejected,
+        )

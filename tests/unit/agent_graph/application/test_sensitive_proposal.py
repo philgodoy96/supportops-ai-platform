@@ -12,6 +12,7 @@ import pytest
 
 from supportops.agent_graph.application.sensitive_proposal import (
     SensitiveProposalCommand,
+    SensitiveProposalConsistencyError,
     SensitiveProposalService,
 )
 from supportops.agent_tools.application.persistence import (
@@ -19,6 +20,10 @@ from supportops.agent_tools.application.persistence import (
 )
 from supportops.agent_tools.application.sensitive_bindings import (
     SensitiveToolRegistry,
+)
+from supportops.agent_tools.domain.audit import AgentToolCall
+from supportops.agent_tools.domain.fingerprints import (
+    create_tool_call_fingerprint,
 )
 from supportops.agent_tools.tools.escalate_ticket import (
     EscalateTicketInput,
@@ -28,6 +33,7 @@ from supportops.agent_tools.tools.escalate_ticket import (
 from supportops.modules.agent_runs.application.execution import (
     RetryableAgentRunExecutionError,
 )
+from supportops.modules.approvals.domain.models import ApprovalRequest
 from supportops.modules.approvals.domain.repositories import (
     ApprovalRequestPersistenceResult,
 )
@@ -179,3 +185,276 @@ def test_command_requires_uuid_invocation() -> None:
             requested_by_llm_invocation_id=cast(Any, "not-a-uuid"),
             sequence=1,
         )
+
+
+_ESCALATE_FINGERPRINT = "aa1034b4731d4b904e005cab2c4631a24e43b2dbe9612b9a1a191cea283cd08d"
+
+
+def _existing_tool_call(context: SimpleNamespace) -> AgentToolCall:
+    return AgentToolCall.propose_for_approval(
+        workspace_id=context.agent_run.workspace_id,
+        ticket_id=context.ticket.id,
+        agent_run_id=context.agent_run.id,
+        proposed_by_agent_run_attempt_id=context.attempt.id,
+        sequence=1,
+        provider_tool_call_id="call-1",
+        tool_name="escalate_ticket",
+        tool_version=1,
+        input_fingerprint=_ESCALATE_FINGERPRINT,
+        safe_input={
+            "target_queue": "security_operations",
+            "reason": "Potential security incident.",
+        },
+        proposed_at=_NOW - timedelta(minutes=5),
+        tool_call_id=uuid4(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_replay_after_tool_call_reuses_original_records() -> None:
+    context = _context()
+    existing_tool = _existing_tool_call(context)
+    existing_approval = ApprovalRequest.create_pending(
+        tool_call=existing_tool,
+        requested_by_llm_invocation_id=uuid4(),
+        request_reason="Potential security incident.",
+        expires_at=existing_tool.proposed_at + timedelta(days=1),
+        now=existing_tool.proposed_at,
+        approval_request_id=uuid4(),
+    )
+    order: list[str] = []
+
+    async def persist_tool_call(command: object) -> AgentToolCallPersistenceResult:
+        del command
+        order.append("tool_call")
+        return AgentToolCallPersistenceResult.ALREADY_RECORDED
+
+    async def persist_approval(
+        approval: object,
+    ) -> ApprovalRequestPersistenceResult:
+        del approval
+        order.append("approval")
+        return ApprovalRequestPersistenceResult.ALREADY_RECORDED
+
+    service = SensitiveProposalService(
+        transaction_manager=FakeTransactionManager(),
+        sensitive_tool_registry=SensitiveToolRegistry(
+            (create_escalate_ticket_binding(),),
+        ),
+        tool_call_execution_repository=SimpleNamespace(
+            persist_fenced=AsyncMock(side_effect=persist_tool_call),
+        ),
+        tool_call_query_repository=SimpleNamespace(
+            get_sensitive_by_identity=AsyncMock(
+                return_value=existing_tool,
+            ),
+        ),
+        approval_request_repository=SimpleNamespace(
+            persist_pending=AsyncMock(side_effect=persist_approval),
+            get_by_agent_tool_call_id=AsyncMock(
+                return_value=existing_approval,
+            ),
+        ),
+        approval_ttl_seconds=86400,
+        utc_now=lambda: _NOW,
+        uuid_factory=uuid4,
+    )
+    command = SensitiveProposalCommand(
+        provider_tool_call_id="call-1",
+        tool_name="escalate_ticket",
+        tool_version=1,
+        arguments=EscalateTicketInput(
+            target_queue=(TicketEscalationTargetQueue.SECURITY_OPERATIONS),
+            reason="Potential security incident.",
+        ),
+        requested_by_llm_invocation_id=(existing_approval.requested_by_llm_invocation_id),
+        sequence=1,
+    )
+
+    outcome = await service.execute(
+        context=cast(Any, context),
+        command=command,
+    )
+
+    assert order == ["tool_call", "approval"]
+    assert outcome.tool_call_created is False
+    assert outcome.approval_request_created is False
+    assert outcome.tool_call.id == existing_tool.id
+    assert outcome.tool_call.proposed_by_agent_run_attempt_id == (
+        existing_tool.proposed_by_agent_run_attempt_id
+    )
+    assert outcome.tool_call.provider_tool_call_id == (existing_tool.provider_tool_call_id)
+    assert outcome.tool_call.sequence == existing_tool.sequence
+    assert outcome.tool_call.proposed_at == existing_tool.proposed_at
+    assert outcome.approval_request.id == existing_approval.id
+    assert outcome.approval_request.created_at == (existing_approval.created_at)
+    assert outcome.approval_request.expires_at == (existing_approval.expires_at)
+    assert outcome.approval_request.agent_tool_call_id == (existing_tool.id)
+
+
+@pytest.mark.asyncio
+async def test_replay_after_tool_only_creates_approval_once() -> None:
+    """Crash recovery A: tool persisted, approval not yet durable."""
+
+    context = _context()
+    existing_tool = _existing_tool_call(context)
+    created_approval_ids: list[object] = []
+
+    async def persist_approval(
+        approval: object,
+    ) -> ApprovalRequestPersistenceResult:
+        created_approval_ids.append(approval)
+        return ApprovalRequestPersistenceResult.APPLIED
+
+    service = SensitiveProposalService(
+        transaction_manager=FakeTransactionManager(),
+        sensitive_tool_registry=SensitiveToolRegistry(
+            (create_escalate_ticket_binding(),),
+        ),
+        tool_call_execution_repository=SimpleNamespace(
+            persist_fenced=AsyncMock(
+                return_value=(AgentToolCallPersistenceResult.ALREADY_RECORDED),
+            ),
+        ),
+        tool_call_query_repository=SimpleNamespace(
+            get_sensitive_by_identity=AsyncMock(
+                return_value=existing_tool,
+            ),
+        ),
+        approval_request_repository=SimpleNamespace(
+            persist_pending=AsyncMock(side_effect=persist_approval),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        approval_ttl_seconds=86400,
+        utc_now=lambda: _NOW,
+        uuid_factory=uuid4,
+    )
+
+    outcome = await service.execute(
+        context=cast(Any, context),
+        command=_command(),
+    )
+
+    assert outcome.tool_call_created is False
+    assert outcome.approval_request_created is True
+    assert outcome.tool_call.id == existing_tool.id
+    assert outcome.approval_request.agent_tool_call_id == (existing_tool.id)
+    assert len(created_approval_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_conflicting_tool_replay_fails_closed() -> None:
+    context = _context()
+    existing_tool = _existing_tool_call(context)
+    conflicting = AgentToolCall.propose_for_approval(
+        workspace_id=context.agent_run.workspace_id,
+        ticket_id=context.ticket.id,
+        agent_run_id=context.agent_run.id,
+        proposed_by_agent_run_attempt_id=context.attempt.id,
+        sequence=1,
+        provider_tool_call_id="call-1",
+        tool_name="escalate_ticket",
+        tool_version=1,
+        input_fingerprint=_ESCALATE_FINGERPRINT,
+        safe_input={
+            "target_queue": "support_operations",
+            "reason": "Different durable input.",
+        },
+        proposed_at=existing_tool.proposed_at,
+        tool_call_id=existing_tool.id,
+    )
+    service = SensitiveProposalService(
+        transaction_manager=FakeTransactionManager(),
+        sensitive_tool_registry=SensitiveToolRegistry(
+            (create_escalate_ticket_binding(),),
+        ),
+        tool_call_execution_repository=SimpleNamespace(
+            persist_fenced=AsyncMock(
+                return_value=(AgentToolCallPersistenceResult.ALREADY_RECORDED),
+            ),
+        ),
+        tool_call_query_repository=SimpleNamespace(
+            get_sensitive_by_identity=AsyncMock(
+                return_value=conflicting,
+            ),
+        ),
+        approval_request_repository=SimpleNamespace(
+            persist_pending=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        approval_ttl_seconds=86400,
+        utc_now=lambda: _NOW,
+    )
+
+    with pytest.raises(
+        SensitiveProposalConsistencyError,
+        match="conflicts",
+    ):
+        await service.execute(
+            context=cast(Any, context),
+            command=_command(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_conflicting_approval_replay_fails_closed() -> None:
+    context = _context()
+    existing_tool = _existing_tool_call(context)
+    existing_approval = ApprovalRequest.create_pending(
+        tool_call=existing_tool,
+        requested_by_llm_invocation_id=uuid4(),
+        request_reason="Different durable reason.",
+        expires_at=existing_tool.proposed_at + timedelta(days=1),
+        now=existing_tool.proposed_at,
+    )
+    service = SensitiveProposalService(
+        transaction_manager=FakeTransactionManager(),
+        sensitive_tool_registry=SensitiveToolRegistry(
+            (create_escalate_ticket_binding(),),
+        ),
+        tool_call_execution_repository=SimpleNamespace(
+            persist_fenced=AsyncMock(
+                return_value=(AgentToolCallPersistenceResult.ALREADY_RECORDED),
+            ),
+        ),
+        tool_call_query_repository=SimpleNamespace(
+            get_sensitive_by_identity=AsyncMock(
+                return_value=existing_tool,
+            ),
+        ),
+        approval_request_repository=SimpleNamespace(
+            persist_pending=AsyncMock(
+                return_value=(ApprovalRequestPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(
+                return_value=existing_approval,
+            ),
+        ),
+        approval_ttl_seconds=86400,
+        utc_now=lambda: _NOW,
+    )
+
+    with pytest.raises(
+        SensitiveProposalConsistencyError,
+        match="conflicts",
+    ):
+        await service.execute(
+            context=cast(Any, context),
+            command=_command(),
+        )
+
+
+def test_escalate_fingerprint_matches_fixture() -> None:
+    binding = create_escalate_ticket_binding()
+    arguments = EscalateTicketInput(
+        target_queue=(TicketEscalationTargetQueue.SECURITY_OPERATIONS),
+        reason="Potential security incident.",
+    )
+
+    assert (
+        create_tool_call_fingerprint(
+            definition=binding.definition,
+            arguments=arguments,
+        )
+        == _ESCALATE_FINGERPRINT
+    )

@@ -34,6 +34,12 @@ def _create_settings(**overrides: object) -> Settings:
     return cast(Settings, settings_type(_env_file=None, **values))
 
 
+def test_default_ticket_processing_workflow_remains_controlled_support() -> None:
+    settings = _create_settings()
+
+    assert settings.ticket_processing_workflow_version == ("controlled-support-v1")
+
+
 class FakeProvider:
     """Minimal provider exposing a stable process-scoped name."""
 
