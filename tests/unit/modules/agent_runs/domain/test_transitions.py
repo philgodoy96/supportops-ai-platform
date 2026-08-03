@@ -10,10 +10,12 @@ from supportops.modules.agent_runs.domain.models import (
     AgentRunAttemptOutcome,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunFailureDisposition,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
 )
 
 _RUN_ID = UUID(
@@ -273,3 +275,70 @@ def test_failure_command_rejects_invalid_error_text(
 def test_transition_results_are_explicit() -> None:
     assert AgentRunTransitionResult.APPLIED.value == "applied"
     assert AgentRunTransitionResult.LEASE_LOST.value == "lease_lost"
+    assert AgentRunApprovalRequeueResult.APPLIED.value == "applied"
+    assert AgentRunApprovalRequeueResult.STATE_CONFLICT.value == ("state_conflict")
+
+
+def test_requeue_waiting_command_preserves_values() -> None:
+    workspace_id = UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4")
+    ticket_id = UUID("38bb60fe-d2ea-4615-b499-91aa45069019")
+    command = RequeueWaitingAgentRunCommand(
+        workspace_id=workspace_id,
+        ticket_id=ticket_id,
+        agent_run_id=_RUN_ID,
+        requeued_at=_FINISHED_AT,
+    )
+
+    assert command.workspace_id == workspace_id
+    assert command.ticket_id == ticket_id
+    assert command.agent_run_id == _RUN_ID
+    assert command.requeued_at == _FINISHED_AT
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        datetime(2026, 7, 31, 18, 0),
+        datetime(
+            2026,
+            7,
+            31,
+            15,
+            0,
+            tzinfo=timezone(timedelta(hours=-3)),
+        ),
+    ],
+)
+def test_requeue_waiting_command_requires_utc_timestamp(
+    timestamp: datetime,
+) -> None:
+    with pytest.raises(ValueError, match="requeued_at"):
+        RequeueWaitingAgentRunCommand(
+            workspace_id=UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4"),
+            ticket_id=UUID("38bb60fe-d2ea-4615-b499-91aa45069019"),
+            agent_run_id=_RUN_ID,
+            requeued_at=timestamp,
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "workspace_id",
+        "ticket_id",
+        "agent_run_id",
+    ],
+)
+def test_requeue_waiting_command_requires_uuid_ids(
+    field_name: str,
+) -> None:
+    values: dict[str, object] = {
+        "workspace_id": UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4"),
+        "ticket_id": UUID("38bb60fe-d2ea-4615-b499-91aa45069019"),
+        "agent_run_id": _RUN_ID,
+        "requeued_at": _FINISHED_AT,
+    }
+    values[field_name] = "not-a-uuid"
+
+    with pytest.raises(TypeError, match=field_name):
+        RequeueWaitingAgentRunCommand(**values)  # type: ignore[arg-type]

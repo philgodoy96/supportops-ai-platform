@@ -28,9 +28,11 @@ from supportops.modules.agent_runs.domain.recovery import (
     RecoverExpiredAgentRunResult,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
     WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.tickets.application.errors import (
@@ -182,6 +184,12 @@ class FakeAgentRunRepository:
         command: WaitForApprovalAgentRunCommand,
     ) -> AgentRunTransitionResult:
         raise AssertionError("mark_waiting_for_approval must not be called")
+
+    async def requeue_waiting_for_approval(
+        self,
+        command: RequeueWaitingAgentRunCommand,
+    ) -> AgentRunApprovalRequeueResult:
+        raise AssertionError("requeue_waiting_for_approval must not be called")
 
     async def record_failure(
         self,

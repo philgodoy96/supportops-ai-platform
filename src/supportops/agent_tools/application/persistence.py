@@ -63,6 +63,24 @@ class AgentToolCallExecutionRepository(Protocol):
 
         ...
 
+    async def get_by_id_for_update(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_tool_call_id: UUID,
+    ) -> AgentToolCall | None:
+        """Lock and return one workspace-scoped tool call."""
+
+        ...
+
+    async def save_approval_outcome(
+        self,
+        tool_call: AgentToolCall,
+    ) -> None:
+        """Persist a rejected or expired non-executed tool call."""
+
+        ...
+
 
 def _validate_tool_call_ownership(
     *,

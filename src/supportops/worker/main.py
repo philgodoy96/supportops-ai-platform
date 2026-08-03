@@ -160,6 +160,7 @@ async def run_worker(
         retry_policy=retry_policy,
         lease_seconds=resolved_settings.worker_lease_seconds,
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
+        approval_expiration_batch_size=(resolved_settings.approval_expiration_batch_size),
     )
     worker_loop = RunAgentWorkerLoop(
         cycle=cycle_runner,
@@ -187,6 +188,8 @@ async def run_worker(
         poll_interval_seconds=(resolved_settings.worker_poll_interval_seconds),
         lease_seconds=resolved_settings.worker_lease_seconds,
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
+        approval_ttl_seconds=resolved_settings.approval_ttl_seconds,
+        approval_expiration_batch_size=(resolved_settings.approval_expiration_batch_size),
     )
 
     exit_code = _EXIT_SUCCESS

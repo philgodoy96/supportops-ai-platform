@@ -10,6 +10,9 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from supportops.agent_tools.infrastructure.repository import (
+    SqlAlchemyAgentToolCallExecutionRepository,
+)
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
 )
@@ -21,8 +24,14 @@ from supportops.modules.agent_runs.application.worker import (
     WorkerCycleOutcome,
     WorkerCycleResult,
 )
+from supportops.modules.agent_runs.infrastructure.repository import (
+    SqlAlchemyAgentRunRepository,
+)
 from supportops.modules.agent_runs.infrastructure.worker_runtime import (
     PostgreSqlAgentWorkerCycleRunner,
+)
+from supportops.modules.approvals.infrastructure.repository import (
+    SqlAlchemyApprovalRequestRepository,
 )
 
 _NOW = datetime(
@@ -93,6 +102,7 @@ class TestablePostgreSqlAgentWorkerCycleRunner(PostgreSqlAgentWorkerCycleRunner)
             retry_policy=AsyncMock(),
             lease_seconds=45.0,
             execution_timeout_seconds=30.0,
+            approval_expiration_batch_size=100,
             utc_now=lambda: _NOW,
             uuid_provider=lambda: UUID(
                 "dd0ae456-3467-41db-93d1-a908f40e8365",
@@ -186,6 +196,7 @@ async def test_runner_closes_session_when_cycle_raises() -> None:
         retry_policy=AsyncMock(),
         lease_seconds=45.0,
         execution_timeout_seconds=30.0,
+        approval_expiration_batch_size=100,
         utc_now=lambda: _NOW,
     )
 
@@ -222,6 +233,7 @@ def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager
         ),
         lease_seconds=45.0,
         execution_timeout_seconds=30.0,
+        approval_expiration_batch_size=25,
         utc_now=lambda: _NOW,
         uuid_provider=lambda: UUID(
             "dd0ae456-3467-41db-93d1-a908f40e8365",
@@ -234,3 +246,20 @@ def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager
     assert factory_calls[0][0] is session
     assert isinstance(factory_calls[0][1], SqlAlchemyTransactionManager)
     assert cycle._processor._executor is created_executor
+    assert cycle._approval_expiration_batch_size == 25
+    assert cycle._expire_pending_approvals is not None
+    assert isinstance(
+        cycle._expire_pending_approvals._approval_request_repository,
+        SqlAlchemyApprovalRequestRepository,
+    )
+    assert isinstance(
+        cycle._expire_pending_approvals._agent_run_repository,
+        SqlAlchemyAgentRunRepository,
+    )
+    assert isinstance(
+        cycle._expire_pending_approvals._agent_tool_call_repository,
+        SqlAlchemyAgentToolCallExecutionRepository,
+    )
+    assert cycle._expire_pending_approvals._approval_request_repository._session is session
+    assert cycle._expire_pending_approvals._agent_run_repository._session is session
+    assert cycle._expire_pending_approvals._agent_tool_call_repository._session is session

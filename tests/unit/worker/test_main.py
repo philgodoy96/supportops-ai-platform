@@ -403,8 +403,12 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
     assert started["llm_provider"] == "openai"
     assert started["llm_model"] == "gpt-5-nano"
     assert started["ticket_processing_workflow_version"] == ("ticket-classification-v1")
+    assert started["approval_ttl_seconds"] == 86400.0
+    assert started["approval_expiration_batch_size"] == 100
     assert "secret-openai-key" not in json.dumps(started)
     assert "openai_api_key" not in started
+
+    assert _captured_cycle_runner_kwargs()["approval_expiration_batch_size"] == 100
 
 
 async def test_run_worker_executor_factory_builds_session_scoped_registry() -> None:

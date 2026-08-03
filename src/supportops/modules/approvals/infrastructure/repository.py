@@ -1,5 +1,6 @@
 """PostgreSQL repository for durable approval-request persistence."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -147,6 +148,110 @@ class SqlAlchemyApprovalRequestRepository(ApprovalRequestRepository):
         result = await self._session.execute(statement)
 
         return tuple(record.to_domain() for record in result.scalars().all())
+
+    async def get_by_id_for_update(
+        self,
+        *,
+        workspace_id: UUID,
+        approval_request_id: UUID,
+    ) -> ApprovalRequest | None:
+        """Lock and return one workspace-scoped approval request by ID."""
+
+        statement = (
+            select(ApprovalRequestRecord)
+            .where(
+                ApprovalRequestRecord.workspace_id == workspace_id,
+                ApprovalRequestRecord.id == approval_request_id,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            return None
+
+        return record.to_domain()
+
+    async def get_next_expired_pending_for_update(
+        self,
+        *,
+        now: datetime,
+    ) -> ApprovalRequest | None:
+        """Lock the next overdue pending approval, if available."""
+
+        statement = (
+            select(ApprovalRequestRecord)
+            .where(
+                ApprovalRequestRecord.status == (ApprovalRequestStatus.PENDING.value),
+                ApprovalRequestRecord.expires_at <= now,
+            )
+            .order_by(
+                ApprovalRequestRecord.expires_at.asc(),
+                ApprovalRequestRecord.id.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            return None
+
+        return record.to_domain()
+
+    async def save(
+        self,
+        approval_request: ApprovalRequest,
+    ) -> None:
+        """Persist one terminal approval decision without committing."""
+
+        statement = (
+            select(ApprovalRequestRecord)
+            .where(
+                ApprovalRequestRecord.workspace_id == (approval_request.workspace_id),
+                ApprovalRequestRecord.id == approval_request.id,
+            )
+            .with_for_update()
+        )
+        result = await self._session.execute(statement)
+        record = result.scalar_one_or_none()
+
+        if record is None:
+            raise ApprovalRequestConsistencyError(
+                "The approval request does not exist in this workspace.",
+            )
+
+        if (
+            record.workspace_id != approval_request.workspace_id
+            or record.ticket_id != approval_request.ticket_id
+            or record.agent_run_id != approval_request.agent_run_id
+            or record.agent_tool_call_id != approval_request.agent_tool_call_id
+            or record.requested_by_llm_invocation_id
+            != approval_request.requested_by_llm_invocation_id
+            or record.tool_name != approval_request.tool_name
+            or record.tool_version != approval_request.tool_version
+            or record.safety_level != approval_request.safety_level.value
+            or record.input_fingerprint != approval_request.input_fingerprint
+            or dict(record.proposed_input) != dict(approval_request.proposed_input)
+            or record.request_reason != approval_request.request_reason
+            or record.expires_at != approval_request.expires_at
+            or record.created_at != approval_request.created_at
+        ):
+            raise ApprovalRequestConsistencyError(
+                "The approval request proposal data does not match the persisted immutable fields.",
+            )
+
+        record.status = approval_request.status.value
+        record.decision_actor_reference = approval_request.decision_actor_reference
+        record.decision_comment = approval_request.decision_comment
+        record.decision_request_id = approval_request.decision_request_id
+        record.decision_correlation_id = approval_request.decision_correlation_id
+        record.decided_at = approval_request.decided_at
+        record.updated_at = approval_request.updated_at
+
+        await self._session.flush()
 
     async def _load_for_update_by_tool_call(
         self,

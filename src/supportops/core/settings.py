@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     worker_retry_base_seconds: float = Field(default=2.0, gt=0, le=3600)
     worker_retry_max_seconds: float = Field(default=60.0, gt=0, le=86400)
 
+    approval_ttl_seconds: float = Field(
+        default=86400.0,
+        gt=0,
+        le=2592000,
+    )
+    approval_expiration_batch_size: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+    )
+
     ticket_processing_workflow_version: TicketProcessingWorkflowVersion = "controlled-support-v1"
     agent_graph_max_steps: int = Field(default=16, ge=8, le=64)
     agent_graph_max_tool_calls: int = Field(default=3, ge=1, le=10)

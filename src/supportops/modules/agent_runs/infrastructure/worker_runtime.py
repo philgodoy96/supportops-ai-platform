@@ -6,6 +6,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from supportops.agent_tools.infrastructure.repository import (
+    SqlAlchemyAgentToolCallExecutionRepository,
+)
 from supportops.core.transactions import TransactionManager
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
@@ -25,6 +28,12 @@ from supportops.modules.agent_runs.application.worker import (
 )
 from supportops.modules.agent_runs.infrastructure.repository import (
     SqlAlchemyAgentRunRepository,
+)
+from supportops.modules.approvals.application.services import (
+    ExpirePendingApprovalRequests,
+)
+from supportops.modules.approvals.infrastructure.repository import (
+    SqlAlchemyApprovalRequestRepository,
 )
 from supportops.modules.tickets.infrastructure.repository import (
     SqlAlchemyTicketRepository,
@@ -50,6 +59,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         retry_policy: AgentRunRetryPolicy,
         lease_seconds: float,
         execution_timeout_seconds: float,
+        approval_expiration_batch_size: int,
         utc_now: UtcNowProvider | None = None,
         uuid_provider: UuidProvider | None = None,
     ) -> None:
@@ -59,6 +69,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         self._retry_policy = retry_policy
         self._lease_seconds = lease_seconds
         self._execution_timeout_seconds = execution_timeout_seconds
+        self._approval_expiration_batch_size = approval_expiration_batch_size
         self._utc_now = utc_now
         self._uuid_provider = uuid_provider
 
@@ -74,6 +85,12 @@ class PostgreSqlAgentWorkerCycleRunner:
         session: AsyncSession,
     ) -> RunAgentWorkerCycle:
         agent_run_repository = SqlAlchemyAgentRunRepository(session)
+        approval_request_repository = SqlAlchemyApprovalRequestRepository(
+            session,
+        )
+        agent_tool_call_repository = SqlAlchemyAgentToolCallExecutionRepository(
+            session,
+        )
         ticket_repository = SqlAlchemyTicketRepository(session)
         transaction_manager = SqlAlchemyTransactionManager(session)
         executor = self._executor_factory(
@@ -91,6 +108,13 @@ class PostgreSqlAgentWorkerCycleRunner:
             utc_now=self._utc_now,
         )
 
+        expire_pending_approvals = ExpirePendingApprovalRequests(
+            transaction_manager=transaction_manager,
+            approval_request_repository=approval_request_repository,
+            agent_run_repository=agent_run_repository,
+            agent_tool_call_repository=agent_tool_call_repository,
+        )
+
         return RunAgentWorkerCycle(
             worker_id=self._worker_id,
             agent_run_repository=agent_run_repository,
@@ -98,6 +122,8 @@ class PostgreSqlAgentWorkerCycleRunner:
             processor=processor,
             retry_policy=self._retry_policy,
             lease_seconds=self._lease_seconds,
+            expire_pending_approvals=expire_pending_approvals,
+            approval_expiration_batch_size=(self._approval_expiration_batch_size),
             utc_now=self._utc_now,
             uuid_provider=self._uuid_provider,
         )

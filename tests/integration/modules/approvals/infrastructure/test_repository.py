@@ -689,3 +689,196 @@ async def test_caller_transaction_controls_commit_and_rollback(
 
     async with postgresql_session_factory() as session:
         assert await _count_approvals(session) == 1
+
+
+async def test_get_by_id_for_update_is_workspace_scoped(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        _, tool_call, _ = await _seed_pending_context(session)
+        approval = _approval_request(tool_call)
+        await _persist_approval(session, approval)
+
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            locked = await repository.get_by_id_for_update(
+                workspace_id=_WORKSPACE_ID,
+                approval_request_id=_APPROVAL_REQUEST_ID,
+            )
+            cross_workspace = await repository.get_by_id_for_update(
+                workspace_id=_OTHER_WORKSPACE_ID,
+                approval_request_id=_APPROVAL_REQUEST_ID,
+            )
+
+    assert locked == approval
+    assert cross_workspace is None
+
+
+async def test_get_next_expired_pending_for_update_orders_and_skips_locked(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    now = _APPROVAL_AT + timedelta(hours=25)
+
+    async with postgresql_session_factory() as setup_session:
+        claim = await _create_running_claim(setup_session)
+        first_tool_call = _pending_tool_call(claim)
+        second_tool_call = _pending_tool_call(
+            claim,
+            tool_call_id=_SECOND_TOOL_CALL_ID,
+            sequence=2,
+            provider_tool_call_id="provider-sensitive-2",
+            input_fingerprint="e" * 64,
+            safe_input={"reason_code": "alternate"},
+        )
+        first_invocation = _invocation(claim)
+        second_invocation = _invocation(
+            claim,
+            invocation_id=_SECOND_INVOCATION_ID,
+            sequence=2,
+        )
+
+        async with SqlAlchemyTransactionManager(setup_session).transaction():
+            await _persist_invocation(setup_session, first_invocation)
+            await _persist_invocation(setup_session, second_invocation)
+            await _persist_tool_call(setup_session, claim, first_tool_call)
+            await _persist_tool_call(setup_session, claim, second_tool_call)
+
+        earlier = _approval_request(
+            first_tool_call,
+            expires_at=_APPROVAL_AT + timedelta(hours=1),
+        )
+        later = _approval_request(
+            second_tool_call,
+            invocation_id=_SECOND_INVOCATION_ID,
+            approval_request_id=_SECOND_APPROVAL_REQUEST_ID,
+            expires_at=_APPROVAL_AT + timedelta(hours=2),
+            request_reason="Alternate escalation path.",
+        )
+        await _persist_approval(setup_session, earlier)
+        await _persist_approval(setup_session, later)
+
+    async with postgresql_session_factory() as first_session:
+        first_repository = SqlAlchemyApprovalRequestRepository(first_session)
+        async with SqlAlchemyTransactionManager(first_session).transaction():
+            first = await first_repository.get_next_expired_pending_for_update(
+                now=now,
+            )
+            assert first is not None
+            assert first.id == _APPROVAL_REQUEST_ID
+
+            async with postgresql_session_factory() as second_session:
+                second_repository = SqlAlchemyApprovalRequestRepository(
+                    second_session,
+                )
+                async with SqlAlchemyTransactionManager(
+                    second_session,
+                ).transaction():
+                    second = await second_repository.get_next_expired_pending_for_update(
+                        now=now,
+                    )
+                    assert second is not None
+                    assert second.id == _SECOND_APPROVAL_REQUEST_ID
+
+
+async def test_save_updates_decision_fields_only(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        _, tool_call, _ = await _seed_pending_context(session)
+        pending = _approval_request(tool_call)
+        await _persist_approval(session, pending)
+
+        decided_at = _APPROVAL_AT + timedelta(minutes=5)
+        approved = pending.approve(
+            actor_reference="operator:alice",
+            comment="Looks good.",
+            request_id=UUID("88888888-8888-4888-8888-888888888888"),
+            correlation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            decided_at=decided_at,
+        )
+
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        async with SqlAlchemyTransactionManager(session).transaction():
+            await repository.save(approved)
+
+        loaded = await repository.get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+
+    assert loaded is not None
+    assert loaded.status is approved.status
+    assert loaded.decision_actor_reference == "operator:alice"
+    assert loaded.decision_comment == "Looks good."
+    assert loaded.decided_at == decided_at
+    assert loaded.updated_at == decided_at
+    assert loaded.proposed_input == pending.proposed_input
+    assert loaded.request_reason == pending.request_reason
+    assert loaded.expires_at == pending.expires_at
+    assert loaded.created_at == pending.created_at
+
+
+async def test_save_rejects_immutable_mismatch(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        _, tool_call, _ = await _seed_pending_context(session)
+        pending = _approval_request(tool_call)
+        await _persist_approval(session, pending)
+
+        decided_at = _APPROVAL_AT + timedelta(minutes=5)
+        approved = pending.approve(
+            actor_reference="operator:alice",
+            comment=None,
+            request_id=UUID("88888888-8888-4888-8888-888888888888"),
+            correlation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            decided_at=decided_at,
+        )
+        mismatched = replace(approved, request_reason="Mutated reason.")
+
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        with pytest.raises(
+            ApprovalRequestConsistencyError,
+            match="immutable",
+        ):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save(mismatched)
+
+
+async def test_save_does_not_commit(
+    postgresql_session_factory: async_sessionmaker[AsyncSession],
+    clean_business_tables: None,
+) -> None:
+    async with postgresql_session_factory() as session:
+        _, tool_call, _ = await _seed_pending_context(session)
+        pending = _approval_request(tool_call)
+        await _persist_approval(session, pending)
+
+        decided_at = _APPROVAL_AT + timedelta(minutes=5)
+        approved = pending.approve(
+            actor_reference="operator:alice",
+            comment=None,
+            request_id=UUID("88888888-8888-4888-8888-888888888888"),
+            correlation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            decided_at=decided_at,
+        )
+
+        repository = SqlAlchemyApprovalRequestRepository(session)
+        with pytest.raises(RuntimeError, match="force rollback"):
+            async with SqlAlchemyTransactionManager(session).transaction():
+                await repository.save(approved)
+                raise RuntimeError("force rollback")
+
+    async with postgresql_session_factory() as session:
+        loaded = await SqlAlchemyApprovalRequestRepository(session).get_by_id(
+            workspace_id=_WORKSPACE_ID,
+            approval_request_id=_APPROVAL_REQUEST_ID,
+        )
+
+    assert loaded is not None
+    assert loaded.status.value == "pending"
+    assert loaded.decided_at is None

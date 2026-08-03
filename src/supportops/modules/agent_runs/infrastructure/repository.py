@@ -27,10 +27,12 @@ from supportops.modules.agent_runs.domain.repositories import (
     AgentRunRepository,
 )
 from supportops.modules.agent_runs.domain.transitions import (
+    AgentRunApprovalRequeueResult,
     AgentRunFailureDisposition,
     AgentRunTransitionResult,
     CompleteAgentRunCommand,
     FailAgentRunCommand,
+    RequeueWaitingAgentRunCommand,
     WaitForApprovalAgentRunCommand,
 )
 from supportops.modules.agent_runs.infrastructure.models import (
@@ -253,6 +255,46 @@ class SqlAlchemyAgentRunRepository(AgentRunRepository):
 
         await self._session.flush()
         return AgentRunTransitionResult.APPLIED
+
+    async def requeue_waiting_for_approval(
+        self,
+        command: RequeueWaitingAgentRunCommand,
+    ) -> AgentRunApprovalRequeueResult:
+        """Requeue one AgentRun that is waiting for an approval decision."""
+
+        run_statement = (
+            select(AgentRunRecord)
+            .where(
+                and_(
+                    AgentRunRecord.workspace_id == command.workspace_id,
+                    AgentRunRecord.ticket_id == command.ticket_id,
+                    AgentRunRecord.id == command.agent_run_id,
+                )
+            )
+            .with_for_update()
+        )
+        run_result = await self._session.execute(run_statement)
+        record = run_result.scalar_one_or_none()
+        if record is None:
+            return AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+        if (
+            record.status != AgentRunStatus.WAITING_FOR_APPROVAL.value
+            or record.lease_owner is not None
+            or record.lease_token is not None
+            or record.lease_expires_at is not None
+            or record.completed_at is not None
+            or record.last_error_code is not None
+            or record.last_error_summary is not None
+        ):
+            return AgentRunApprovalRequeueResult.STATE_CONFLICT
+
+        record.status = AgentRunStatus.QUEUED.value
+        record.available_at = command.requeued_at
+        record.updated_at = command.requeued_at
+
+        await self._session.flush()
+        return AgentRunApprovalRequeueResult.APPLIED
 
     async def record_failure(
         self,

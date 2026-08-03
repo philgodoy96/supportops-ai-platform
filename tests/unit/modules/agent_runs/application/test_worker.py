@@ -31,6 +31,10 @@ from supportops.modules.agent_runs.domain.recovery import (
 from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
 )
+from supportops.modules.approvals.application.models import (
+    ApprovalExpirationBatchResult,
+    ExpirePendingApprovalRequestsCommand,
+)
 
 _NOW = datetime(
     2026,
@@ -152,8 +156,10 @@ def create_worker(
     recovery_result: RecoverExpiredAgentRunResult | None = None,
     claim: AgentRunClaim | None = None,
     transition_result: AgentRunTransitionResult = (AgentRunTransitionResult.APPLIED),
+    approval_expiration_batch_size: int = 100,
 ) -> tuple[
     RunAgentWorkerCycle,
+    AsyncMock,
     AsyncMock,
     AsyncMock,
     RecordingTransactionManager,
@@ -164,6 +170,11 @@ def create_worker(
 
     processor = AsyncMock()
     processor.execute.return_value = transition_result
+
+    expire_pending_approvals = AsyncMock()
+    expire_pending_approvals.execute.return_value = ApprovalExpirationBatchResult(
+        approval_request_ids=(),
+    )
 
     transaction_manager = RecordingTransactionManager()
     generated_values = uuid_values(
@@ -181,6 +192,8 @@ def create_worker(
             maximum_delay_seconds=60.0,
         ),
         lease_seconds=45.0,
+        expire_pending_approvals=expire_pending_approvals,
+        approval_expiration_batch_size=approval_expiration_batch_size,
         utc_now=lambda: _NOW,
         uuid_provider=lambda: next(generated_values),
     )
@@ -189,12 +202,19 @@ def create_worker(
         worker,
         repository,
         processor,
+        expire_pending_approvals,
         transaction_manager,
     )
 
 
-async def test_idle_cycle_recovers_then_attempts_claim() -> None:
-    worker, repository, processor, transaction_manager = create_worker()
+async def test_idle_cycle_recovers_expires_then_attempts_claim() -> None:
+    (
+        worker,
+        repository,
+        processor,
+        expire_pending_approvals,
+        transaction_manager,
+    ) = create_worker()
 
     result = await worker.execute()
 
@@ -205,12 +225,25 @@ async def test_idle_cycle_recovers_then_attempts_claim() -> None:
     )
     assert transaction_manager.entries == 2
     repository.recover_next_expired.assert_awaited_once()
+    expire_pending_approvals.execute.assert_awaited_once()
     repository.claim_next_available.assert_awaited_once()
+    assert (
+        repository.recover_next_expired.await_args_list[0]
+        and expire_pending_approvals.execute.await_args_list[0]
+        and repository.claim_next_available.await_args_list[0]
+    )
+    assert repository.mock_calls[0][0] == "recover_next_expired"
+    assert expire_pending_approvals.mock_calls[0][0] == "execute"
+    assert repository.mock_calls[1][0] == "claim_next_available"
     processor.execute.assert_not_awaited()
+
+    expiration_command = expire_pending_approvals.execute.await_args.args[0]
+    assert expiration_command.now == _NOW
+    assert expiration_command.batch_size == 100
 
 
 async def test_cycle_reports_recovery_even_when_no_run_is_claimed() -> None:
-    worker, _, processor, _ = create_worker(
+    worker, _, processor, expire_pending_approvals, _ = create_worker(
         recovery_result=create_recovery_result(),
     )
 
@@ -219,12 +252,19 @@ async def test_cycle_reports_recovery_even_when_no_run_is_claimed() -> None:
     assert result.outcome is WorkerCycleOutcome.IDLE
     assert result.recovered_expired_run is True
     assert result.agent_run_id is None
+    expire_pending_approvals.execute.assert_awaited_once()
     processor.execute.assert_not_awaited()
 
 
 async def test_cycle_claims_and_processes_one_run() -> None:
     claim = create_claim()
-    worker, repository, processor, transaction_manager = create_worker(
+    (
+        worker,
+        repository,
+        processor,
+        expire_pending_approvals,
+        transaction_manager,
+    ) = create_worker(
         claim=claim,
     )
 
@@ -236,6 +276,7 @@ async def test_cycle_claims_and_processes_one_run() -> None:
         agent_run_id=_RUN_ID,
     )
     assert transaction_manager.entries == 2
+    expire_pending_approvals.execute.assert_awaited_once()
     processor.execute.assert_awaited_once_with(claim)
 
     command = repository.claim_next_available.await_args.args[0]
@@ -247,7 +288,7 @@ async def test_cycle_claims_and_processes_one_run() -> None:
 
 
 async def test_cycle_reports_lease_loss_from_processor() -> None:
-    worker, _, _, _ = create_worker(
+    worker, _, _, _, _ = create_worker(
         claim=create_claim(),
         transition_result=AgentRunTransitionResult.LEASE_LOST,
     )
@@ -262,7 +303,13 @@ async def test_cycle_reports_lease_loss_from_processor() -> None:
 
 
 async def test_cycle_can_recover_and_process_in_same_iteration() -> None:
-    worker, _, processor, transaction_manager = create_worker(
+    (
+        worker,
+        _,
+        processor,
+        expire_pending_approvals,
+        transaction_manager,
+    ) = create_worker(
         recovery_result=create_recovery_result(),
         claim=create_claim(),
     )
@@ -273,11 +320,12 @@ async def test_cycle_can_recover_and_process_in_same_iteration() -> None:
     assert result.recovered_expired_run is True
     assert result.agent_run_id == _RUN_ID
     assert transaction_manager.entries == 2
+    expire_pending_approvals.execute.assert_awaited_once()
     processor.execute.assert_awaited_once()
 
 
 async def test_recovery_uses_safe_error_and_policy_bounds() -> None:
-    worker, repository, _, _ = create_worker()
+    worker, repository, _, _, _ = create_worker()
 
     await worker.execute()
 
@@ -288,6 +336,40 @@ async def test_recovery_uses_safe_error_and_policy_bounds() -> None:
     assert command.retry_maximum_delay_seconds == 60.0
     assert command.error_code == "worker_lease_expired"
     assert command.error_summary == ("The worker lease expired before execution completed.")
+
+
+async def test_expiration_runs_before_claim_with_configured_batch_size() -> None:
+    call_order: list[str] = []
+
+    worker, repository, _, expire_pending_approvals, _ = create_worker(
+        approval_expiration_batch_size=25,
+    )
+
+    async def track_recovery(command: object) -> None:
+        del command
+        call_order.append("recover")
+        return None
+
+    async def track_expiration(
+        command: ExpirePendingApprovalRequestsCommand,
+    ) -> ApprovalExpirationBatchResult:
+        call_order.append("expire")
+        assert command.batch_size == 25
+        return ApprovalExpirationBatchResult(approval_request_ids=())
+
+    async def track_claim(command: object) -> None:
+        del command
+        call_order.append("claim")
+        return None
+
+    repository.recover_next_expired.side_effect = track_recovery
+    expire_pending_approvals.execute.side_effect = track_expiration
+    repository.claim_next_available.side_effect = track_claim
+
+    result = await worker.execute()
+
+    assert result.outcome is WorkerCycleOutcome.IDLE
+    assert call_order == ["recover", "expire", "claim"]
 
 
 @pytest.mark.parametrize(
@@ -312,6 +394,8 @@ def test_worker_cycle_requires_valid_worker_id(
                 maximum_delay_seconds=60.0,
             ),
             lease_seconds=45.0,
+            expire_pending_approvals=AsyncMock(),
+            approval_expiration_batch_size=100,
         )
 
 
@@ -339,6 +423,8 @@ def test_worker_cycle_requires_positive_lease(
                 maximum_delay_seconds=60.0,
             ),
             lease_seconds=lease_seconds,
+            expire_pending_approvals=AsyncMock(),
+            approval_expiration_batch_size=100,
         )
 
 
