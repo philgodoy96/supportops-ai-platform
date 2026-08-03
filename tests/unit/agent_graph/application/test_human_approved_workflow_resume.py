@@ -36,6 +36,8 @@ from supportops.agent_graph.domain.human_approved_state import (
 )
 from supportops.agent_graph.domain.resume_planning import (
     ApprovalResumeDecisionStatus,
+    CompletedGraphExecution,
+    IncompatibleGraphState,
     InitialGraphExecution,
     ResumeGraphExecution,
 )
@@ -772,3 +774,232 @@ async def test_await_human_approval_rejects_malformed_resume_payload(
         await nodes.await_human_approval(state)
 
     assert captured.value.error_code == "approval_resume_payload_invalid"
+
+
+@pytest.mark.asyncio
+async def test_completed_graph_skips_graph_invocation() -> None:
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(
+            return_value=_StubCheckpointSnapshot({"recommendation_id": "x"}),
+        ),
+        ainvoke=AsyncMock(),
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=cast(Any, graph),
+        resume_planner=cast(Any, _Planner(CompletedGraphExecution())),
+    )
+
+    result = await executor.execute(_execution_context())
+
+    assert isinstance(result, CompletedExecution)
+    graph.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_initial_pause_uses_empty_checkpoint_namespace(
+    human_approved_workflow_executor: HumanApprovedSupportWorkflowExecutor,
+    initial_human_approved_execution_context: AgentRunExecutionContext,
+) -> None:
+    graph = cast(Any, human_approved_workflow_executor._graph)
+    original_ainvoke = graph.ainvoke
+    captured_config: dict[str, object] = {}
+
+    async def _capture_ainvoke(
+        input: object,
+        config: Mapping[str, object],
+        *,
+        context: AgentRunExecutionContext,
+        version: str = "v2",
+    ) -> object:
+        captured_config.update(config)
+        return await original_ainvoke(
+            input,
+            config,
+            context=context,
+            version=version,
+        )
+
+    graph.ainvoke = _capture_ainvoke
+
+    result = await human_approved_workflow_executor.execute(
+        initial_human_approved_execution_context,
+    )
+
+    assert isinstance(result, PausedForApproval)
+    identity = derive_human_approved_support_graph_identity(_AGENT_RUN_ID)
+    configurable = cast(dict[str, object], captured_config["configurable"])
+    assert configurable["thread_id"] == identity.thread_id
+    assert configurable["checkpoint_ns"] == ""
+    assert identity.checkpoint_namespace == ""
+
+
+@pytest.mark.asyncio
+async def test_approved_resume_reuses_thread_without_recreating_initial_state(
+    resumed_human_approved_workflow_executor: HumanApprovedSupportWorkflowExecutor,
+    approved_human_approved_execution_context: AgentRunExecutionContext,
+) -> None:
+    graph = cast(Any, resumed_human_approved_workflow_executor._graph)
+    original_ainvoke = graph.ainvoke
+    captured: dict[str, object] = {}
+
+    async def _capture_ainvoke(
+        input: object,
+        config: Mapping[str, object],
+        *,
+        context: AgentRunExecutionContext,
+        version: str = "v2",
+    ) -> object:
+        captured["input"] = input
+        captured["config"] = config
+        return await original_ainvoke(
+            input,
+            config,
+            context=context,
+            version=version,
+        )
+
+    graph.ainvoke = _capture_ainvoke
+
+    result = await resumed_human_approved_workflow_executor.execute(
+        approved_human_approved_execution_context,
+    )
+
+    assert isinstance(result, CompletedExecution)
+    identity = derive_human_approved_support_graph_identity(_AGENT_RUN_ID)
+    configurable = cast(
+        dict[str, object],
+        cast(Mapping[str, object], captured["config"])["configurable"],
+    )
+    assert configurable["thread_id"] == identity.thread_id
+    resume_input = captured["input"]
+    assert getattr(resume_input, "resume", None) == {
+        "approval_request_id": str(_APPROVAL_REQUEST_ID),
+        "agent_tool_call_id": str(_AGENT_TOOL_CALL_ID),
+        "decision_status": "approved",
+    }
+    assert not isinstance(resume_input, dict)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_approved_resume_does_not_duplicate_sensitive_execution(
+    resumed_human_approved_workflow_executor: HumanApprovedSupportWorkflowExecutor,
+    approved_human_approved_execution_context: AgentRunExecutionContext,
+    sensitive_execution_executor: AsyncMock,
+) -> None:
+    first = await resumed_human_approved_workflow_executor.execute(
+        approved_human_approved_execution_context,
+    )
+    assert isinstance(first, CompletedExecution)
+    assert sensitive_execution_executor.execute.await_count == 1
+
+    completed_executor = HumanApprovedSupportWorkflowExecutor(
+        graph=cast(
+            Any,
+            SimpleNamespace(
+                aget_state=AsyncMock(
+                    return_value=_StubCheckpointSnapshot(
+                        {
+                            **_pending_checkpoint(),
+                            "recommendation_id": str(_RECOMMENDATION_ID),
+                        },
+                    ),
+                ),
+                ainvoke=AsyncMock(),
+            ),
+        ),
+        resume_planner=cast(Any, _Planner(CompletedGraphExecution())),
+    )
+    second = await completed_executor.execute(
+        approved_human_approved_execution_context,
+    )
+
+    assert isinstance(second, CompletedExecution)
+    assert sensitive_execution_executor.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_resume_invokes_sensitive_execution_once(
+    resumed_human_approved_workflow_executor: HumanApprovedSupportWorkflowExecutor,
+    approved_human_approved_execution_context: AgentRunExecutionContext,
+    sensitive_execution_executor: AsyncMock,
+) -> None:
+    result = await resumed_human_approved_workflow_executor.execute(
+        approved_human_approved_execution_context,
+    )
+
+    assert isinstance(result, CompletedExecution)
+    sensitive_execution_executor.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_approved_resume_persists_human_approved_recommendation_v1(
+    sensitive_execution_executor: AsyncMock,
+    approved_human_approved_execution_context: AgentRunExecutionContext,
+) -> None:
+    recommendation = _recommendation()
+    assert recommendation.prompt_id == ("human-approved-support-recommendation")
+    assert recommendation.prompt_version == 1
+    _tool_call, pending = _tool_call_and_pending()
+    approved = pending.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=uuid4(),
+        correlation_id=uuid4(),
+        decided_at=_NOW + timedelta(minutes=5),
+    )
+    nodes = _nodes(
+        approval_request=approved,
+        sensitive_execution_executor=sensitive_execution_executor,
+    )
+    plan = ResumeGraphExecution(
+        approval_request_id=_APPROVAL_REQUEST_ID,
+        agent_tool_call_id=_AGENT_TOOL_CALL_ID,
+        decision_status=ApprovalResumeDecisionStatus.APPROVED,
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=cast(
+            Any,
+            _ResumeGraph(
+                checkpoint_values=_pending_checkpoint(),
+                nodes=nodes,
+                approval_request=approved,
+                decision_status=ApprovalResumeDecisionStatus.APPROVED,
+            ),
+        ),
+        resume_planner=cast(Any, _Planner(plan)),
+    )
+
+    result = await executor.execute(approved_human_approved_execution_context)
+
+    assert isinstance(result, CompletedExecution)
+    recommendation_executor = cast(Any, nodes.recommendation_executor)
+    call_kwargs = recommendation_executor.execute.await_args.kwargs
+    assert call_kwargs["workflow"]["approval"]["status"] == "approved"
+    assert call_kwargs["state"].sensitive_execution_output is not None
+    assert call_kwargs["state"].sensitive_execution_output.status == "escalated"
+
+
+@pytest.mark.asyncio
+async def test_incompatible_planner_result_fails_closed_without_graph() -> None:
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(return_value=_StubCheckpointSnapshot({})),
+        ainvoke=AsyncMock(),
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=cast(Any, graph),
+        resume_planner=cast(
+            Any,
+            _Planner(
+                IncompatibleGraphState(
+                    error_code="human_approved_graph_state_incompatible",
+                    error_summary="The checkpointed graph state is incompatible.",
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(TerminalAgentRunExecutionError) as captured:
+        await executor.execute(_execution_context())
+
+    assert captured.value.error_code == ("human_approved_graph_state_incompatible")
+    graph.ainvoke.assert_not_awaited()

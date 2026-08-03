@@ -84,3 +84,60 @@ def test_rejected_context_omits_execution_output() -> None:
     sensitive_action = _as_mapping(workflow["sensitive_action"])
     assert approval["status"] == "rejected"
     assert sensitive_action["execution_output"] is None
+
+
+def test_expired_context_omits_execution_output() -> None:
+    workflow = build_human_approved_recommendation_workflow(
+        _state(
+            approval_status=HumanApprovalCheckpointStatus.EXPIRED,
+            sensitive_execution_output=None,
+        ),
+    )
+
+    approval = _as_mapping(workflow["approval"])
+    sensitive_action = _as_mapping(workflow["sensitive_action"])
+    assert approval["status"] == "expired"
+    assert sensitive_action["execution_output"] is None
+
+
+def test_approved_without_execution_output_cannot_claim_execution() -> None:
+    workflow = build_human_approved_recommendation_workflow(
+        _state(sensitive_execution_output=None),
+    )
+
+    sensitive_action = _as_mapping(workflow["sensitive_action"])
+    assert sensitive_action["execution_output"] is None
+    assert sensitive_action["tool_name"] == "escalate_ticket"
+
+
+def test_approved_execution_output_requires_escalated_status() -> None:
+    workflow = build_human_approved_recommendation_workflow(
+        _state(),
+    )
+
+    sensitive_action = _as_mapping(workflow["sensitive_action"])
+    execution_output = _as_mapping(sensitive_action["execution_output"])
+    assert execution_output == {
+        "escalation_id": "00000000-0000-0000-0000-000000000001",
+        "ticket_id": "00000000-0000-0000-0000-000000000002",
+        "target_queue": "support_operations",
+        "status": "escalated",
+    }
+
+
+def test_workflow_includes_approval_and_decision_context() -> None:
+    workflow = build_human_approved_recommendation_workflow(
+        _state(
+            approval_status=HumanApprovalCheckpointStatus.REJECTED,
+            sensitive_execution_output=None,
+        ),
+    )
+
+    assert set(workflow) == {
+        "approval",
+        "decision",
+        "sensitive_action",
+    }
+    decision = _as_mapping(workflow["decision"])
+    assert decision["summary"] == "Escalate after approval."
+    assert decision["recommended_action"] == "recommend_escalation"

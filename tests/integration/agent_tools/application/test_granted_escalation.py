@@ -1,18 +1,23 @@
 """Integration tests for granted escalation execution."""
 
 import asyncio
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from supportops.agent_tools.application.grant_persistence import (
+    SensitiveExecutionGrantPersistenceResult,
+)
 from supportops.agent_tools.application.sensitive_execution import (
     ExecuteApprovedTicketEscalation,
     SensitiveExecutionResult,
     SensitiveExecutionStatus,
 )
 from supportops.agent_tools.domain.audit import AgentToolCall, AgentToolCallStatus
+from supportops.agent_tools.domain.grants import SensitiveExecutionGrant
 from supportops.agent_tools.infrastructure.grant_models import (
     SensitiveExecutionGrantRecord,
 )
@@ -22,6 +27,9 @@ from supportops.agent_tools.infrastructure.grant_repository import (
 from supportops.agent_tools.infrastructure.models import AgentToolCallRecord
 from supportops.agent_tools.infrastructure.repository import (
     SqlAlchemyAgentToolCallExecutionRepository,
+)
+from supportops.agent_tools.tools.escalate_ticket import (
+    EscalateTicketInput,
 )
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
@@ -33,6 +41,10 @@ from supportops.modules.agent_runs.domain.claiming import AgentRunClaim
 from supportops.modules.approvals.domain.models import ApprovalRequest
 from supportops.modules.approvals.infrastructure.repository import (
     SqlAlchemyApprovalRequestRepository,
+)
+from supportops.modules.tickets.domain.escalation import TicketEscalation
+from supportops.modules.tickets.domain.escalation_repositories import (
+    TicketEscalationPersistenceResult,
 )
 from supportops.modules.tickets.domain.models import Ticket
 from supportops.modules.tickets.infrastructure.escalation_models import (
@@ -214,3 +226,146 @@ async def test_granted_escalation_rollback_leaves_no_partial_state(
     assert escalation_count.scalar_one() == 0
     assert tool_record.status == AgentToolCallStatus.PENDING_APPROVAL.value
     assert tool_record.executed_by_agent_run_attempt_id is None
+
+
+@pytest.mark.integration
+async def test_crash_after_grant_before_escalation_recovers(
+    approved_ticket_escalation_seed: ApprovedEscalationSeed,
+    approved_ticket_escalation_context: AgentRunExecutionContext,
+    approved_ticket_escalation_approval: ApprovalRequest,
+    approved_ticket_escalation_tool_call: AgentToolCall,
+) -> None:
+    """Crash recovery D: grant durable, escalation missing."""
+
+    session_factory, *_rest = approved_ticket_escalation_seed
+    grant = SensitiveExecutionGrant.create(
+        approval_request=approved_ticket_escalation_approval,
+        tool_call=approved_ticket_escalation_tool_call,
+        executed_by_agent_run_attempt_id=(approved_ticket_escalation_context.attempt.id),
+        created_at=datetime(2026, 8, 3, 19, 10, tzinfo=UTC),
+    )
+
+    async with session_factory() as session:
+        transaction_manager = SqlAlchemyTransactionManager(session)
+        async with transaction_manager.transaction():
+            result = await SqlAlchemySensitiveExecutionGrantRepository(
+                session,
+            ).persist(grant)
+            assert result is SensitiveExecutionGrantPersistenceResult.APPLIED
+
+    async with session_factory() as session:
+        executor = ExecuteApprovedTicketEscalation(
+            transaction_manager=SqlAlchemyTransactionManager(session),
+            approval_request_repository=(SqlAlchemyApprovalRequestRepository(session)),
+            tool_call_repository=(SqlAlchemyAgentToolCallExecutionRepository(session)),
+            grant_repository=(SqlAlchemySensitiveExecutionGrantRepository(session)),
+            escalation_repository=(SqlAlchemyTicketEscalationRepository(session)),
+            utc_now=lambda: datetime(2026, 8, 3, 19, 11, tzinfo=UTC),
+        )
+        outcome = await executor.execute(
+            context=approved_ticket_escalation_context,
+            approval_request_id=(approved_ticket_escalation_approval.id),
+            agent_tool_call_id=(approved_ticket_escalation_tool_call.id),
+        )
+
+    assert outcome.grant.id == grant.id
+    assert outcome.escalation.agent_tool_call_id == (approved_ticket_escalation_tool_call.id)
+    assert outcome.output.status == "escalated"
+
+    async with session_factory() as session:
+        grant_count = await session.execute(
+            select(func.count()).select_from(SensitiveExecutionGrantRecord)
+        )
+        escalation_count = await session.execute(
+            select(func.count()).select_from(TicketEscalationRecord)
+        )
+        tool_record = (
+            await session.execute(
+                select(AgentToolCallRecord).where(
+                    AgentToolCallRecord.id == (approved_ticket_escalation_tool_call.id),
+                )
+            )
+        ).scalar_one()
+
+    assert grant_count.scalar_one() == 1
+    assert escalation_count.scalar_one() == 1
+    assert tool_record.status == AgentToolCallStatus.SUCCEEDED.value
+
+
+@pytest.mark.integration
+async def test_crash_after_escalation_before_tool_success_recovers(
+    approved_ticket_escalation_seed: ApprovedEscalationSeed,
+    approved_ticket_escalation_context: AgentRunExecutionContext,
+    approved_ticket_escalation_approval: ApprovalRequest,
+    approved_ticket_escalation_tool_call: AgentToolCall,
+) -> None:
+    """Crash recovery E: grant and escalation durable, tool still pending."""
+
+    session_factory, *_rest = approved_ticket_escalation_seed
+    created_at = datetime(2026, 8, 3, 19, 10, tzinfo=UTC)
+    grant = SensitiveExecutionGrant.create(
+        approval_request=approved_ticket_escalation_approval,
+        tool_call=approved_ticket_escalation_tool_call,
+        executed_by_agent_run_attempt_id=(approved_ticket_escalation_context.attempt.id),
+        created_at=created_at,
+    )
+    escalation = TicketEscalation.create_from_grant(
+        grant=grant,
+        input_data=EscalateTicketInput.model_validate(
+            dict(grant.granted_input),
+        ),
+        created_at=created_at,
+    )
+
+    async with session_factory() as session:
+        transaction_manager = SqlAlchemyTransactionManager(session)
+        async with transaction_manager.transaction():
+            grant_result = await SqlAlchemySensitiveExecutionGrantRepository(
+                session,
+            ).persist(grant)
+            escalation_result = await SqlAlchemyTicketEscalationRepository(
+                session,
+            ).persist(escalation)
+            assert grant_result is SensitiveExecutionGrantPersistenceResult.APPLIED
+            assert escalation_result is TicketEscalationPersistenceResult.APPLIED
+
+    async with session_factory() as session:
+        executor = ExecuteApprovedTicketEscalation(
+            transaction_manager=SqlAlchemyTransactionManager(session),
+            approval_request_repository=(SqlAlchemyApprovalRequestRepository(session)),
+            tool_call_repository=(SqlAlchemyAgentToolCallExecutionRepository(session)),
+            grant_repository=(SqlAlchemySensitiveExecutionGrantRepository(session)),
+            escalation_repository=(SqlAlchemyTicketEscalationRepository(session)),
+            utc_now=lambda: datetime(2026, 8, 3, 19, 11, tzinfo=UTC),
+        )
+        outcome = await executor.execute(
+            context=approved_ticket_escalation_context,
+            approval_request_id=(approved_ticket_escalation_approval.id),
+            agent_tool_call_id=(approved_ticket_escalation_tool_call.id),
+        )
+
+    assert outcome.grant.id == grant.id
+    assert outcome.escalation.id == escalation.id
+    assert outcome.status in {
+        SensitiveExecutionStatus.APPLIED,
+        SensitiveExecutionStatus.ALREADY_RECORDED,
+    }
+
+    async with session_factory() as session:
+        grant_count = await session.execute(
+            select(func.count()).select_from(SensitiveExecutionGrantRecord)
+        )
+        escalation_count = await session.execute(
+            select(func.count()).select_from(TicketEscalationRecord)
+        )
+        tool_record = (
+            await session.execute(
+                select(AgentToolCallRecord).where(
+                    AgentToolCallRecord.id == (approved_ticket_escalation_tool_call.id),
+                )
+            )
+        ).scalar_one()
+
+    assert grant_count.scalar_one() == 1
+    assert escalation_count.scalar_one() == 1
+    assert tool_record.status == AgentToolCallStatus.SUCCEEDED.value

@@ -66,10 +66,31 @@ def test_payload_contains_only_safe_approval_fields() -> None:
         "request_reason",
         "expires_at",
     }
-    assert "workspace_id" not in value
-    assert "lease_token" not in value
-    assert "checkpoint" not in value
-    assert "provider_tool_call_id" not in value
+    excluded = {
+        "workspace_id",
+        "lease_token",
+        "lease_owner",
+        "checkpoint",
+        "provider_tool_call_id",
+        "proposed_by_agent_run_attempt_id",
+        "executed_by_agent_run_attempt_id",
+        "attempt_id",
+        "agent_run_attempt_id",
+        "prompt",
+        "prompt_id",
+        "prompt_version",
+        "raw_output",
+        "safe_output",
+        "request_id",
+        "correlation_id",
+        "ingestion_request_id",
+        "actor_reference",
+        "decision_actor_reference",
+        "input_fingerprint",
+        "sequence",
+        "proposed_at",
+    }
+    assert excluded.isdisjoint(value)
 
 
 def test_payload_round_trips_from_framework_value() -> None:

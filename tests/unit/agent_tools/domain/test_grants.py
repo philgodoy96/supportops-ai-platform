@@ -326,3 +326,39 @@ def test_different_actor_request_correlation_conflicts() -> None:
     assert not first.matches_authorization(
         replace(first, decision_correlation_id=uuid4()),
     )
+
+
+def test_different_approved_at_conflicts() -> None:
+    tool_call, approval = _approved_records()
+    first = SensitiveExecutionGrant.create(
+        approval_request=approval,
+        tool_call=tool_call,
+        executed_by_agent_run_attempt_id=uuid4(),
+        created_at=_NOW + timedelta(minutes=6),
+    )
+    second = replace(
+        first,
+        approved_at=first.approved_at + timedelta(seconds=1),
+        created_at=first.created_at + timedelta(seconds=1),
+    )
+
+    assert not first.matches_authorization(second)
+
+
+def test_different_granted_input_conflicts() -> None:
+    tool_call, approval = _approved_records()
+    first = SensitiveExecutionGrant.create(
+        approval_request=approval,
+        tool_call=tool_call,
+        executed_by_agent_run_attempt_id=uuid4(),
+        created_at=_NOW + timedelta(minutes=6),
+    )
+    second = replace(
+        first,
+        granted_input={
+            "target_queue": "security_operations",
+            "reason": "A different escalation reason.",
+        },
+    )
+
+    assert not first.matches_authorization(second)
