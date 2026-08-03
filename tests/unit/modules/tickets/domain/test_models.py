@@ -146,3 +146,25 @@ def test_ticket_rejects_non_utc_timestamp() -> None:
             created_at=non_utc,
             updated_at=non_utc,
         )
+
+
+def test_ticket_status_remains_open_without_escalation_fields() -> None:
+    ticket = create_ticket(
+        now=datetime(2026, 7, 31, 12, 0, tzinfo=UTC),
+    )
+
+    assert ticket.status is TicketStatus.OPEN
+    assert not hasattr(ticket, "escalation_id")
+    assert not hasattr(ticket, "target_queue")
+    assert set(ticket.__slots__) == {
+        "id",
+        "workspace_id",
+        "subject",
+        "description",
+        "status",
+        "external_reference",
+        "ingestion_request_id",
+        "correlation_id",
+        "created_at",
+        "updated_at",
+    }
