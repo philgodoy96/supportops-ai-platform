@@ -16,6 +16,15 @@ from supportops.modules.agent_runs.application.errors import AgentRunNotFoundErr
 from supportops.modules.approvals.api.pagination import (
     InvalidApprovalPaginationCursor,
 )
+from supportops.modules.approvals.application.errors import (
+    ApprovalDecisionConflictError,
+    ApprovalRequestExpiredError,
+    ApprovalRunStateConflictError,
+    ApprovalToolCallStateConflictError,
+)
+from supportops.modules.approvals.application.errors import (
+    ApprovalRequestNotFoundError as ApprovalDecisionNotFoundError,
+)
 from supportops.modules.approvals.application.queries import (
     ApprovalRequestNotFoundError,
 )
@@ -158,6 +167,26 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(
         ApprovalRequestNotFoundError,
         _approval_request_not_found_handler,
+    )
+    app.add_exception_handler(
+        ApprovalDecisionNotFoundError,
+        _approval_request_not_found_handler,
+    )
+    app.add_exception_handler(
+        ApprovalDecisionConflictError,
+        _approval_decision_conflict_handler,
+    )
+    app.add_exception_handler(
+        ApprovalRequestExpiredError,
+        _approval_request_expired_handler,
+    )
+    app.add_exception_handler(
+        ApprovalRunStateConflictError,
+        _approval_run_state_conflict_handler,
+    )
+    app.add_exception_handler(
+        ApprovalToolCallStateConflictError,
+        _approval_tool_call_state_conflict_handler,
     )
     app.add_exception_handler(
         InvalidApprovalPaginationCursor,
@@ -456,6 +485,62 @@ async def _approval_request_not_found_handler(
         status_code=404,
         code="approval_request_not_found",
         message="Approval request was not found.",
+    )
+
+
+async def _approval_decision_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="approval_decision_conflict",
+        message=("The approval request already has a conflicting decision."),
+    )
+
+
+async def _approval_request_expired_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="approval_request_expired",
+        message="The approval request has expired.",
+    )
+
+
+async def _approval_run_state_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="approval_run_state_conflict",
+        message=("The AgentRun is not waiting for this approval decision."),
+    )
+
+
+async def _approval_tool_call_state_conflict_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    del request
+    del error
+
+    return _expected_error_response(
+        status_code=409,
+        code="approval_tool_call_state_conflict",
+        message=("The proposed sensitive tool call is inconsistent."),
     )
 
 
