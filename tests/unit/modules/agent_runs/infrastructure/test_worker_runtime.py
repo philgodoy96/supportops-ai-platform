@@ -237,6 +237,40 @@ def test_build_cycle_injects_process_observability_client() -> None:
 
     assert cycle._processor._observability_client is observability_client
     assert cycle._expire_pending_approvals._observability_client is (observability_client)
+    assert cycle._processor._flush_observability_at_attempt_end is False
+
+
+@pytest.mark.parametrize("flush_at_attempt_end", [False, True])
+def test_build_cycle_passes_flush_policy_to_processor(
+    flush_at_attempt_end: bool,
+) -> None:
+    session = AsyncMock(spec=AsyncSession)
+    observability_client = object()
+
+    runner = PostgreSqlAgentWorkerCycleRunner(
+        session_factory=AsyncMock(),
+        worker_id="worker-a",
+        executor_factory=lambda session, transaction_manager: AsyncMock(),
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        lease_seconds=45.0,
+        execution_timeout_seconds=30.0,
+        approval_expiration_batch_size=25,
+        utc_now=lambda: _NOW,
+        uuid_provider=lambda: UUID(
+            "dd0ae456-3467-41db-93d1-a908f40e8365",
+        ),
+        observability_client=observability_client,  # type: ignore[arg-type]
+        flush_observability_at_attempt_end=flush_at_attempt_end,
+    )
+
+    cycle = runner._build_cycle(session)
+
+    assert cycle._processor._observability_client is observability_client
+    assert cycle._processor._flush_observability_at_attempt_end is (flush_at_attempt_end)
+    assert runner._flush_observability_at_attempt_end is flush_at_attempt_end
 
 
 def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager() -> None:
