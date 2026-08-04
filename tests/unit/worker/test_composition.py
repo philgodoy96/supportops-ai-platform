@@ -25,6 +25,12 @@ from supportops.agent_graph.domain.human_approved_state import (
 from supportops.agent_graph.domain.state import (
     CONTROLLED_SUPPORT_WORKFLOW_VERSION,
 )
+from supportops.agent_tools.application.execution import (
+    BoundedReadOnlyToolExecutor,
+)
+from supportops.agent_tools.application.sensitive_execution import (
+    ExecuteApprovedTicketEscalation,
+)
 from supportops.agent_tools.infrastructure.query_repository import (
     SqlAlchemyAgentToolCallQueryRepository,
 )
@@ -1100,6 +1106,27 @@ async def test_controlled_workflow_shares_process_observability_client() -> None
         assert isinstance(
             human_approved_executor,
             HumanApprovedSupportWorkflowExecutor,
+        )
+
+        decide_node = graph.nodes["decide_and_execute"].bound.afunc
+        bounded_executor = decide_node.__self__.tool_executor._executor
+        assert isinstance(bounded_executor, BoundedReadOnlyToolExecutor)
+        assert bounded_executor._observability_client is cast(
+            Any,
+            observability_client,
+        )
+
+        human_approved_graph = cast(Any, human_approved_executor._graph)
+        sensitive_node = human_approved_graph.nodes["execute_sensitive_tool"].bound.afunc
+        sensitive_executor = sensitive_node.__self__.sensitive_tool_execution.executor
+        assert isinstance(sensitive_executor, ExecuteApprovedTicketEscalation)
+        assert sensitive_executor._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert llm_runtime.gateway._observability_client is (bounded_executor._observability_client)
+        assert llm_runtime.gateway._observability_client is (
+            sensitive_executor._observability_client
         )
     finally:
         await controlled_runtime.close()

@@ -1,10 +1,14 @@
 """Idempotent execution service for approved sensitive tools."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from time import perf_counter
+from typing import Final, Protocol
 from uuid import UUID, uuid4
 
 from supportops.agent_tools.application.grant_persistence import (
@@ -15,6 +19,7 @@ from supportops.agent_tools.domain.audit import (
     AgentToolCall,
     AgentToolCallStatus,
 )
+from supportops.agent_tools.domain.contracts import ToolSafetyLevel
 from supportops.agent_tools.domain.grants import (
     SensitiveExecutionGrant,
 )
@@ -40,9 +45,45 @@ from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationPersistenceResult,
     TicketEscalationRepository,
 )
+from supportops.observability.contracts import (
+    ObservabilityClient,
+    ObservationScope,
+)
+from supportops.observability.models import (
+    JsonValue,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+)
+from supportops.observability.noop import NoOpObservabilityClient
 
 type UtcNowProvider = Callable[[], datetime]
 type UuidFactory = Callable[[], UUID]
+
+_OBSERVATION_NAME: Final = "tool.execute"
+_UNEXPECTED_FAILURE_CODE: Final = "tool_execution_unexpected_failure"
+
+_OBSERVATION_METADATA_KEYS: Final = frozenset(
+    {
+        "tool_name",
+        "tool_safety",
+        "requires_approval",
+        "agent_run_id",
+        "agent_run_attempt_id",
+        "tool_call_id",
+        "workspace_id",
+        "ticket_id",
+        "execution_request_id",
+        "correlation_id",
+        "status",
+        "tool_outcome",
+        "error_code",
+        "latency_ms",
+        "idempotent_replay",
+    }
+)
+_OBSERVATION_METADATA_PATHS: Final = frozenset((key,) for key in _OBSERVATION_METADATA_KEYS)
 
 
 class SensitiveExecutionStatus(StrEnum):
@@ -102,6 +143,7 @@ class ExecuteApprovedTicketEscalation:
         escalation_repository: TicketEscalationRepository,
         utc_now: UtcNowProvider | None = None,
         uuid_factory: UuidFactory = uuid4,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         self._transaction_manager = transaction_manager
         self._approval_request_repository = approval_request_repository
@@ -110,6 +152,7 @@ class ExecuteApprovedTicketEscalation:
         self._escalation_repository = escalation_repository
         self._utc_now = utc_now or _utc_now
         self._uuid_factory = uuid_factory
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(
         self,
@@ -177,76 +220,260 @@ class ExecuteApprovedTicketEscalation:
                     "Sensitive tool call is not executable.",
                 )
 
-            grant = SensitiveExecutionGrant.create(
-                approval_request=approval,
-                tool_call=tool_call,
-                executed_by_agent_run_attempt_id=context.attempt.id,
-                created_at=executed_at,
-                grant_id=self._uuid_factory(),
+            observation = _SafeToolObservation(
+                client=self._observability_client,
+                attributes=_start_attributes(
+                    context=context,
+                    tool_call=tool_call,
+                ),
             )
-            grant_result = await self._grant_repository.persist(
-                grant,
-            )
-            if grant_result is SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED:
-                durable_grant = await self._grant_repository.get_by_agent_tool_call_id(
-                    workspace_id=grant.workspace_id,
-                    agent_tool_call_id=grant.agent_tool_call_id,
-                )
-                if durable_grant is None:
-                    raise SensitiveExecutionConsistencyError(
-                        "Recorded grant could not be loaded.",
-                    )
-                grant = durable_grant
+            observation.start()
+            started_monotonic = perf_counter()
 
-            input_data = EscalateTicketInput.model_validate(
-                dict(grant.granted_input),
-            )
-            escalation = TicketEscalation.create_from_grant(
-                grant=grant,
-                input_data=input_data,
-                created_at=executed_at,
-                escalation_id=self._uuid_factory(),
-            )
-            escalation_result = await self._escalation_repository.persist(
-                escalation,
-            )
-            if escalation_result is TicketEscalationPersistenceResult.ALREADY_RECORDED:
-                durable_escalation = await self._escalation_repository.get_by_agent_tool_call_id(
-                    workspace_id=escalation.workspace_id,
-                    agent_tool_call_id=(escalation.agent_tool_call_id),
+            try:
+                grant = SensitiveExecutionGrant.create(
+                    approval_request=approval,
+                    tool_call=tool_call,
+                    executed_by_agent_run_attempt_id=context.attempt.id,
+                    created_at=executed_at,
+                    grant_id=self._uuid_factory(),
                 )
-                if durable_escalation is None:
-                    raise SensitiveExecutionConsistencyError(
-                        "Recorded escalation could not be loaded.",
+                grant_result = await self._grant_repository.persist(
+                    grant,
+                )
+                if grant_result is SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED:
+                    durable_grant = await self._grant_repository.get_by_agent_tool_call_id(
+                        workspace_id=grant.workspace_id,
+                        agent_tool_call_id=grant.agent_tool_call_id,
                     )
-                escalation = durable_escalation
+                    if durable_grant is None:
+                        raise SensitiveExecutionConsistencyError(
+                            "Recorded grant could not be loaded.",
+                        )
+                    grant = durable_grant
 
-            completed_tool_call = tool_call.complete_granted_execution_success(
-                executed_by_agent_run_attempt_id=(context.attempt.id),
-                execution_started_at=executed_at,
-                finished_at=executed_at,
-                safe_output=_to_output(
+                input_data = EscalateTicketInput.model_validate(
+                    dict(grant.granted_input),
+                )
+                escalation = TicketEscalation.create_from_grant(
+                    grant=grant,
+                    input_data=input_data,
+                    created_at=executed_at,
+                    escalation_id=self._uuid_factory(),
+                )
+                escalation_result = await self._escalation_repository.persist(
                     escalation,
-                ).model_dump(mode="json"),
-            )
-            await self._tool_call_repository.save_granted_execution_success(
-                tool_call=completed_tool_call,
+                )
+                if escalation_result is TicketEscalationPersistenceResult.ALREADY_RECORDED:
+                    durable_escalation = (
+                        await self._escalation_repository.get_by_agent_tool_call_id(
+                            workspace_id=escalation.workspace_id,
+                            agent_tool_call_id=(escalation.agent_tool_call_id),
+                        )
+                    )
+                    if durable_escalation is None:
+                        raise SensitiveExecutionConsistencyError(
+                            "Recorded escalation could not be loaded.",
+                        )
+                    escalation = durable_escalation
+
+                completed_tool_call = tool_call.complete_granted_execution_success(
+                    executed_by_agent_run_attempt_id=(context.attempt.id),
+                    execution_started_at=executed_at,
+                    finished_at=executed_at,
+                    safe_output=_to_output(
+                        escalation,
+                    ).model_dump(mode="json"),
+                )
+                await self._tool_call_repository.save_granted_execution_success(
+                    tool_call=completed_tool_call,
+                )
+
+                status = (
+                    SensitiveExecutionStatus.APPLIED
+                    if (
+                        grant_result is SensitiveExecutionGrantPersistenceResult.APPLIED
+                        and escalation_result is TicketEscalationPersistenceResult.APPLIED
+                    )
+                    else SensitiveExecutionStatus.ALREADY_RECORDED
+                )
+                result = SensitiveExecutionResult(
+                    status=status,
+                    grant=grant,
+                    escalation=escalation,
+                    output=_to_output(escalation),
+                )
+                observation.update(
+                    _completion_update(
+                        result=result,
+                        latency_ms=_elapsed_milliseconds(started_monotonic),
+                    )
+                )
+                return result
+            except Exception:
+                observation.update(
+                    _unexpected_failure_update(
+                        latency_ms=_elapsed_milliseconds(started_monotonic),
+                    )
+                )
+                raise
+            finally:
+                observation.close()
+
+
+class _SafeToolObservation:
+    """Isolate observability failures from sensitive execution behavior."""
+
+    def __init__(
+        self,
+        *,
+        client: ObservabilityClient,
+        attributes: ObservationAttributes,
+    ) -> None:
+        self._client = client
+        self._attributes = attributes
+        self._manager: AbstractContextManager[ObservationScope] | None = None
+        self._scope: ObservationScope | None = None
+
+    def start(self) -> None:
+        try:
+            self._manager = self._client.start_observation(self._attributes)
+            self._scope = self._manager.__enter__()
+        except Exception:
+            self._manager = None
+            self._scope = None
+
+    def update(self, update: ObservationUpdate | None) -> None:
+        if self._scope is None or update is None:
+            return
+
+        try:
+            self._scope.update(update)
+        except Exception:
+            return
+
+    def close(self) -> None:
+        if self._manager is None:
+            return
+
+        try:
+            self._manager.__exit__(None, None, None)
+        except Exception:
+            return
+        finally:
+            self._manager = None
+            self._scope = None
+
+
+def _start_attributes(
+    *,
+    context: AgentRunExecutionContext,
+    tool_call: AgentToolCall,
+) -> ObservationAttributes:
+    try:
+        return ObservationAttributes(
+            name=_OBSERVATION_NAME,
+            observation_type=ObservationType.TOOL,
+            metadata=_start_metadata(
+                context=context,
+                tool_call=tool_call,
+            ),
+            metadata_paths=_OBSERVATION_METADATA_PATHS,
+            input_data=None,
+            input_paths=frozenset(),
+            output_paths=frozenset(),
+        )
+    except Exception:
+        return ObservationAttributes(
+            name=_OBSERVATION_NAME,
+            observation_type=ObservationType.TOOL,
+            input_data=None,
+            input_paths=frozenset(),
+            output_paths=frozenset(),
+        )
+
+
+def _start_metadata(
+    *,
+    context: AgentRunExecutionContext,
+    tool_call: AgentToolCall,
+) -> dict[str, JsonValue]:
+    metadata: dict[str, JsonValue] = {
+        "tool_name": tool_call.tool_name,
+        "tool_safety": tool_call.safety_level.value,
+        "requires_approval": _requires_approval(tool_call.safety_level),
+        "agent_run_id": str(context.agent_run.id),
+        "agent_run_attempt_id": str(context.attempt.id),
+        "tool_call_id": str(tool_call.id),
+        "workspace_id": str(context.agent_run.workspace_id),
+        "ticket_id": str(context.ticket.id),
+    }
+
+    correlation_id = getattr(context.agent_run, "correlation_id", None)
+    if correlation_id is not None:
+        metadata["correlation_id"] = str(correlation_id)
+
+    execution_request_id = getattr(context.attempt, "execution_request_id", None)
+    if execution_request_id is not None:
+        metadata["execution_request_id"] = str(execution_request_id)
+
+    return metadata
+
+
+def _completion_update(
+    *,
+    result: SensitiveExecutionResult,
+    latency_ms: int,
+) -> ObservationUpdate | None:
+    try:
+        if result.status is SensitiveExecutionStatus.ALREADY_RECORDED:
+            return ObservationUpdate(
+                status=ObservationStatus.OK,
+                metadata={
+                    "status": ObservationStatus.OK.value,
+                    "tool_outcome": "already_recorded",
+                    "latency_ms": latency_ms,
+                    "idempotent_replay": True,
+                },
             )
 
-        status = (
-            SensitiveExecutionStatus.APPLIED
-            if (
-                grant_result is SensitiveExecutionGrantPersistenceResult.APPLIED
-                and escalation_result is TicketEscalationPersistenceResult.APPLIED
-            )
-            else SensitiveExecutionStatus.ALREADY_RECORDED
+        return ObservationUpdate(
+            status=ObservationStatus.OK,
+            metadata={
+                "status": ObservationStatus.OK.value,
+                "tool_outcome": "succeeded",
+                "latency_ms": latency_ms,
+            },
         )
-        return SensitiveExecutionResult(
-            status=status,
-            grant=grant,
-            escalation=escalation,
-            output=_to_output(escalation),
+    except Exception:
+        return None
+
+
+def _unexpected_failure_update(
+    *,
+    latency_ms: int,
+) -> ObservationUpdate | None:
+    try:
+        return ObservationUpdate(
+            status=ObservationStatus.ERROR,
+            metadata={
+                "status": ObservationStatus.ERROR.value,
+                "tool_outcome": "unexpected_failure",
+                "error_code": _UNEXPECTED_FAILURE_CODE,
+                "latency_ms": latency_ms,
+            },
+            error_code=_UNEXPECTED_FAILURE_CODE,
         )
+    except Exception:
+        return None
+
+
+def _requires_approval(safety_level: ToolSafetyLevel) -> bool:
+    return safety_level is not ToolSafetyLevel.READ_ONLY
+
+
+def _elapsed_milliseconds(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
 
 
 def _validate_context_and_approval(
