@@ -6,7 +6,7 @@ SupportOps AI Platform is a production-minded backend and AI systems engineering
 
 The platform is intentionally structured as an API-first modular monolith. This architecture keeps deployment and operational complexity controlled while preserving clear internal boundaries that can evolve as the system grows.
 
-The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification with invocation and accepted classification persistence, classification inspection, logical invocation inspection, offline deterministic evaluation, opt-in provider evaluation, PostgreSQL-authoritative immutable knowledge-document versioning, deterministic chunking, embedding providers, explicit Qdrant indexing, active-version semantic knowledge retrieval with authoritative PostgreSQL hydration, the controlled support workflow that combines LangGraph orchestration, bounded read-only tool execution, durable tool-call auditing, grounded recommendation drafting, recommendation and citation persistence, and workspace-scoped controlled support inspection, and the separately versioned human-approved support workflow that adds durable sensitive proposals, approval interruption and resume, grant-gated sensitive execution, immutable ticket escalation, and workspace-scoped approval list/detail, approve/reject command, and ticket escalation list/detail APIs with worker-owned resume. External side-effect tools, reranking, AI observability integrations, and RAGAS remain later phases.
+The current repository phase establishes the operational foundation, workspace-scoped persistence, the Slice 1 workspace and ticket HTTP API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification with invocation and accepted classification persistence, classification inspection, logical invocation inspection, repository-owned offline deterministic evaluation with versioned datasets, split manifests, typed prediction envelopes, canonical hashing, atomic artifact writes, explicit prompt-version selection, and standalone classification release gates, opt-in provider evaluation, PostgreSQL-authoritative immutable knowledge-document versioning, deterministic chunking, embedding providers, explicit Qdrant indexing, active-version semantic knowledge retrieval with authoritative PostgreSQL hydration, the controlled support workflow that combines LangGraph orchestration, bounded read-only tool execution, durable tool-call auditing, grounded recommendation drafting, recommendation and citation persistence, and workspace-scoped controlled support inspection, and the separately versioned human-approved support workflow that adds durable sensitive proposals, approval interruption and resume, grant-gated sensitive execution, immutable ticket escalation, and workspace-scoped approval list/detail, approve/reject command, and ticket escalation list/detail APIs with worker-owned resume. External side-effect tools, reranking, multi-domain evaluation beyond structured classification, and RAGAS remain later phases.
 
 The controlled support workflow is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). The human-approved support workflow is documented in [`human-approved-workflow.md`](human-approved-workflow.md). Approval inspection, decision, and escalation inspection HTTP contracts are documented in [`../development/approval-workflow-api.md`](../development/approval-workflow-api.md). Durability boundaries for AgentRun and LangGraph checkpoint ownership are recorded in [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md) and [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
 
@@ -55,8 +55,9 @@ Current ownership:
 - the worker owns process-scoped LLM provider and Gateway composition, the PostgreSQL checkpoint runtime, its own embedding provider, Qdrant client, immutable knowledge index profile, and vector search adapter, expired lease recovery, claim, versioned executor dispatch, classification, controlled graph execution, bounded read-only tool execution, human-approved interrupt and resume, grant-gated sensitive execution, ticket escalation persistence, recommendation drafting, and fenced outcome persistence;
 - the indexing CLI remains a separate one-shot process that owns its own PostgreSQL engine and session factory, Qdrant client, and embedding provider for explicit collection bootstrap and version indexing;
 - PostgreSQL owns tickets, AgentRuns, attempts, leases, retry scheduling, execution history, logical invocations, accepted classifications, controlled tool-call audits, support recommendations, recommendation citations, knowledge documents, immutable source versions, immutable index profiles, authoritative chunk records, indexing lifecycle metadata, embedding usage and cost provenance, failure provenance, active-version pointers, and retrieval evidence content, and also stores LangGraph checkpoints whose schema remains framework-owned;
-- offline evaluation owns versioned synthetic datasets, prediction artifacts, deterministic metrics, and reproducible reports outside the API and worker processes;
-- Qdrant owns only the rebuildable dense-vector candidate projection used for indexing writes, public semantic search, and controlled workflow knowledge search, and is not required by ticket classification or the deterministic baseline.
+- repository-owned evaluation owns versioned synthetic datasets, split manifests, evaluation manifests, typed prediction envelopes, deterministic metrics, standalone release gates, and reproducible reports outside the API and worker processes, and remains separate from runtime business authority and optional observability;
+- Qdrant owns only the rebuildable dense-vector candidate projection used for indexing writes, public semantic search, and controlled workflow knowledge search, and is not required by ticket classification or the deterministic baseline;
+- optional Langfuse observability receives derived telemetry only and is not the evaluation source of truth.
 
 API document registration remains source-only. API business routes may use Qdrant for semantic search. The worker now owns the LLM, checkpoint, embedding, and Qdrant resources required by `controlled-support-v1`, while the API independently owns the retrieval resources used by the public semantic search endpoint. Indexing does not activate a document version.
 
@@ -72,8 +73,10 @@ inspection plane
 → workspace-scoped read-only API
 
 evaluation plane
-→ offline datasets, predictions, metrics, and reports
+→ repository-owned datasets, splits, predictions, metrics, release gates, and reports
 ```
+
+Evaluation remains separate from runtime business authority and from optional observability. PostgreSQL remains authoritative for durable business records. LangGraph PostgreSQL checkpoints remain authoritative for graph continuity. Qdrant remains a rebuildable retrieval projection. Langfuse remains optional derived telemetry and is not required to reproduce evaluation decisions. Evaluation architecture is documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
 
 Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Classification recovery is idempotent after an accepted classification commits. Controlled runs add terminal tool-audit recovery, recommendation uniqueness per AgentRun, and checkpoint resume so committed progress is not repeated. Future executors and tools must make side effects idempotent or otherwise safely fenced.
 
@@ -254,7 +257,9 @@ The `supportops.knowledge_index` package owns deterministic chunking, Qdrant col
 
 The `supportops.knowledge_retrieval` package owns provider-independent retrieval contracts, active-version resolution, Qdrant candidate search, PostgreSQL chunk hydration, provenance validation, deterministic ranking, citations, FastAPI dependency composition, and the workspace-scoped semantic search route.
 
-The `supportops.evaluation.ticket_classification` package owns the versioned synthetic dataset loader, prediction artifacts, deterministic evaluator, Gateway predictor, sequential runner, and evaluation CLI.
+The `supportops.evaluation.contracts` package owns shared evaluation manifests, typed prediction envelopes, deterministic canonical serialization and hashing, and atomic artifact writes.
+
+The `supportops.evaluation.ticket_classification` package owns the immutable versioned synthetic dataset loader, split-manifest validation, prediction artifacts, deterministic evaluator, release-gate profile, Gateway predictor, sequential runner, and evaluation CLI with explicit prompt-version selection.
 
 ### Domain
 
@@ -318,7 +323,7 @@ Read inspection services use the request-scoped `AsyncSession` without an explic
 
 Application services depend on domain repository protocols. They do not depend on FastAPI or SQLAlchemy session APIs directly.
 
-Transactional AgentRun scheduling is documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime process topology is documented in [`runtime-topology.md`](runtime-topology.md). LLM Gateway behavior is documented in [`llm-gateway.md`](llm-gateway.md). Durable classification is documented in [`ticket-classification.md`](ticket-classification.md). Classification inspection and evaluation are documented in [`classification-evaluation.md`](classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`knowledge-documents.md`](knowledge-documents.md). Explicit knowledge indexing is documented in [`knowledge-indexing.md`](knowledge-indexing.md). Semantic knowledge retrieval is documented in [`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md). The controlled support workflow is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). The indexing decision is recorded in [`../decisions/0008-use-explicit-profiled-knowledge-indexing.md`](../decisions/0008-use-explicit-profiled-knowledge-indexing.md). The PostgreSQL hydration decision is recorded in [`../decisions/0009-hydrate-retrieval-evidence-from-postgresql.md`](../decisions/0009-hydrate-retrieval-evidence-from-postgresql.md). The separation of outer AgentRun durability from inner LangGraph orchestration is recorded in [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
+Transactional AgentRun scheduling is documented in [`agent-run-scheduling.md`](agent-run-scheduling.md). Runtime process topology is documented in [`runtime-topology.md`](runtime-topology.md). LLM Gateway behavior is documented in [`llm-gateway.md`](llm-gateway.md). Durable classification is documented in [`ticket-classification.md`](ticket-classification.md). Classification inspection and evaluation are documented in [`classification-evaluation.md`](classification-evaluation.md). Repository-owned evaluation and regression architecture is documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Versioned knowledge-document ownership and rollout are documented in [`knowledge-documents.md`](knowledge-documents.md). Explicit knowledge indexing is documented in [`knowledge-indexing.md`](knowledge-indexing.md). Semantic knowledge retrieval is documented in [`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md). The controlled support workflow is documented in [`controlled-support-workflow.md`](controlled-support-workflow.md). The indexing decision is recorded in [`../decisions/0008-use-explicit-profiled-knowledge-indexing.md`](../decisions/0008-use-explicit-profiled-knowledge-indexing.md). The PostgreSQL hydration decision is recorded in [`../decisions/0009-hydrate-retrieval-evidence-from-postgresql.md`](../decisions/0009-hydrate-retrieval-evidence-from-postgresql.md). The separation of outer AgentRun durability from inner LangGraph orchestration is recorded in [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
 
 ### Infrastructure
 
@@ -635,11 +640,14 @@ The implemented classification boundary covers:
 - retryable and terminal failure translation;
 - idempotent recovery after classification commit;
 - durable classification inspection projections;
-- a versioned synthetic classification dataset;
-- a deterministic classification evaluator;
-- an offline evaluation CLI with mock or opt-in OpenAI provider selection.
+- an immutable versioned synthetic classification dataset;
+- a versioned development, holdout, and safety-gate split manifest;
+- repository-owned evaluation contracts and typed prediction envelopes;
+- a deterministic classification evaluator with validity, safety-recall, latency, and token metrics;
+- standalone classification release-gate evaluation;
+- an offline evaluation CLI with explicit prompt-version selection and mock or opt-in OpenAI provider selection.
 
-Classification does not mutate Ticket status and cannot execute tools or actions. Inspection exposes accepted classifications and logical invocation provenance through workspace-scoped read-only HTTP routes. Evaluation measures the same prompt and schema boundary offline without writing to PostgreSQL or Qdrant.
+Classification does not mutate Ticket status and cannot execute tools or actions. Inspection exposes accepted classifications and logical invocation provenance through workspace-scoped read-only HTTP routes. Evaluation measures the same prompt and schema boundary offline without writing to PostgreSQL or Qdrant. Runtime classification remains independently pinned; evaluation prompt selection does not change the production default. Standalone release-gate reports cannot authorize prompt promotion. Evaluation architecture is documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
 
 The controlled support workflow extends that boundary into bounded, evidence-driven analysis through the `controlled-support-v1` worker workflow.
 
@@ -662,10 +670,11 @@ Future AI behavior is expected to remain behind application-owned boundaries for
 - reranking over retrieved evidence;
 - multi-profile score fusion;
 - external side-effect tools;
-- AI observability integrations;
+- paired prompt comparison and evidence-driven prompt promotion;
+- retrieval, controlled-support, and approval-workflow evaluation;
+- grounded recommendation evaluation;
 - RAGAS;
-- prompt-version comparison;
-- retrieval and generation evaluation beyond structured classification.
+- generation evaluation beyond structured classification.
 
 External AI frameworks and providers must not become the source of business rules or workflow ownership. LangGraph orchestrates bounded internal steps; it does not own the AgentRun lifecycle, business records, or public workflow outcomes.
 
@@ -673,7 +682,6 @@ The OpenAI Python SDK exists only behind the OpenAI provider adapters and is use
 
 - Anthropic SDK;
 - LangChain;
-- Langfuse;
 - RAGAS;
 - reranking libraries.
 
@@ -805,7 +813,7 @@ They validate behavior such as:
 - API schemas and opaque cursor encoding;
 - AgentRun inspection schema projections that omit internal fencing identifiers;
 - classification inspection projections, cursors, and query services;
-- evaluation dataset, prediction, metrics, predictor, runner, and CLI safety coverage;
+- evaluation contract, split-manifest, dataset, prediction, metrics, predictor, runner, release-gate, and CLI safety coverage;
 - deterministic chunking and tokenizer adapter behavior;
 - embedding contracts, pricing, mock provider, OpenAI fake provider, and normalized embedding errors;
 - Qdrant collection compatibility, payload indexes, upsert, and exact-count adapter behavior;
@@ -936,7 +944,9 @@ The repository foundation, Slice 1, durable AgentRun scheduling, the PostgreSQL 
 - workspace-scoped AgentRun inspection;
 - workspace-scoped classification and logical invocation inspection;
 - workspace-scoped controlled support inspection;
-- offline deterministic classification evaluation;
+- repository-owned offline deterministic classification evaluation;
+- explicit evaluation prompt-version selection;
+- standalone classification release-gate evaluation;
 - opt-in external-provider evaluation;
 - application services and versioned business APIs;
 - workspace-scoped document and immutable version APIs;
@@ -961,8 +971,9 @@ The current phase does not implement:
 - frontend monitoring applications;
 - Redis, Celery, Kafka, or SQS;
 - evidence-driven prompt version 2;
-- prompt regression comparison across versions;
-- scheduled evaluation;
+- paired prompt comparison across versions;
+- prompt promotion, rejection, or inconclusive decisions;
+- scheduled or online evaluation;
 - evaluation history persistence;
 - cross-provider fallback and automatic model routing;
 - Anthropic provider;
@@ -978,15 +989,17 @@ The current phase does not implement:
 - workflow cancellation and HTTP retry controls;
 - checkpoint inspection endpoints and raw graph-state exposure;
 - long-term checkpoint retention policy;
-- AI observability integrations;
-- Langfuse and Phoenix;
+- Phoenix integration;
+- Langfuse evaluation workflows and Langfuse datasets or experiments;
 - RAGAS;
 - recommendation-quality datasets;
-- retrieval and generation evaluation beyond structured classification;
+- retrieval, controlled-support, and approval-workflow evaluation;
+- grounded recommendation evaluation;
+- generation evaluation beyond structured classification;
 - frontend applications;
 - public cloud deployment;
 - infrastructure as code.
 
-Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, workspace-scoped AgentRun, classification, controlled support, approval, and escalation inspection, approval decision commands with worker-owned resume, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the controlled support workflow with LangGraph orchestration, read-only tools, and durable recommendations are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
+Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, workspace-scoped AgentRun, classification, controlled support, approval, and escalation inspection, approval decision commands with worker-owned resume, repository-owned offline classification evaluation with standalone release gates, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the controlled support workflow with LangGraph orchestration, read-only tools, and durable recommendations are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each implementation slice independently reviewable.

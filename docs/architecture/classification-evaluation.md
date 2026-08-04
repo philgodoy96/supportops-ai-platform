@@ -45,15 +45,32 @@ The platform implements:
 - AgentRun-scoped logical LLM invocation history;
 - safe prompt, provider, model, usage, latency, error, and estimated-cost
   projections;
-- a versioned synthetic classification dataset;
+- an immutable versioned synthetic classification dataset;
+- a versioned sidecar split manifest with development, holdout, and
+  safety-gate allocation;
+- repository-owned evaluation manifest contracts;
+- typed prediction envelopes;
+- deterministic canonical serialization and SHA-256 hashing;
 - canonical dataset and prediction artifact hashing;
 - deterministic structured-label evaluation;
 - per-field accuracy and full structured-label exact match;
 - human-review precision, recall, and F1;
+- structured-output validity and invalid-output rate;
+- high urgency recall;
+- critical urgency recall;
+- high-risk human-review recall;
+- average latency;
+- average input, output, and total token metrics;
 - failed-case and safe error-code accounting;
 - token-usage and estimated-cost aggregation;
+- standalone classification release-gate evaluation;
+- gate categories safety, quality, reliability, and efficiency;
+- explicit gate outcomes `passed`, `failed`, and `not_applicable`;
+- standalone aggregate statuses `passed`, `failed`, and `incomplete`;
 - offline scoring of existing prediction artifacts;
 - sequential mock or OpenAI evaluation execution;
+- explicit evaluation prompt-version selection with no implicit latest
+  selection;
 - an explicit external-provider permission gate;
 - atomic prediction and report artifact writes.
 
@@ -120,21 +137,26 @@ Inspection does not:
 
 ### Offline evaluation
 
-Offline evaluation is independent from the API and worker processes.
+Offline evaluation is independent from the API and worker processes and remains
+separate from runtime business authority and optional observability.
 
 ```text
-versioned dataset
+immutable dataset + split sidecar
+→ explicit prompt version
 → prediction artifact or evaluation predictor
 → deterministic evaluator
+→ standalone release-gate evaluation
 → JSON report
 ```
 
 Evaluation owns:
 
 - synthetic case validation;
+- split-manifest validation;
 - artifact provenance;
 - prediction alignment;
-- deterministic quality metrics;
+- deterministic quality, safety, validity, latency, and usage metrics;
+- standalone release-gate evaluation;
 - usage and estimated-cost aggregation;
 - reproducible reports.
 
@@ -145,8 +167,13 @@ Evaluation does not:
 - create AgentRuns;
 - persist TicketClassification records;
 - mutate Ticket status;
+- change the runtime classification prompt pin;
+- authorize prompt promotion from standalone reports;
 - promote prompts automatically;
 - execute tools or approvals.
+
+Repository-owned evaluation and regression architecture is documented in
+[`evaluation-and-regression.md`](evaluation-and-regression.md).
 
 ## Inspection API
 
@@ -400,7 +427,7 @@ schema_version = ticket-classification-v1
 file = evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl
 ```
 
-Version 1 contains 24 synthetic cases.
+Dataset version 1 remains immutable. It contains 24 synthetic cases.
 
 Coverage includes:
 
@@ -416,6 +443,33 @@ Coverage includes:
 
 The dataset contains no customer data, production tickets, secrets, provider
 responses, or chain-of-thought.
+
+### Split sidecar
+
+Split allocation is stored separately from behavioral content:
+
+```text
+file = evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json
+split_manifest_id = ticket-classification-eval-splits
+split_manifest_version = 1
+```
+
+The first classification split allocates:
+
+```text
+development: 12
+holdout: 8
+safety_gate: 4
+```
+
+Development cases may guide failure analysis and prompt-change hypotheses.
+Holdout cases remain reserved for final paired evaluation. Holdout outcomes
+must not guide prompt drafting. Safety-gate cases cover critical urgency,
+credential exposure, privacy-sensitive behavior, prompt injection, and
+mandatory human review.
+
+A behavioral change requires a new dataset version. A procedural split change
+requires a new split-manifest version.
 
 ### Dataset invariants
 
@@ -523,6 +577,15 @@ The evaluator also reports:
 - human-review precision;
 - human-review recall;
 - human-review F1;
+- structured-output validity;
+- invalid-output rate;
+- high urgency recall;
+- critical urgency recall;
+- high-risk human-review recall;
+- average latency;
+- average input tokens;
+- average output tokens;
+- average total tokens;
 - successful prediction count;
 - failed prediction count;
 - failures by safe error code;
@@ -534,6 +597,67 @@ The evaluator also reports:
 - per-case results.
 
 Rates use Decimal values quantized to six decimal places.
+
+A structurally valid prediction may still be behaviorally incorrect. Structural
+validity and label correctness remain separate. Critical urgency recall accepts
+only an exact critical prediction for an expected critical case. High-risk
+human-review recall uses explicit dataset expectations and an application-owned
+set of high-risk tags.
+
+## Standalone release gates
+
+The initial classification gate profile is:
+
+```text
+profile_id = ticket-classification-release-gates
+profile_version = 1
+```
+
+Gate categories are:
+
+```text
+safety
+quality
+reliability
+efficiency
+```
+
+Individual gate outcomes are:
+
+```text
+passed
+failed
+not_applicable
+```
+
+Standalone aggregate statuses are:
+
+```text
+passed
+failed
+incomplete
+```
+
+Aggregate semantics:
+
+```text
+failed
+→ at least one blocking gate failed
+
+incomplete
+→ no blocking gate failed, but at least one blocking gate is not applicable
+
+passed
+→ every blocking gate passed
+```
+
+Standalone safety and reliability gates evaluate absolute evidence such as
+structured-output validity, critical urgency recall, high-risk human-review
+recall, prediction artifact coverage, and successful deterministic report
+generation. Quality and efficiency non-regression gates require paired baseline
+evidence and remain `not_applicable` for a standalone report. A perfect
+standalone report is therefore intentionally `incomplete`. Standalone reports
+cannot authorize prompt promotion.
 
 ### Summary evaluation
 
@@ -568,6 +692,34 @@ be aligned safely.
 
 ## Evaluation commands
 
+### Explicit prompt-version selection
+
+The evaluation CLI selects prompt version explicitly:
+
+```powershell
+uv run supportops-evaluate-classification run `
+  --provider mock `
+  --prompt-version 1 `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --predictions-output `
+    artifacts/classification-mock-predictions.jsonl `
+  --output `
+    artifacts/classification-mock-report.json
+```
+
+The command remains domain-specific, so the stable prompt ID remains implicit:
+
+```text
+ticket-classification
+```
+
+The default evaluation prompt version remains `1`. There is no implicit latest
+version. An unsupported version fails without provider execution, fallback, or
+artifact replacement. Runtime classification remains independently pinned to
+its approved prompt version. Evaluation selection does not change the
+production default.
+
 ### Offline scoring
 
 ```powershell
@@ -585,6 +737,7 @@ Offline scoring:
 - does not instantiate settings;
 - does not instantiate a provider;
 - does not require an API key;
+- does not accept `--prompt-version`;
 - does not access PostgreSQL;
 - does not access Qdrant;
 - performs no network requests.
@@ -594,6 +747,7 @@ Offline scoring:
 ```powershell
 uv run supportops-evaluate-classification run `
   --provider mock `
+  --prompt-version 1 `
   --dataset `
     evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
   --predictions-output `
@@ -605,11 +759,13 @@ uv run supportops-evaluate-classification run `
 Mock execution validates:
 
 - dataset loading;
+- explicit prompt resolution;
 - prompt rendering;
 - Gateway integration;
 - prediction generation;
 - artifact writing;
-- deterministic scoring.
+- deterministic scoring;
+- standalone release-gate evaluation.
 
 Mock results are not presented as a model-quality baseline.
 
@@ -619,6 +775,7 @@ Mock results are not presented as a model-quality baseline.
 uv run supportops-evaluate-classification run `
   --provider openai `
   --allow-external-provider `
+  --prompt-version 1 `
   --dataset `
     evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
   --predictions-output `
@@ -735,6 +892,7 @@ Examples:
 - invalid prediction record;
 - unknown prediction case;
 - mixed prompt or runtime provenance;
+- unsupported evaluation prompt version;
 - missing OpenAI API key;
 - missing external-provider permission.
 
@@ -828,13 +986,23 @@ Inspection tests cover:
 
 Evaluation tests cover:
 
+- evaluation contract hashing and atomic artifact writes;
+- evaluation manifest and prediction-envelope validation;
 - dataset validation and pinned hash;
+- split-manifest validation and frozen allocation;
 - prediction validation and hashing;
 - exact-match and field-level metrics;
+- structured-output validity and invalid-output rate;
+- urgency and high-risk human-review recall;
+- latency and token aggregates;
 - human-review confusion matrix and F1;
 - missing and failed predictions;
 - usage and cost aggregation;
+- standalone release-gate outcomes and aggregate statuses;
+- quality and efficiency gates remaining not applicable without paired
+  baseline evidence;
 - prompt and runtime provenance consistency;
+- explicit prompt-version selection and unsupported-version failure;
 - mock Gateway prediction;
 - repair trace preservation;
 - provider lifecycle;
@@ -872,9 +1040,10 @@ defensible methodology.
 ### No automatic prompt promotion
 
 The platform records prompt provenance and generates evidence. It does not
-automatically change production behavior. Prompt version 2 should be introduced
-only after evaluation results identify concrete failure patterns and the change
-can be reviewed explicitly.
+automatically change production behavior. Standalone release-gate reports
+cannot authorize promotion. Prompt version 2 and paired comparison remain
+planned and should be introduced only after evaluation results identify
+concrete failure patterns and the change can be reviewed explicitly.
 
 ### No RAGAS in classification evaluation
 
@@ -890,10 +1059,14 @@ The following remain outside this boundary:
 - classification mutation and override APIs;
 - reclassification scheduling;
 - prompt version 2;
+- paired prompt comparison;
+- canonical baseline evidence for paired comparison;
+- prompt promotion, rejection, or inconclusive decisions;
 - automatic prompt promotion;
+- automatic prompt optimization;
 - evaluation database persistence;
-- evaluation dashboards;
-- scheduled evaluation runs;
+- evaluation dashboards beyond standalone classification release gates;
+- scheduled or online evaluation runs;
 - parallel provider execution;
 - cross-provider fallback;
 - automatic model routing;
@@ -902,11 +1075,15 @@ The following remain outside this boundary:
 - operational invoice reconciliation;
 - RAG;
 - retrieval evaluation;
+- controlled-support evaluation;
+- approval-workflow evaluation;
+- grounded recommendation evaluation;
 - RAGAS;
+- Langfuse datasets or experiments;
+- production feedback ingestion;
 - LangGraph orchestration;
 - tools;
 - human approval workflows;
-- Langfuse;
 - frontend inspection.
 
 These capabilities remain possible without changing the ownership boundaries
