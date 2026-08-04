@@ -2,9 +2,18 @@
 
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from supportops.ai.gateway.contracts import LLMTokenUsage
 from supportops.ai.gateway.service import LLMGateway
+from supportops.ai.prompts.registry import (
+    PromptDefinitionNotFoundError,
+)
+from supportops.ai.prompts.ticket_classification_v1 import (
+    TICKET_CLASSIFICATION_PROMPT_V1,
+)
 from supportops.ai.providers.mock import (
     MockLLMOutcome,
     MockLLMProvider,
@@ -13,6 +22,7 @@ from supportops.evaluation.ticket_classification.dataset import (
     load_ticket_classification_dataset,
 )
 from supportops.evaluation.ticket_classification.predictions import (
+    TicketClassificationEvaluationPrediction,
     load_ticket_classification_predictions,
 )
 from supportops.evaluation.ticket_classification.predictor import (
@@ -23,6 +33,8 @@ from supportops.evaluation.ticket_classification.runner import (
     write_ticket_classification_evaluation_report,
     write_ticket_classification_predictions,
 )
+
+_PINNED_PROMPT_V1_HASH = "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2"
 
 
 def _dataset_payload(
@@ -128,6 +140,7 @@ async def test_runner_processes_dataset_sequentially(
         result = await run_ticket_classification_evaluation(
             dataset=dataset,
             predictor=predictor,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -142,6 +155,11 @@ async def test_runner_processes_dataset_sequentially(
     assert result.report.failed_prediction_count == 0
     assert result.report.structured_label_exact_match.match_count == 2
     assert result.report.known_total_tokens == 240
+    assert all(
+        prediction.provenance.prompt_version == 1
+        and prediction.provenance.prompt_content_hash == (_PINNED_PROMPT_V1_HASH)
+        for prediction in result.predictions.predictions
+    )
 
 
 async def test_runner_continues_after_case_failure(
@@ -186,6 +204,7 @@ async def test_runner_continues_after_case_failure(
         result = await run_ticket_classification_evaluation(
             dataset=dataset,
             predictor=predictor,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -241,6 +260,7 @@ async def test_artifact_writers_are_reloadable(
         result = await run_ticket_classification_evaluation(
             dataset=dataset,
             predictor=predictor,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -273,3 +293,134 @@ async def test_artifact_writers_are_reloadable(
     assert report_path.read_text(
         encoding="utf-8",
     ).endswith("\n")
+
+
+async def test_runner_propagates_selected_prompt_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    _write_dataset(
+        dataset_path,
+        _dataset_payload(
+            case_id="billing-case-001",
+            category="billing",
+        ),
+    )
+    dataset = load_ticket_classification_dataset(
+        dataset_path,
+        dataset_id="ticket-classification-eval",
+        version=1,
+    )
+    provider = MockLLMProvider.with_strict_outcomes(
+        (
+            _success_outcome(
+                category="billing",
+            ),
+        ),
+    )
+    predictor = TicketClassificationEvaluationPredictor(
+        gateway=LLMGateway(
+            provider=provider,
+            max_repair_attempts=1,
+        ),
+        provider_name=provider.provider_name,
+        model=provider.model,
+        request_timeout_seconds=12,
+    )
+    captured_versions: list[int] = []
+    original_predict = predictor.predict
+
+    async def _capture_predict(
+        **kwargs: Any,
+    ) -> TicketClassificationEvaluationPrediction:
+        captured_versions.append(
+            kwargs["prompt_version"],
+        )
+        return await original_predict(**kwargs)
+
+    monkeypatch.setattr(
+        predictor,
+        "predict",
+        _capture_predict,
+    )
+
+    try:
+        result = await run_ticket_classification_evaluation(
+            dataset=dataset,
+            predictor=predictor,
+            prompt_version=1,
+        )
+    finally:
+        await provider.close()
+
+    assert captured_versions == [1]
+    assert result.predictions.predictions[0].provenance.prompt_version == 1
+    assert result.predictions.predictions[0].provenance.prompt_content_hash == (
+        TICKET_CLASSIFICATION_PROMPT_V1.content_hash
+    )
+
+
+async def test_unsupported_prompt_version_leaves_output_untouched(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    predictions_path = tmp_path / "artifacts" / "predictions.jsonl"
+    existing_content = '{"preserved":true}\n'
+    predictions_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    predictions_path.write_text(
+        existing_content,
+        encoding="utf-8",
+    )
+    _write_dataset(
+        dataset_path,
+        _dataset_payload(
+            case_id="billing-case-001",
+            category="billing",
+        ),
+    )
+    dataset = load_ticket_classification_dataset(
+        dataset_path,
+        dataset_id="ticket-classification-eval",
+        version=1,
+    )
+    provider = MockLLMProvider.with_strict_outcomes(
+        (
+            _success_outcome(
+                category="billing",
+            ),
+        ),
+    )
+    predictor = TicketClassificationEvaluationPredictor(
+        gateway=LLMGateway(
+            provider=provider,
+            max_repair_attempts=1,
+        ),
+        provider_name=provider.provider_name,
+        model=provider.model,
+        request_timeout_seconds=12,
+    )
+
+    try:
+        with pytest.raises(
+            PromptDefinitionNotFoundError,
+            match=("Unsupported prompt: ticket-classification version 2"),
+        ):
+            await run_ticket_classification_evaluation(
+                dataset=dataset,
+                predictor=predictor,
+                prompt_version=2,
+            )
+    finally:
+        await provider.close()
+
+    assert provider.invocation_count == 0
+    assert (
+        predictions_path.read_text(
+            encoding="utf-8",
+        )
+        == existing_content
+    )

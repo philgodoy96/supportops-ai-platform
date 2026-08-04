@@ -3,8 +3,16 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from supportops.ai.gateway.contracts import LLMTokenUsage
 from supportops.ai.gateway.service import LLMGateway
+from supportops.ai.prompts.registry import (
+    PromptDefinitionNotFoundError,
+)
+from supportops.ai.prompts.ticket_classification_v1 import (
+    TICKET_CLASSIFICATION_PROMPT_V1,
+)
 from supportops.ai.providers.mock import (
     MockLLMOutcome,
     MockLLMProvider,
@@ -19,6 +27,8 @@ from supportops.evaluation.ticket_classification.predictions import (
 from supportops.evaluation.ticket_classification.predictor import (
     TicketClassificationEvaluationPredictor,
 )
+
+_PINNED_PROMPT_V1_HASH = "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2"
 
 _NOW = datetime(
     2026,
@@ -105,6 +115,7 @@ async def test_successful_prediction_preserves_provenance_usage_and_cost() -> No
             case=_case(),
             dataset_id="ticket-classification-eval",
             dataset_version=1,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -118,11 +129,9 @@ async def test_successful_prediction_preserves_provenance_usage_and_cost() -> No
     assert prediction.output.intent.value == "ask_question"
     assert prediction.provenance.prompt_id == ("ticket-classification")
     assert prediction.provenance.prompt_version == 1
-    assert (
-        len(
-            prediction.provenance.prompt_content_hash,
-        )
-        == 64
+    assert prediction.provenance.prompt_content_hash == (_PINNED_PROMPT_V1_HASH)
+    assert prediction.provenance.prompt_content_hash == (
+        TICKET_CLASSIFICATION_PROMPT_V1.content_hash
     )
     assert prediction.provenance.provider == "mock"
     assert prediction.provenance.model == _MODEL
@@ -162,6 +171,7 @@ async def test_gateway_failure_becomes_failed_prediction() -> None:
             case=_case(),
             dataset_id="ticket-classification-eval",
             dataset_version=1,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -199,6 +209,7 @@ async def test_repair_history_is_preserved() -> None:
             case=_case(),
             dataset_id="ticket-classification-eval",
             dataset_version=1,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -234,6 +245,7 @@ async def test_unknown_model_pricing_remains_null() -> None:
             case=_case(),
             dataset_id="ticket-classification-eval",
             dataset_version=1,
+            prompt_version=1,
         )
     finally:
         await provider.close()
@@ -271,3 +283,130 @@ def test_predictor_requires_positive_timeout() -> None:
         # This test is synchronous; provider close is verified
         # by asynchronous runtime tests in the CLI step.
         assert _NOW.tzinfo is UTC
+
+
+async def test_prompt_version_one_resolves_with_pinned_hash() -> None:
+    provider = MockLLMProvider.with_strict_outcomes(
+        (_success_outcome(),),
+    )
+
+    try:
+        prediction = await _predictor(
+            provider=provider,
+        ).predict(
+            case=_case(),
+            dataset_id="ticket-classification-eval",
+            dataset_version=1,
+            prompt_version=1,
+        )
+    finally:
+        await provider.close()
+
+    assert prediction.provenance.prompt_id == ("ticket-classification")
+    assert prediction.provenance.prompt_version == 1
+    assert prediction.provenance.prompt_content_hash == (_PINNED_PROMPT_V1_HASH)
+
+
+async def test_unsupported_prompt_version_fails_before_provider_call() -> None:
+    provider = MockLLMProvider.with_strict_outcomes(
+        (_success_outcome(),),
+    )
+
+    try:
+        with pytest.raises(
+            PromptDefinitionNotFoundError,
+            match=("Unsupported prompt: ticket-classification version 2"),
+        ):
+            await _predictor(
+                provider=provider,
+            ).predict(
+                case=_case(),
+                dataset_id="ticket-classification-eval",
+                dataset_version=1,
+                prompt_version=2,
+            )
+    finally:
+        await provider.close()
+
+    assert provider.invocation_count == 0
+
+
+async def test_explicit_prompt_version_controls_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from supportops.ai.prompts.definitions import RenderedPrompt
+    from supportops.ai.prompts.ticket_classification_v1 import (
+        render_ticket_classification_prompt as original_render,
+    )
+    from supportops.evaluation.ticket_classification import (
+        predictor as predictor_module,
+    )
+
+    captured_versions: list[int] = []
+
+    def _capture_render(
+        *,
+        version: int,
+        subject: str,
+        description: str,
+    ) -> RenderedPrompt:
+        captured_versions.append(version)
+        return original_render(
+            version=version,
+            subject=subject,
+            description=description,
+        )
+
+    monkeypatch.setattr(
+        predictor_module,
+        "render_ticket_classification_prompt",
+        _capture_render,
+    )
+
+    provider = MockLLMProvider.with_strict_outcomes(
+        (_success_outcome(),),
+    )
+
+    try:
+        await _predictor(
+            provider=provider,
+        ).predict(
+            case=_case(),
+            dataset_id="ticket-classification-eval",
+            dataset_version=1,
+            prompt_version=1,
+        )
+    finally:
+        await provider.close()
+
+    assert captured_versions == [1]
+
+
+async def test_predictor_requires_positive_prompt_version() -> None:
+    provider = MockLLMProvider()
+
+    try:
+        predictor = TicketClassificationEvaluationPredictor(
+            gateway=LLMGateway(
+                provider=provider,
+                max_repair_attempts=1,
+            ),
+            provider_name="mock",
+            model=_MODEL,
+            request_timeout_seconds=12,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="prompt_version must be positive",
+        ):
+            await predictor.predict(
+                case=_case(),
+                dataset_id="ticket-classification-eval",
+                dataset_version=1,
+                prompt_version=0,
+            )
+    finally:
+        await provider.close()
+
+    assert provider.invocation_count == 0

@@ -35,8 +35,14 @@ async def run_ticket_classification_evaluation(
     *,
     dataset: TicketClassificationEvaluationDataset,
     predictor: TicketClassificationEvaluationPredictor,
+    prompt_version: int,
 ) -> TicketClassificationEvaluationRunResult:
     """Predict every dataset case sequentially and evaluate the results."""
+
+    if prompt_version <= 0:
+        raise ValueError(
+            "prompt_version must be positive.",
+        )
 
     predictions: list[TicketClassificationEvaluationPrediction] = []
 
@@ -45,6 +51,7 @@ async def run_ticket_classification_evaluation(
             case=case,
             dataset_id=dataset.dataset_id,
             dataset_version=dataset.version,
+            prompt_version=prompt_version,
         )
         predictions.append(prediction)
 

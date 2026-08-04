@@ -3,9 +3,12 @@
 import json
 from io import StringIO
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
+
+import pytest
 
 from supportops.evaluation.ticket_classification.cli import (
+    build_parser,
     run_cli,
 )
 from supportops.evaluation.ticket_classification.settings import (
@@ -13,6 +16,7 @@ from supportops.evaluation.ticket_classification.settings import (
 )
 
 _PROMPT_HASH = "a" * 64
+_PINNED_PROMPT_V1_HASH = "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2"
 
 
 def _dataset_payload() -> dict[str, object]:
@@ -287,12 +291,217 @@ async def test_mock_run_writes_predictions_and_report(
     assert prediction["case_id"] == "other-case-001"
     assert prediction["status"] == "succeeded"
     assert prediction["provenance"]["provider"] == "mock"
+    assert prediction["provenance"]["prompt_version"] == 1
+    assert prediction["provenance"]["prompt_content_hash"] == (_PINNED_PROMPT_V1_HASH)
     assert "provider_request_id" not in str(prediction)
 
     assert report["case_count"] == 1
     assert report["successful_prediction_count"] == 1
     assert summary["command"] == "run"
     assert summary["predictions_path"] == (str(predictions_path))
+
+
+async def test_run_defaults_to_prompt_version_one() -> None:
+    parser = build_parser()
+    arguments = parser.parse_args(
+        (
+            "run",
+            "--provider",
+            "mock",
+            "--dataset",
+            "dataset.jsonl",
+            "--predictions-output",
+            "predictions.jsonl",
+            "--output",
+            "report.json",
+        ),
+    )
+
+    assert arguments.prompt_version == 1
+
+
+async def test_run_explicit_prompt_version_one_is_accepted() -> None:
+    parser = build_parser()
+    arguments = parser.parse_args(
+        (
+            "run",
+            "--provider",
+            "mock",
+            "--prompt-version",
+            "1",
+            "--dataset",
+            "dataset.jsonl",
+            "--predictions-output",
+            "predictions.jsonl",
+            "--output",
+            "report.json",
+        ),
+    )
+
+    assert arguments.prompt_version == 1
+
+
+async def test_run_prompt_version_two_reaches_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    _write_jsonl(
+        dataset_path,
+        _dataset_payload(),
+    )
+    captured_versions: list[int] = []
+
+    async def _capture_run(
+        **kwargs: Any,
+    ) -> NoReturn:
+        captured_versions.append(
+            kwargs["prompt_version"],
+        )
+        raise AssertionError(
+            "Stop after capturing the selected prompt version.",
+        )
+
+    monkeypatch.setattr(
+        ("supportops.evaluation.ticket_classification.cli.run_ticket_classification_evaluation"),
+        _capture_run,
+    )
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        (
+            "run",
+            "--provider",
+            "mock",
+            "--prompt-version",
+            "2",
+            "--dataset",
+            str(dataset_path),
+            "--predictions-output",
+            str(tmp_path / "predictions.jsonl"),
+            "--output",
+            str(tmp_path / "report.json"),
+        ),
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=_settings,
+    )
+
+    assert captured_versions == [2]
+    assert exit_code == 1
+    assert "unexpectedly" in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    "prompt_version",
+    (
+        "0",
+        "-1",
+        "abc",
+    ),
+)
+def test_run_rejects_invalid_prompt_versions(
+    prompt_version: str,
+) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(
+            (
+                "run",
+                "--provider",
+                "mock",
+                "--prompt-version",
+                prompt_version,
+                "--dataset",
+                "dataset.jsonl",
+                "--predictions-output",
+                "predictions.jsonl",
+                "--output",
+                "report.json",
+            ),
+        )
+
+    assert raised.value.code == 2
+
+
+async def test_score_does_not_accept_prompt_version(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    predictions_path = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        dataset_path,
+        _dataset_payload(),
+    )
+    _write_jsonl(
+        predictions_path,
+        _prediction_payload(),
+    )
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as raised:
+        parser.parse_args(
+            (
+                "score",
+                "--dataset",
+                str(dataset_path),
+                "--predictions",
+                str(predictions_path),
+                "--output",
+                str(tmp_path / "report.json"),
+                "--prompt-version",
+                "1",
+            ),
+        )
+
+    assert raised.value.code == 2
+
+
+async def test_unsupported_prompt_version_fails_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    predictions_path = tmp_path / "predictions.jsonl"
+    existing_content = '{"preserved":true}\n'
+    predictions_path.write_text(
+        existing_content,
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        dataset_path,
+        _dataset_payload(),
+    )
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        (
+            "run",
+            "--provider",
+            "mock",
+            "--prompt-version",
+            "2",
+            "--dataset",
+            str(dataset_path),
+            "--predictions-output",
+            str(predictions_path),
+            "--output",
+            str(tmp_path / "report.json"),
+        ),
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=_settings,
+    )
+
+    assert exit_code == 2
+    assert "Unsupported prompt" in stderr.getvalue()
+    assert (
+        predictions_path.read_text(
+            encoding="utf-8",
+        )
+        == existing_content
+    )
+    assert not (tmp_path / "report.json").exists()
 
 
 async def test_allowed_openai_still_requires_configured_key(
