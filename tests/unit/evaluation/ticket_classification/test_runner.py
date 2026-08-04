@@ -29,7 +29,9 @@ from supportops.evaluation.ticket_classification.predictor import (
     TicketClassificationEvaluationPredictor,
 )
 from supportops.evaluation.ticket_classification.runner import (
+    evaluate_ticket_classification_report_release_gates,
     run_ticket_classification_evaluation,
+    score_ticket_classification_predictions_with_release_gates,
     write_ticket_classification_evaluation_report,
     write_ticket_classification_predictions,
 )
@@ -424,3 +426,108 @@ async def test_unsupported_prompt_version_leaves_output_untouched(
         )
         == existing_content
     )
+
+
+def test_score_with_release_gates_preserves_report_and_returns_gates(
+    tmp_path: Path,
+) -> None:
+    from supportops.evaluation.ticket_classification.dataset import (
+        load_ticket_classification_dataset,
+    )
+    from supportops.evaluation.ticket_classification.evaluator import (
+        TicketClassificationStandaloneGateStatus,
+        evaluate_ticket_classification_predictions,
+    )
+    from supportops.evaluation.ticket_classification.predictions import (
+        load_ticket_classification_predictions,
+    )
+
+    dataset_path = tmp_path / "dataset.jsonl"
+    predictions_path = tmp_path / "predictions.jsonl"
+    dataset_payload = _dataset_payload(
+        case_id="billing-case-001",
+        category="billing",
+    )
+    prediction_payload = {
+        "case_id": "billing-case-001",
+        "status": "succeeded",
+        "provenance": {
+            "prompt_id": "ticket-classification",
+            "prompt_version": 1,
+            "prompt_content_hash": _PINNED_PROMPT_V1_HASH,
+            "provider": "mock",
+            "model": "test-model",
+        },
+        "output": {
+            "category": "billing",
+            "intent": "ask_question",
+            "urgency": "normal",
+            "sentiment": "neutral",
+            "requires_human_review": False,
+            "summary": "Synthetic evaluation summary.",
+            "schema_version": ("ticket-classification-v1"),
+        },
+        "invocations": [
+            {
+                "invocation_sequence": 1,
+                "status": "succeeded",
+                "provider": "mock",
+                "model": "test-model",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 20,
+                    "reasoning_tokens": None,
+                    "total_tokens": 120,
+                },
+                "cost": {
+                    "pricing_catalog_version": "pricing-v1",
+                    "pricing_found": True,
+                    "estimated_input_cost_usd": "0",
+                    "estimated_cached_input_cost_usd": "0",
+                    "estimated_output_cost_usd": "0",
+                    "estimated_total_cost_usd": "0",
+                },
+                "latency_ms": 25,
+                "error_code": None,
+            },
+        ],
+    }
+    _write_dataset(
+        dataset_path,
+        dataset_payload,
+    )
+    predictions_path.write_text(
+        json.dumps(prediction_payload) + "\n",
+        encoding="utf-8",
+    )
+    dataset = load_ticket_classification_dataset(
+        dataset_path,
+        dataset_id="ticket-classification-eval",
+        version=1,
+    )
+    predictions = load_ticket_classification_predictions(
+        predictions_path,
+    )
+
+    baseline_report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+    report, gate_evaluation = score_ticket_classification_predictions_with_release_gates(
+        dataset=dataset,
+        predictions=predictions,
+    )
+    gate_from_report = evaluate_ticket_classification_report_release_gates(
+        report,
+    )
+
+    assert report == baseline_report
+    assert report.report_content_hash == (baseline_report.report_content_hash)
+    assert gate_evaluation == gate_from_report
+    assert gate_evaluation.report_content_hash == (report.report_content_hash)
+    assert gate_evaluation.standalone_gate_status is (
+        TicketClassificationStandaloneGateStatus.INCOMPLETE
+    )
+    assert gate_evaluation.blocking_failure_count == 0
+    assert gate_evaluation.not_applicable_count == 8
