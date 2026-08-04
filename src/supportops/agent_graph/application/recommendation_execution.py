@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Final, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, JsonValue
@@ -71,9 +71,47 @@ from supportops.modules.support_recommendations.domain.models import (
 from supportops.modules.ticket_classifications.domain.models import (
     LLMInvocation,
 )
+from supportops.observability.context import (
+    current_observation_context,
+    current_trace_context,
+)
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.identity import agent_run_trace_identity
+from supportops.observability.models import (
+    EventObservation,
+    ObservationStatus,
+)
+from supportops.observability.noop import NoOpObservabilityClient
 
 type UtcNowProvider = Callable[[], datetime]
 type UuidFactory = Callable[[], UUID]
+
+_RECOMMENDATION_GENERATED_EVENT: Final = "recommendation.generated"
+_RECOMMENDATION_PERSISTED_EVENT: Final = "recommendation.persisted"
+_RECOMMENDATION_FAILED_EVENT: Final = "recommendation.failed"
+_LEASE_LOST_ERROR_CODE: Final = "support_recommendation_lease_lost"
+
+_RECOMMENDATION_EVENT_METADATA_KEYS: Final = frozenset(
+    {
+        "recommendation_id",
+        "agent_run_id",
+        "agent_run_attempt_id",
+        "workspace_id",
+        "ticket_id",
+        "recommended_action",
+        "citation_count",
+        "requires_human_review",
+        "schema_version",
+        "prompt_id",
+        "prompt_version",
+        "status",
+        "recommendation_outcome",
+        "error_code",
+    }
+)
+_RECOMMENDATION_EVENT_METADATA_PATHS: Final = frozenset(
+    (key,) for key in _RECOMMENDATION_EVENT_METADATA_KEYS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +140,7 @@ class ControlledSupportRecommendationExecutor:
         pricing_catalog: PricingCatalog = (DEFAULT_PRICING_CATALOG),
         utc_now: UtcNowProvider | None = None,
         uuid_factory: UuidFactory = uuid4,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         _validate_required_text(
             model,
@@ -122,6 +161,7 @@ class ControlledSupportRecommendationExecutor:
         self._pricing_catalog = pricing_catalog
         self._utc_now = utc_now or _utc_now
         self._uuid_factory = uuid_factory
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(
         self,
@@ -276,6 +316,15 @@ class ControlledSupportRecommendationExecutor:
                 start=1,
             )
         )
+        safe_record_recommendation_event(
+            client=self._observability_client,
+            context=context,
+            event=recommendation_generated_event(
+                context=context,
+                recommendation=recommendation,
+                citation_count=len(citations),
+            ),
+        )
         persistence_result = await self._persist(
             PersistSupportRecommendationCommand(
                 workspace_id=state.workspace_id,
@@ -294,9 +343,28 @@ class ControlledSupportRecommendationExecutor:
         )
 
         if persistence_result is (SupportRecommendationPersistenceResult.LEASE_LOST):
+            safe_record_recommendation_event(
+                client=self._observability_client,
+                context=context,
+                event=recommendation_failed_event(
+                    context=context,
+                    recommendation=recommendation,
+                    citation_count=len(citations),
+                    error_code=_LEASE_LOST_ERROR_CODE,
+                ),
+            )
             _raise_lease_lost()
 
         if persistence_result is (SupportRecommendationPersistenceResult.APPLIED):
+            safe_record_recommendation_event(
+                client=self._observability_client,
+                context=context,
+                event=recommendation_persisted_event(
+                    context=context,
+                    recommendation=recommendation,
+                    citation_count=len(citations),
+                ),
+            )
             return _apply_persisted_recommendation(
                 state=state,
                 recommendation=recommendation,
@@ -713,11 +781,126 @@ def _raise_gateway_failure(
 
 def _raise_lease_lost() -> None:
     raise RetryableAgentRunExecutionError(
-        error_code="support_recommendation_lease_lost",
+        error_code=_LEASE_LOST_ERROR_CODE,
         error_summary=(
             "The AgentRun lease was lost before the support recommendation could be persisted."
         ),
     )
+
+
+def safe_record_recommendation_event(
+    *,
+    client: ObservabilityClient,
+    context: AgentRunExecutionContext,
+    event: EventObservation | None,
+) -> None:
+    if event is None:
+        return
+
+    try:
+        if current_observation_context() is not None or current_trace_context() is not None:
+            client.record_event(event)
+            return
+
+        client.record_trace_event(
+            identity=agent_run_trace_identity(
+                agent_run_id=context.agent_run.id,
+                ticket_id=context.ticket.id,
+            ),
+            event=event,
+        )
+    except Exception:
+        return
+
+
+def recommendation_generated_event(
+    *,
+    context: AgentRunExecutionContext,
+    recommendation: SupportRecommendation,
+    citation_count: int,
+) -> EventObservation | None:
+    return _recommendation_lifecycle_event(
+        name=_RECOMMENDATION_GENERATED_EVENT,
+        status=ObservationStatus.OK,
+        outcome="generated",
+        context=context,
+        recommendation=recommendation,
+        citation_count=citation_count,
+    )
+
+
+def recommendation_persisted_event(
+    *,
+    context: AgentRunExecutionContext,
+    recommendation: SupportRecommendation,
+    citation_count: int,
+) -> EventObservation | None:
+    return _recommendation_lifecycle_event(
+        name=_RECOMMENDATION_PERSISTED_EVENT,
+        status=ObservationStatus.OK,
+        outcome="persisted",
+        context=context,
+        recommendation=recommendation,
+        citation_count=citation_count,
+    )
+
+
+def recommendation_failed_event(
+    *,
+    context: AgentRunExecutionContext,
+    recommendation: SupportRecommendation,
+    citation_count: int,
+    error_code: str,
+) -> EventObservation | None:
+    return _recommendation_lifecycle_event(
+        name=_RECOMMENDATION_FAILED_EVENT,
+        status=ObservationStatus.ERROR,
+        outcome="failed",
+        context=context,
+        recommendation=recommendation,
+        citation_count=citation_count,
+        error_code=error_code,
+    )
+
+
+def _recommendation_lifecycle_event(
+    *,
+    name: str,
+    status: ObservationStatus,
+    outcome: str,
+    context: AgentRunExecutionContext,
+    recommendation: SupportRecommendation,
+    citation_count: int,
+    error_code: str | None = None,
+) -> EventObservation | None:
+    try:
+        metadata = {
+            "recommendation_id": str(recommendation.id),
+            "agent_run_id": str(recommendation.agent_run_id),
+            "agent_run_attempt_id": str(context.attempt.id),
+            "workspace_id": str(recommendation.workspace_id),
+            "ticket_id": str(recommendation.ticket_id),
+            "recommended_action": recommendation.recommended_action.value,
+            "citation_count": citation_count,
+            "requires_human_review": recommendation.requires_human_review,
+            "schema_version": recommendation.schema_version,
+            "prompt_id": recommendation.prompt_id,
+            "prompt_version": recommendation.prompt_version,
+            "status": status.value,
+            "recommendation_outcome": outcome,
+        }
+        if error_code is not None:
+            metadata["error_code"] = error_code
+
+        return EventObservation(
+            name=name,
+            status=status,
+            metadata=metadata,
+            metadata_paths=_RECOMMENDATION_EVENT_METADATA_PATHS,
+            error_code=error_code,
+        )
+    except Exception:
+        return None
 
 
 def _validate_required_text(

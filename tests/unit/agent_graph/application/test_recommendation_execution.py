@@ -1,7 +1,7 @@
 """Unit tests for grounded recommendation execution."""
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -68,6 +68,18 @@ from supportops.modules.ticket_classifications.domain.models import (
     TicketClassification,
 )
 from supportops.modules.tickets.domain.models import Ticket
+from supportops.observability.context import (
+    ActiveObservationContext,
+    observation_context_scope,
+)
+from supportops.observability.contracts import TraceScope
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    TraceAttributes,
+)
 
 _WORKSPACE_ID = UUID("10000000-0000-4000-8000-000000000001")
 _TICKET_ID = UUID("20000000-0000-4000-8000-000000000002")
@@ -374,6 +386,7 @@ def _service(
         SupportRecommendationPersistenceResult
     ) = SupportRecommendationPersistenceResult.APPLIED,
     existing_recommendation: (SupportRecommendation | None) = None,
+    observability_client: object | None = None,
 ) -> tuple[
     ControlledSupportRecommendationExecutor,
     StubGateway,
@@ -417,6 +430,7 @@ def _service(
         execution_repository=execution_repository,
         utc_now=lambda: _NOW,
         uuid_factory=lambda: next(ids),
+        observability_client=observability_client,  # type: ignore[arg-type]
     )
 
     return (
@@ -424,6 +438,63 @@ def _service(
         gateway,
         execution_repository,
     )
+
+
+class RecordingObservabilityClient:
+    def __init__(self, *, fail_event: bool = False) -> None:
+        self._fail_event = fail_event
+        self.events: list[EventObservation] = []
+        self.trace_events: list[tuple[object, EventObservation]] = []
+        self.started_observations: list[ObservationAttributes] = []
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[TraceScope]:
+        del attributes
+        raise AssertionError("Recommendation events must not open traces.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[object]:
+        self.started_observations.append(attributes)
+        raise AssertionError("Recommendation events must not open observations.")
+
+    def record_event(self, event: EventObservation) -> None:
+        if self._fail_event:
+            raise RuntimeError("synthetic event failure")
+
+        self.events.append(event)
+
+    def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
+        if self._fail_event:
+            raise RuntimeError("synthetic trace event failure")
+
+        self.trace_events.append((identity, event))
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _recommendation_events(
+    observability: RecordingObservabilityClient,
+) -> list[EventObservation]:
+    return [
+        *observability.events,
+        *(event for _, event in observability.trace_events),
+    ]
 
 
 async def test_drafts_persists_and_updates_state() -> None:
@@ -514,3 +585,235 @@ async def test_lease_loss_prevents_state_return() -> None:
         )
 
     assert captured.value.error_code == ("support_recommendation_lease_lost")
+
+
+async def test_applied_recommendation_emits_generated_and_persisted_events() -> None:
+    observability = RecordingObservabilityClient()
+    order: list[str] = []
+    service, gateway, repository = _service(
+        _success_result(),
+        observability_client=observability,
+    )
+    original_persist = repository.persist_fenced
+
+    async def tracking_persist(
+        command: PersistSupportRecommendationCommand,
+    ) -> SupportRecommendationPersistenceResult:
+        order.append("persisted")
+        return await original_persist(command)
+
+    repository.persist_fenced = tracking_persist  # type: ignore[method-assign]
+    original_record = observability.record_event
+
+    def tracking_record(event: EventObservation) -> None:
+        order.append(f"event:{event.name}")
+        original_record(event)
+
+    observability.record_event = tracking_record  # type: ignore[method-assign]
+
+    with observation_context_scope(
+        ActiveObservationContext(
+            name="graph-node.draft_recommendation",
+            observation_id="node-1",
+        )
+    ):
+        outcome = await service.execute(
+            state=_state(),
+            context=_context(),
+        )
+
+    events = _recommendation_events(observability)
+    assert outcome.recovered is False
+    assert [event.name for event in events] == [
+        "recommendation.generated",
+        "recommendation.persisted",
+    ]
+    generated, persisted = events
+    assert generated.status is ObservationStatus.OK
+    assert generated.metadata["recommendation_outcome"] == "generated"
+    assert generated.metadata["recommendation_id"] == str(_RECOMMENDATION_ID)
+    assert generated.metadata["recommended_action"] == (SupportRecommendationAction.RESPOND.value)
+    assert generated.metadata["citation_count"] == 0
+    assert generated.metadata["requires_human_review"] is False
+    assert generated.metadata["schema_version"] == "support-recommendation-v1"
+    assert generated.metadata["prompt_id"] == "support-recommendation-draft"
+    assert generated.metadata["prompt_version"] == 1
+    assert generated.metadata["status"] == ObservationStatus.OK.value
+    assert "grounding_status" not in generated.metadata
+    assert persisted.metadata["recommendation_outcome"] == "persisted"
+    assert order.index("event:recommendation.generated") < order.index("persisted")
+    assert order.index("persisted") < order.index("event:recommendation.persisted")
+    assert len(gateway.requests) == 1
+    assert observability.started_observations == []
+    exported = repr(events)
+    assert "Follow the documented account recovery procedure." not in exported
+    assert "The evidence supports a direct response." not in exported
+
+
+async def test_existing_recommendation_recovery_emits_no_lifecycle_events() -> None:
+    recommendation = SupportRecommendation.create(
+        recommendation_id=_RECOMMENDATION_ID,
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        agent_run_id=_AGENT_RUN_ID,
+        classification_id=_CLASSIFICATION_ID,
+        accepted_llm_invocation_id=(_RECOMMENDATION_INVOCATION_ID),
+        recommended_action=(SupportRecommendationAction.RESPOND),
+        response_text=("Follow the documented recovery procedure."),
+        requires_human_review=False,
+        decision_summary=("The evidence supports a direct response."),
+        prompt_id="support-recommendation-draft",
+        prompt_version=1,
+        prompt_content_hash="a" * 64,
+        provider="mock",
+        model="mock-model",
+    )
+    observability = RecordingObservabilityClient()
+    service, gateway, repository = _service(
+        _success_result(),
+        existing_recommendation=recommendation,
+        observability_client=observability,
+    )
+
+    outcome = await service.execute(
+        state=_state(),
+        context=_context(),
+    )
+
+    assert outcome.recovered is True
+    assert gateway.requests == []
+    assert repository.commands == []
+    assert _recommendation_events(observability) == []
+
+
+async def test_already_recommended_persistence_does_not_emit_persisted_event() -> None:
+    existing = SupportRecommendation.create(
+        recommendation_id=_RECOMMENDATION_ID,
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        agent_run_id=_AGENT_RUN_ID,
+        classification_id=_CLASSIFICATION_ID,
+        accepted_llm_invocation_id=(_RECOMMENDATION_INVOCATION_ID),
+        recommended_action=(SupportRecommendationAction.RESPOND),
+        response_text=("Follow the documented recovery procedure."),
+        requires_human_review=False,
+        decision_summary=("The evidence supports a direct response."),
+        prompt_id="support-recommendation-draft",
+        prompt_version=1,
+        prompt_content_hash="a" * 64,
+        provider="mock",
+        model="mock-model",
+    )
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    gateway = StubGateway(_success_result(), transaction_manager)
+    execution_repository = StubExecutionRepository(
+        transaction_manager,
+        SupportRecommendationPersistenceResult.ALREADY_RECOMMENDED,
+    )
+    recommendation_query = StubRecommendationQueryRepository(
+        transaction_manager,
+        None,
+    )
+    ids = iter((_RECOMMENDATION_INVOCATION_ID, UUID("90000000-0000-4000-8000-000000000099")))
+    service = ControlledSupportRecommendationExecutor(
+        gateway=gateway,  # type: ignore[arg-type]
+        model="mock-model",
+        request_timeout_seconds=20,
+        transaction_manager=transaction_manager,
+        observation_assembler=EmptyObservationAssembler(),  # type: ignore[arg-type]
+        invocation_query_repository=StubInvocationRepository(transaction_manager, ()),
+        recommendation_query_repository=recommendation_query,
+        execution_repository=execution_repository,
+        utc_now=lambda: _NOW,
+        uuid_factory=lambda: next(ids),
+        observability_client=observability,  # type: ignore[arg-type]
+    )
+
+    async def load_after_conflict(
+        *,
+        workspace_id: UUID,
+        agent_run_id: UUID,
+    ) -> SupportRecommendation | None:
+        assert workspace_id == _WORKSPACE_ID
+        assert agent_run_id == _AGENT_RUN_ID
+        if execution_repository.commands:
+            return existing
+        return None
+
+    recommendation_query.get_by_agent_run_id = load_after_conflict  # type: ignore[method-assign]
+
+    outcome = await service.execute(
+        state=_state(),
+        context=_context(),
+    )
+
+    events = _recommendation_events(observability)
+    assert outcome.recovered is True
+    assert outcome.recommendation == existing
+    assert [event.name for event in events] == ["recommendation.generated"]
+    assert all(event.name != "recommendation.persisted" for event in events)
+
+
+async def test_lease_lost_emits_generated_and_failed_events() -> None:
+    observability = RecordingObservabilityClient()
+    service, _, _ = _service(
+        _success_result(),
+        persistence_result=(SupportRecommendationPersistenceResult.LEASE_LOST),
+        observability_client=observability,
+    )
+
+    with pytest.raises(RetryableAgentRunExecutionError) as captured:
+        await service.execute(
+            state=_state(),
+            context=_context(),
+        )
+
+    assert type(captured.value) is RetryableAgentRunExecutionError
+    assert captured.value.error_code == "support_recommendation_lease_lost"
+    events = _recommendation_events(observability)
+    assert [event.name for event in events] == [
+        "recommendation.generated",
+        "recommendation.failed",
+    ]
+    failed = events[1]
+    assert failed.status is ObservationStatus.ERROR
+    assert failed.metadata["recommendation_outcome"] == "failed"
+    assert failed.metadata["error_code"] == "support_recommendation_lease_lost"
+    assert failed.error_code == "support_recommendation_lease_lost"
+    assert "lease was lost" not in repr(failed).lower()
+
+
+async def test_gateway_failure_does_not_emit_recommendation_lifecycle_events() -> None:
+    observability = RecordingObservabilityClient()
+    service, _, repository = _service(
+        _failure(),
+        observability_client=observability,
+    )
+
+    with pytest.raises(RetryableAgentRunExecutionError):
+        await service.execute(
+            state=_state(),
+            context=_context(),
+        )
+
+    assert repository.commands[0].recommendation is None
+    assert _recommendation_events(observability) == []
+
+
+async def test_recommendation_observability_failures_fail_open() -> None:
+    observability = RecordingObservabilityClient(fail_event=True)
+    service, _, repository = _service(
+        _success_result(),
+        observability_client=observability,
+    )
+
+    outcome = await service.execute(
+        state=_state(),
+        context=_context(),
+    )
+
+    assert outcome.recovered is False
+    assert outcome.recommendation.id == _RECOMMENDATION_ID
+    assert len(repository.commands) == 1
+    assert _recommendation_events(observability) == []

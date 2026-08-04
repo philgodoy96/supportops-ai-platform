@@ -1136,15 +1136,34 @@ async def test_controlled_workflow_shares_process_observability_client() -> None
             Any,
             observability_client,
         )
+        recommendation_executor = ensure_node.__self__.recommendation_executor
+        assert recommendation_executor._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        human_recommendation_executor = load_node.__self__.recommendation_executor
+        assert human_recommendation_executor._observability_client is cast(
+            Any,
+            observability_client,
+        )
         assert llm_runtime.gateway._observability_client is (bounded_executor._observability_client)
         assert llm_runtime.gateway._observability_client is (
             sensitive_executor._observability_client
+        )
+        assert llm_runtime.gateway._observability_client is (
+            recommendation_executor._observability_client
+        )
+        assert recommendation_executor._observability_client is (
+            human_recommendation_executor._observability_client
         )
         assert cast(Any, human_approved_executor)._observability_client is (
             load_node.__self__.observability_client
         )
         assert cast(Any, human_approved_executor)._observability_client is (
             sensitive_executor._observability_client
+        )
+        assert cast(Any, human_approved_executor)._observability_client is (
+            recommendation_executor._observability_client
         )
     finally:
         await controlled_runtime.close()
