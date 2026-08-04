@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, optional application-owned AI observability, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -93,7 +93,18 @@ They validate:
 - query embedding validation and authoritative hydration;
 - deterministic ranking;
 - retrieval API schemas, route composition, and `503` mappings;
-- retrieval lifespan cleanup.
+- retrieval lifespan cleanup;
+- AI observability settings validation;
+- observability models and contracts;
+- deterministic observability identity;
+- observability ContextVar cleanup and async-task isolation;
+- metadata-only and redacted-content privacy policies;
+- observability sanitizer masking, truncation, bounds, and forbidden structures;
+- no-op observability adapter behavior;
+- Langfuse adapter behavior with an injected fake client;
+- usage and cost payload mapping;
+- fail-open Langfuse SDK behavior;
+- API, worker, and indexing observability lifecycle ownership.
 
 Unit tests use mocks only at external boundaries.
 
@@ -332,6 +343,48 @@ The knowledge-retrieval suites verify:
 - logs that exclude source and chunk content.
 
 Default tests use mock embeddings and make no OpenAI network calls.
+
+## AI observability tests
+
+Slice 7 introduces the application-owned AI observability foundation. The
+current suite covers settings validation, contracts, identity, privacy,
+adapters, and process lifecycle ownership. Detailed generation, embedding,
+retrieval, tool, approval, and workflow instrumentation tests arrive in
+subsequent Slice 7 pull requests.
+
+Focused unit coverage:
+
+```powershell
+uv run pytest tests/unit/observability
+uv run pytest tests/unit/core/test_settings.py -k langfuse
+uv run pytest tests/unit/api/test_lifespan.py
+uv run pytest tests/unit/worker/test_composition.py tests/unit/worker/test_main.py
+uv run pytest `
+  tests/unit/knowledge_index/test_composition.py `
+  tests/unit/knowledge_index/test_cli.py
+```
+
+The observability suites verify:
+
+- settings defaults and validation for provider, capture mode, credentials,
+  base URL, environment, release, flush flag, and timeout;
+- observability models and contracts;
+- deterministic AgentRun and ticket identity seeds;
+- ContextVar cleanup and async-task isolation;
+- metadata-only privacy that omits business content;
+- redacted-content privacy with allowlisted structured fields;
+- sanitizer masking, truncation, collection bounds, and forbidden structures;
+- no-op adapter behavior with no network access;
+- Langfuse adapter behavior against an injected fake client;
+- usage and cost payload mapping, including known and unknown pricing;
+- fail-open SDK construction and export behavior;
+- API lifespan, worker composition, and indexing CLI observability lifecycle,
+  including shutdown isolation and readiness independence from Langfuse.
+
+Normal tests make no external Langfuse calls. Normal CI requires no Langfuse
+credentials. Live Langfuse smoke testing is not delivered by this foundation.
+External smoke validation will be opt-in in a later Slice 7 pull request. RAGAS
+and Langfuse evaluation remain deferred to Slice 8.
 
 ## Integration tests
 
@@ -1281,6 +1334,9 @@ Later implementation phases are expected to add tests for:
 - global AgentRun listing and status filtering;
 - retrieval quality scoring and reranking;
 - write-capable tool authorization beyond grant-gated internal escalation;
+- detailed generation, embedding, retrieval, tool, approval, and workflow
+  observability instrumentation;
+- opt-in live Langfuse smoke validation;
 - prompt version 2 regression comparison;
 - scheduled evaluation and evaluation history persistence;
 - retrieval and generation evaluation beyond structured classification;
@@ -1293,5 +1349,6 @@ deterministic execution, worker process coverage, workspace-scoped AgentRun and
 classification inspection, controlled support workflow coverage, human-approved
 workflow coverage, approval and escalation inspection and decision APIs,
 immutable knowledge-document versioning, explicit knowledge indexing,
-active-version semantic knowledge retrieval, and offline classification
-evaluation are part of the current suite.
+active-version semantic knowledge retrieval, optional application-owned AI
+observability foundation coverage, and offline classification evaluation are
+part of the current suite.
