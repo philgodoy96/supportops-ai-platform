@@ -1001,3 +1001,107 @@ async def test_session_factory_rejects_invalid_request_timeout() -> None:
     finally:
         await controlled_runtime.close()
         await llm_runtime.close()
+
+
+async def test_controlled_workflow_shares_process_observability_client() -> None:
+    observability_client = FakeObservabilityClient()
+    llm_runtime = create_worker_llm_runtime(
+        provider_name="mock",
+        openai_api_key=None,
+        openai_model="gpt-5-nano",
+        openai_base_url=None,
+        request_timeout_seconds=12,
+        transport_max_retries=2,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability_client),
+    )
+    checkpoint_runtime = FakeCheckpointRuntime()
+    embedding_provider = FakeEmbeddingProvider()
+    qdrant_client = FakeQdrantClient()
+
+    async def checkpoint_runtime_factory(
+        *,
+        database_url: SecretStr,
+    ) -> FakeCheckpointRuntime:
+        del database_url
+        return checkpoint_runtime
+
+    controlled_runtime = await create_worker_controlled_support_runtime(
+        settings=_create_settings(),
+        checkpoint_runtime_factory=cast(
+            Any,
+            checkpoint_runtime_factory,
+        ),
+        embedding_provider_factory=cast(
+            Any,
+            _embedding_provider_factory(embedding_provider),
+        ),
+        qdrant_client_factory=cast(
+            Any,
+            lambda configured_settings: qdrant_client,
+        ),
+        index_profile_factory=cast(
+            Any,
+            lambda configured_settings: _mock_index_profile(),
+        ),
+        observability_client=cast(Any, observability_client),
+    )
+    session = cast(AsyncSession, MagicMock(spec=AsyncSession))
+    registry = create_session_scoped_executor_registry(
+        session=session,
+        transaction_manager=NoOpTransactionManager(),
+        gateway=llm_runtime.gateway,
+        provider=llm_runtime.provider,
+        model=llm_runtime.model,
+        request_timeout_seconds=12,
+        controlled_runtime=controlled_runtime,
+        embedding_timeout_seconds=12,
+    )
+
+    try:
+        controlled_executor = registry.resolve(
+            workflow_name=(INITIAL_TICKET_PROCESSING_WORKFLOW_NAME),
+            workflow_version=(CONTROLLED_SUPPORT_WORKFLOW_VERSION),
+        )
+        human_approved_executor = registry.resolve(
+            workflow_name=(INITIAL_TICKET_PROCESSING_WORKFLOW_NAME),
+            workflow_version=(HUMAN_APPROVED_SUPPORT_WORKFLOW_VERSION),
+        )
+
+        assert isinstance(
+            controlled_executor,
+            ControlledSupportWorkflowExecutor,
+        )
+        assert controlled_executor._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert controlled_runtime.observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert llm_runtime.gateway._observability_client is cast(
+            Any,
+            observability_client,
+        )
+
+        graph = cast(Any, controlled_executor._graph)
+        node_names = set(graph.nodes)
+        assert "ensure_classification" in node_names
+        assert "decide_and_execute" in node_names
+        assert "draft_recommendation" in node_names
+        assert "fail_workflow" in node_names
+        ensure_node = graph.nodes["ensure_classification"].bound.afunc
+        assert ensure_node.__self__.observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert not hasattr(human_approved_executor, "_observability_client")
+        assert isinstance(
+            human_approved_executor,
+            HumanApprovedSupportWorkflowExecutor,
+        )
+    finally:
+        await controlled_runtime.close()
+        await llm_runtime.close()
+        assert observability_client.shutdown_calls == 1
