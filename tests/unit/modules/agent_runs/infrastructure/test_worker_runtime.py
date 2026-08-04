@@ -236,6 +236,7 @@ def test_build_cycle_injects_process_observability_client() -> None:
     cycle = runner._build_cycle(session)
 
     assert cycle._processor._observability_client is observability_client
+    assert cycle._expire_pending_approvals._observability_client is (observability_client)
 
 
 def test_build_cycle_calls_executor_factory_with_session_and_transaction_manager() -> None:

@@ -118,6 +118,7 @@ class PostgreSqlAgentWorkerCycleRunner:
             approval_request_repository=approval_request_repository,
             agent_run_repository=agent_run_repository,
             agent_tool_call_repository=agent_tool_call_repository,
+            observability_client=self._observability_client,
         )
 
         return RunAgentWorkerCycle(

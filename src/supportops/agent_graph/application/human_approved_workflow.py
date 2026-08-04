@@ -1,7 +1,10 @@
 """LangGraph composition for the human-approved support workflow."""
 
 from collections.abc import Hashable, Mapping
+from contextlib import AbstractContextManager, suppress
+from time import monotonic
 from typing import Any, Never, Protocol, cast
+from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
@@ -21,6 +24,7 @@ from supportops.agent_graph.application.resume_planning import (
     normalize_checkpoint_interrupts,
 )
 from supportops.agent_graph.domain.human_approved_identity import (
+    HumanApprovedSupportGraphIdentity,
     derive_human_approved_support_graph_identity,
 )
 from supportops.agent_graph.domain.human_approved_routing import (
@@ -56,6 +60,21 @@ from supportops.modules.agent_runs.application.execution import (
 from supportops.modules.agent_runs.domain.models import (
     INITIAL_TICKET_PROCESSING_TRIGGER_KEY,
 )
+from supportops.observability.contracts import (
+    ObservabilityClient,
+    ObservationScope,
+)
+from supportops.observability.identity import agent_run_trace_identity
+from supportops.observability.models import (
+    EventObservation,
+    FieldPaths,
+    JsonValue,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+)
+from supportops.observability.noop import NoOpObservabilityClient
 
 HUMAN_APPROVED_SUPPORT_LANGGRAPH_RECURSION_LIMIT = 32
 
@@ -71,6 +90,45 @@ _DRAFT_GROUNDED_RECOMMENDATION_NODE = "draft_grounded_recommendation"
 _VALIDATE_RECOMMENDATION_NODE = "validate_recommendation"
 _PERSIST_RECOMMENDATION_NODE = "persist_recommendation"
 _FAIL_WORKFLOW_NODE = "fail_workflow"
+
+_WORKFLOW_OBSERVATION_NAME = "workflow.human-approved-support-v1"
+_UNEXPECTED_WORKFLOW_ERROR_CODE = "human_approved_support_unexpected_failure"
+
+_INVOCATION_MODE_INITIAL = "initial"
+_INVOCATION_MODE_CONTINUE = "continue"
+_INVOCATION_MODE_RESUME = "resume"
+
+_WORKFLOW_METADATA_PATHS: FieldPaths = frozenset(
+    {
+        ("agent_run_id",),
+        ("agent_run_attempt_id",),
+        ("execution_request_id",),
+        ("workspace_id",),
+        ("ticket_id",),
+        ("workflow_name",),
+        ("workflow_version",),
+        ("trigger_key",),
+        ("correlation_id",),
+        ("graph_thread_id",),
+        ("invocation_mode",),
+        ("approval_request_id",),
+        ("workflow_outcome",),
+        ("error_code",),
+        ("latency_ms",),
+    }
+)
+
+_WORKFLOW_RESUMED_EVENT_METADATA_PATHS: FieldPaths = frozenset(
+    {
+        ("approval_request_id",),
+        ("agent_run_id",),
+        ("agent_run_attempt_id",),
+        ("workspace_id",),
+        ("ticket_id",),
+        ("execution_request_id",),
+        ("graph_thread_id",),
+    }
+)
 
 
 class HumanApprovedCheckpointSnapshot(Protocol):
@@ -193,9 +251,11 @@ class HumanApprovedSupportWorkflowExecutor:
         *,
         graph: HumanApprovedCompiledGraph,
         resume_planner: HumanApprovedGraphResumePlanner,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         self._graph = graph
         self._resume_planner = resume_planner
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(
         self,
@@ -237,36 +297,43 @@ class HumanApprovedSupportWorkflowExecutor:
                 )
 
             graph_input: HumanApprovedSupportGraphState | Command[Any] | None
+            invocation_mode: str
+            approval_request_id: UUID | None = None
             if isinstance(plan, InitialGraphExecution):
                 graph_input = create_initial_human_approved_support_state(
                     workspace_id=(context.agent_run.workspace_id),
                     ticket_id=context.ticket.id,
                     agent_run_id=context.agent_run.id,
                 )
+                invocation_mode = _INVOCATION_MODE_INITIAL
             elif isinstance(plan, ContinueGraphExecution):
                 graph_input = None
+                invocation_mode = _INVOCATION_MODE_CONTINUE
             elif isinstance(plan, ResumeGraphExecution):
                 graph_input = Command[Any](
                     resume=build_approval_resume_value(plan),
+                )
+                invocation_mode = _INVOCATION_MODE_RESUME
+                approval_request_id = plan.approval_request_id
+                _safe_record_workflow_resumed(
+                    client=self._observability_client,
+                    context=context,
+                    identity=identity,
+                    approval_request_id=plan.approval_request_id,
                 )
             else:
                 raise TypeError(
                     f"Unsupported human-approved execution plan: {type(plan)!r}.",
                 )
 
-            result = await self._graph.ainvoke(
-                graph_input,
-                config,
+            result = await self._ainvoke_with_observation(
+                graph_input=graph_input,
+                config=config,
                 context=context,
-                version="v2",
+                identity=identity,
+                invocation_mode=invocation_mode,
+                approval_request_id=approval_request_id,
             )
-        except GraphRecursionError as exc:
-            raise TerminalAgentRunExecutionError(
-                error_code=("human_approved_graph_recursion_limit_exceeded"),
-                error_summary=(
-                    "The human-approved support graph exceeded its configured recursion limit."
-                ),
-            ) from exc
         except HumanApprovedGraphStateIncompatibleError as exc:
             raise TerminalAgentRunExecutionError(
                 error_code=exc.error_code,
@@ -306,6 +373,148 @@ class HumanApprovedSupportWorkflowExecutor:
                 ),
             )
         return CompletedExecution()
+
+    async def _ainvoke_with_observation(
+        self,
+        *,
+        graph_input: HumanApprovedSupportGraphState | Command[Any] | None,
+        config: Mapping[str, object],
+        context: AgentRunExecutionContext,
+        identity: HumanApprovedSupportGraphIdentity,
+        invocation_mode: str,
+        approval_request_id: UUID | None,
+    ) -> object:
+        observation = _FailOpenObservation(
+            client=self._observability_client,
+            attributes=_build_workflow_attributes(
+                context=context,
+                identity=identity,
+                invocation_mode=invocation_mode,
+                approval_request_id=approval_request_id,
+            ),
+        )
+        started_at = monotonic()
+        observation.start()
+
+        try:
+            result = await self._graph.ainvoke(
+                graph_input,
+                config,
+                context=context,
+                version="v2",
+            )
+        except GraphRecursionError as exc:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": "terminal_failure",
+                        "error_code": ("human_approved_graph_recursion_limit_exceeded"),
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=("human_approved_graph_recursion_limit_exceeded"),
+                )
+            )
+            raise TerminalAgentRunExecutionError(
+                error_code=("human_approved_graph_recursion_limit_exceeded"),
+                error_summary=(
+                    "The human-approved support graph exceeded its configured recursion limit."
+                ),
+            ) from exc
+        except HumanApprovedGraphStateIncompatibleError as exc:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": "terminal_failure",
+                        "error_code": exc.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=exc.error_code,
+                )
+            )
+            raise
+        except GraphCheckpointError as exc:
+            workflow_outcome = "retryable_failure" if exc.retryable else "terminal_failure"
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": workflow_outcome,
+                        "error_code": exc.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=exc.error_code,
+                )
+            )
+            raise
+        except RetryableAgentRunExecutionError as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": "retryable_failure",
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except TerminalAgentRunExecutionError as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": "terminal_failure",
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except Exception:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "workflow_outcome": "unexpected_failure",
+                        "error_code": _UNEXPECTED_WORKFLOW_ERROR_CODE,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=_UNEXPECTED_WORKFLOW_ERROR_CODE,
+                )
+            )
+            raise
+        else:
+            interrupt_payload = _extract_single_interrupt_payload(result)
+            if interrupt_payload is not None:
+                observation.complete(
+                    ObservationUpdate(
+                        status=ObservationStatus.OK,
+                        metadata={
+                            "workflow_outcome": "awaiting_approval",
+                            "approval_request_id": str(
+                                interrupt_payload.approval_request_id,
+                            ),
+                            "latency_ms": _elapsed_ms(started_at),
+                        },
+                    )
+                )
+            else:
+                observation.complete(
+                    ObservationUpdate(
+                        status=ObservationStatus.OK,
+                        metadata={
+                            "workflow_outcome": "completed",
+                            "latency_ms": _elapsed_ms(started_at),
+                        },
+                    )
+                )
+            return result
+        finally:
+            observation.close()
 
 
 def _extract_single_interrupt_payload(
@@ -403,3 +612,130 @@ def _raise_checkpoint_error(
         error_code=error.error_code,
         error_summary=("The approval-aware checkpoint runtime cannot continue."),
     ) from error
+
+
+class _FailOpenObservation:
+    """Workflow-owned fail-open boundary around one observation."""
+
+    def __init__(
+        self,
+        *,
+        client: ObservabilityClient,
+        attributes: ObservationAttributes | None,
+    ) -> None:
+        self._client = client
+        self._attributes = attributes
+        self._manager: AbstractContextManager[ObservationScope] | None = None
+        self._scope: ObservationScope | None = None
+        self._completed = False
+
+    def start(self) -> None:
+        if self._attributes is None:
+            return
+
+        try:
+            self._manager = self._client.start_observation(
+                self._attributes,
+            )
+            self._scope = self._manager.__enter__()
+        except Exception:
+            self._manager = None
+            self._scope = None
+
+    def complete(self, update: ObservationUpdate) -> None:
+        if self._scope is None or self._completed:
+            return
+
+        try:
+            self._scope.update(update)
+            self._completed = True
+        except Exception:
+            return
+
+    def close(self) -> None:
+        if self._manager is None:
+            return
+
+        try:
+            self._manager.__exit__(None, None, None)
+        except Exception:
+            return
+        finally:
+            self._manager = None
+            self._scope = None
+
+
+def _build_workflow_attributes(
+    *,
+    context: AgentRunExecutionContext,
+    identity: HumanApprovedSupportGraphIdentity,
+    invocation_mode: str,
+    approval_request_id: UUID | None,
+) -> ObservationAttributes | None:
+    try:
+        run = context.agent_run
+        attempt = context.attempt
+        metadata: dict[str, JsonValue] = {
+            "agent_run_id": str(run.id),
+            "agent_run_attempt_id": str(attempt.id),
+            "execution_request_id": str(attempt.execution_request_id),
+            "workspace_id": str(run.workspace_id),
+            "ticket_id": str(run.ticket_id),
+            "workflow_name": run.workflow_name,
+            "workflow_version": run.workflow_version,
+            "trigger_key": run.trigger_key,
+            "correlation_id": str(run.correlation_id),
+            "graph_thread_id": identity.thread_id,
+            "invocation_mode": invocation_mode,
+        }
+        if approval_request_id is not None:
+            metadata["approval_request_id"] = str(approval_request_id)
+        return ObservationAttributes(
+            name=_WORKFLOW_OBSERVATION_NAME,
+            observation_type=ObservationType.CHAIN,
+            metadata=metadata,
+            metadata_paths=_WORKFLOW_METADATA_PATHS,
+            input_data=None,
+            input_paths=frozenset(),
+            output_paths=frozenset(),
+        )
+    except Exception:
+        return None
+
+
+def _safe_record_workflow_resumed(
+    *,
+    client: ObservabilityClient,
+    context: AgentRunExecutionContext,
+    identity: HumanApprovedSupportGraphIdentity,
+    approval_request_id: UUID,
+) -> None:
+    with suppress(Exception):
+        run = context.agent_run
+        attempt = context.attempt
+        client.record_trace_event(
+            identity=agent_run_trace_identity(
+                agent_run_id=run.id,
+                ticket_id=run.ticket_id,
+            ),
+            event=EventObservation(
+                name="workflow.resumed",
+                status=ObservationStatus.OK,
+                metadata={
+                    "approval_request_id": str(approval_request_id),
+                    "agent_run_id": str(run.id),
+                    "agent_run_attempt_id": str(attempt.id),
+                    "workspace_id": str(run.workspace_id),
+                    "ticket_id": str(run.ticket_id),
+                    "execution_request_id": str(
+                        attempt.execution_request_id,
+                    ),
+                    "graph_thread_id": identity.thread_id,
+                },
+                metadata_paths=_WORKFLOW_RESUMED_EVENT_METADATA_PATHS,
+            ),
+        )
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((monotonic() - started_at) * 1000))

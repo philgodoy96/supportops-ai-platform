@@ -1301,6 +1301,7 @@ def create_session_scoped_executor_registry(
         tool_call_query_repository=tool_call_query_repository,
         approval_request_repository=(approval_request_repository),
         approval_ttl_seconds=(controlled_runtime.approval_ttl_seconds),
+        observability_client=(controlled_runtime.observability_client),
     )
     grant_repository = SqlAlchemySensitiveExecutionGrantRepository(
         session,
@@ -1341,6 +1342,7 @@ def create_session_scoped_executor_registry(
         sensitive_tool_execution=sensitive_tool_execution,
         approval_request_repository=(approval_request_repository),
         recommendation_executor=(human_approved_recommendation_executor),
+        observability_client=(controlled_runtime.observability_client),
     )
     human_approved_graph = compile_human_approved_support_graph(
         nodes=human_approved_nodes,
@@ -1353,6 +1355,7 @@ def create_session_scoped_executor_registry(
     human_approved_executor = HumanApprovedSupportWorkflowExecutor(
         graph=human_approved_graph,
         resume_planner=human_approved_resume_planner,
+        observability_client=(controlled_runtime.observability_client),
     )
 
     return AgentRunExecutorRegistry(

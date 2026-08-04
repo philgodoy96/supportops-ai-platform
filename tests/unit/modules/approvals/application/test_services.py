@@ -1,10 +1,11 @@
 """Unit tests for transactional approval application services."""
 
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -32,6 +33,10 @@ from supportops.modules.approvals.application.services import (
 )
 from supportops.modules.approvals.domain.models import (
     ApprovalRequestStatus,
+)
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
 )
 
 _NOW = datetime(2026, 8, 2, 22, 45, tzinfo=UTC)
@@ -229,6 +234,7 @@ def _decide_service(
     tool_call: Any | None = ...,
     requeue_result: AgentRunApprovalRequeueResult = (AgentRunApprovalRequeueResult.APPLIED),
     approval_lookup: Any | None = ...,
+    observability_client: Any | None = None,
 ) -> tuple[DecideApprovalRequest, list[str], RecordingTransactionManager]:
     ops = operations if operations is not None else []
     (
@@ -248,6 +254,7 @@ def _decide_service(
         approval_request_repository=approval_repository,
         agent_run_repository=agent_run_repository,
         agent_tool_call_repository=tool_call_repository,
+        observability_client=observability_client,
     )
     return service, ops, transaction_manager
 
@@ -971,4 +978,219 @@ async def test_expiration_batch_stops_on_row_conflict() -> None:
     assert isinstance(
         transaction_manager.exception_exits[0],
         ApprovalRunStateConflictError,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Approval lifecycle observability (Commit 4 / PR C)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RecordingTraceEvent:
+    identity: object
+    event: EventObservation
+
+
+class _RecordingObservabilityClient:
+    provider = ObservabilityProvider.NOOP
+    enabled = False
+
+    def __init__(self, *, fail_record: bool = False) -> None:
+        self.fail_record = fail_record
+        self.trace_events: list[_RecordingTraceEvent] = []
+        self.started_traces: list[object] = []
+        self.started_observations: list[object] = []
+
+    def start_trace(self, attributes: object) -> AbstractContextManager[object]:
+        self.started_traces.append(attributes)
+        raise AssertionError("out-of-band events must not open a fake root observation")
+
+    def start_observation(self, attributes: object) -> AbstractContextManager[object]:
+        self.started_observations.append(attributes)
+        raise AssertionError("out-of-band events must not open observations")
+
+    def record_event(self, event: object) -> None:
+        del event
+
+    def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
+        if self.fail_record:
+            raise RuntimeError("record_trace_event failed")
+        self.trace_events.append(_RecordingTraceEvent(identity=identity, event=event))
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_approve_emits_approval_approved_and_resume_scheduled() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval()
+    service, _ops, _transaction = _decide_service(
+        approval,
+        observability_client=observability,
+    )
+
+    result = await service.approve(_approve_command())
+
+    assert result.idempotent is False
+    names = [item.event.name for item in observability.trace_events]
+    assert names == ["approval.approved", "workflow.resume_scheduled"]
+    approved = observability.trace_events[0]
+    assert approved.identity.trace_seed == f"agent-run:{_AGENT_RUN_ID}"  # type: ignore[attr-defined]
+    assert approved.event.metadata["approval_status"] == "approved"
+    assert approved.event.metadata["tool_name"] == "escalate_ticket"
+    assert "decision_comment" not in approved.event.metadata
+    assert "decision_actor_reference" not in approved.event.metadata
+    assert "proposed_input" not in approved.event.metadata
+    assert observability.started_traces == []
+    assert observability.started_observations == []
+
+
+@pytest.mark.asyncio
+async def test_reject_emits_approval_rejected() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval()
+    service, _ops, _transaction = _decide_service(
+        approval,
+        observability_client=observability,
+    )
+
+    await service.reject(_reject_command())
+
+    assert [item.event.name for item in observability.trace_events] == [
+        "approval.rejected",
+        "workflow.resume_scheduled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idempotent_approve_does_not_emit_duplicate_events() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval()
+    decided = approval.approve(
+        actor_reference="operator:alice",
+        comment=None,
+        request_id=_REQUEST_ID,
+        correlation_id=_CORRELATION_ID,
+        decided_at=_NOW,
+    )
+    service, _ops, _transaction = _decide_service(
+        decided,
+        observability_client=observability,
+    )
+
+    result = await service.approve(_approve_command())
+
+    assert result.idempotent is True
+    assert observability.trace_events == []
+
+
+@pytest.mark.asyncio
+async def test_expired_decision_path_emits_approval_expired() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval(expired=True)
+    service, _ops, _transaction = _decide_service(
+        approval,
+        observability_client=observability,
+    )
+
+    with pytest.raises(ApprovalRequestExpiredError):
+        await service.approve(_approve_command())
+
+    names = [item.event.name for item in observability.trace_events]
+    assert names == ["approval.expired", "workflow.resume_scheduled"]
+
+
+@pytest.mark.asyncio
+async def test_requeue_conflict_emits_no_lifecycle_events() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval()
+    service, _ops, _transaction = _decide_service(
+        approval,
+        requeue_result=AgentRunApprovalRequeueResult.STATE_CONFLICT,
+        observability_client=observability,
+    )
+
+    with pytest.raises(ApprovalRunStateConflictError):
+        await service.approve(_approve_command())
+
+    assert observability.trace_events == []
+
+
+@pytest.mark.asyncio
+async def test_decision_event_failure_does_not_alter_service_result() -> None:
+    observability = _RecordingObservabilityClient(fail_record=True)
+    approval = _pending_approval()
+    service, _ops, _transaction = _decide_service(
+        approval,
+        observability_client=observability,
+    )
+
+    result = await service.approve(_approve_command())
+
+    assert result.idempotent is False
+    assert result.approval_request.status is ApprovalRequestStatus.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_worker_expiration_emits_expired_and_resume_scheduled() -> None:
+    observability = _RecordingObservabilityClient()
+    approval = _pending_approval(expired=True)
+    ops: list[str] = []
+    queue = [approval]
+
+    async def get_next(**kwargs: Any) -> Any:
+        del kwargs
+        ops.append("approval.get_next_expired_pending_for_update")
+        return queue.pop(0) if queue else None
+
+    async def save(request: Any) -> None:
+        del request
+        ops.append("approval.save")
+
+    async def requeue(command: Any) -> AgentRunApprovalRequeueResult:
+        del command
+        ops.append("agent_run.requeue_waiting_for_approval")
+        return AgentRunApprovalRequeueResult.APPLIED
+
+    async def get_tool(**kwargs: Any) -> Any:
+        del kwargs
+        ops.append("tool_call.get_by_id_for_update")
+        return _pending_tool_call(approval)
+
+    async def save_tool(tool: Any) -> None:
+        del tool
+        ops.append("tool_call.save_approval_outcome")
+
+    service = ExpirePendingApprovalRequests(
+        transaction_manager=RecordingTransactionManager(ops),
+        approval_request_repository=SimpleNamespace(
+            get_next_expired_pending_for_update=get_next,
+            save=save,
+        ),
+        agent_run_repository=SimpleNamespace(
+            requeue_waiting_for_approval=requeue,
+        ),
+        agent_tool_call_repository=SimpleNamespace(
+            get_by_id_for_update=get_tool,
+            save_approval_outcome=save_tool,
+        ),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await service.execute(
+        ExpirePendingApprovalRequestsCommand(now=_NOW, batch_size=5),
+    )
+
+    assert result.expired_count == 1
+    assert [item.event.name for item in observability.trace_events] == [
+        "approval.expired",
+        "workflow.resume_scheduled",
+    ]
+    assert observability.trace_events[0].identity.trace_seed == (  # type: ignore[attr-defined]
+        f"agent-run:{_AGENT_RUN_ID}"
     )

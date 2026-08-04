@@ -1102,7 +1102,10 @@ async def test_controlled_workflow_shares_process_observability_client() -> None
             Any,
             observability_client,
         )
-        assert not hasattr(human_approved_executor, "_observability_client")
+        assert cast(Any, human_approved_executor)._observability_client is cast(
+            Any,
+            observability_client,
+        )
         assert isinstance(
             human_approved_executor,
             HumanApprovedSupportWorkflowExecutor,
@@ -1117,6 +1120,15 @@ async def test_controlled_workflow_shares_process_observability_client() -> None
         )
 
         human_approved_graph = cast(Any, human_approved_executor._graph)
+        load_node = human_approved_graph.nodes["load_run_context"].bound.afunc
+        assert load_node.__self__.observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert load_node.__self__.sensitive_proposal_service._observability_client is cast(
+            Any,
+            observability_client,
+        )
         sensitive_node = human_approved_graph.nodes["execute_sensitive_tool"].bound.afunc
         sensitive_executor = sensitive_node.__self__.sensitive_tool_execution.executor
         assert isinstance(sensitive_executor, ExecuteApprovedTicketEscalation)
@@ -1126,6 +1138,12 @@ async def test_controlled_workflow_shares_process_observability_client() -> None
         )
         assert llm_runtime.gateway._observability_client is (bounded_executor._observability_client)
         assert llm_runtime.gateway._observability_client is (
+            sensitive_executor._observability_client
+        )
+        assert cast(Any, human_approved_executor)._observability_client is (
+            load_node.__self__.observability_client
+        )
+        assert cast(Any, human_approved_executor)._observability_client is (
             sensitive_executor._observability_client
         )
     finally:
