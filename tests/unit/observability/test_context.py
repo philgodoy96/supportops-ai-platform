@@ -116,7 +116,7 @@ async def test_trace_context_is_isolated_between_async_tasks() -> None:
         capture_trace("agent-run:two", "b" * 32),
     )
 
-    assert results == ["agent-run:one", "agent-run:two"]
+    assert list(results) == ["agent-run:one", "agent-run:two"]
     assert current_trace_context() is None
 
 
