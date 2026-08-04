@@ -807,5 +807,70 @@ async def test_run_worker_holds_one_process_observability_client() -> None:
     assert create_runtime.call_args.kwargs["observability_client"] is (observability_client)
     assert controlled_runtime.observability_client is observability_client
     assert _captured_cycle_runner_kwargs()["observability_client"] is (observability_client)
+    assert _captured_cycle_runner_kwargs()["flush_observability_at_attempt_end"] is False
+    assert observability_client.shutdown_calls == 1
+    assert observability_client.flush_calls == 0
+
+
+@pytest.mark.parametrize("flush_at_attempt_end", [False, True])
+async def test_run_worker_passes_flush_at_attempt_end_setting(
+    flush_at_attempt_end: bool,
+) -> None:
+    settings = _create_settings(langfuse_flush_at_attempt_end=flush_at_attempt_end)
+    llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
+    engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
+    _reset_capturing_cycle_runner()
+
+    async def controlled_runtime_factory(
+        *,
+        settings: Settings,
+        observability_client: FakeObservabilityClient,
+    ) -> FakeControlledRuntime:
+        del settings
+        controlled_runtime.observability_client = observability_client
+        return controlled_runtime
+
+    with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        exit_code = await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=cast(
+                Any,
+                controlled_runtime_factory,
+            ),
+        )
+
+    assert exit_code == 0
+    assert _captured_cycle_runner_kwargs()["observability_client"] is (observability_client)
+    assert _captured_cycle_runner_kwargs()["flush_observability_at_attempt_end"] is (
+        flush_at_attempt_end
+    )
     assert observability_client.shutdown_calls == 1
     assert observability_client.flush_calls == 0

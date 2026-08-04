@@ -65,6 +65,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         utc_now: UtcNowProvider | None = None,
         uuid_provider: UuidProvider | None = None,
         observability_client: ObservabilityClient | None = None,
+        flush_observability_at_attempt_end: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
@@ -76,6 +77,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         self._utc_now = utc_now
         self._uuid_provider = uuid_provider
         self._observability_client = observability_client or NoOpObservabilityClient()
+        self._flush_observability_at_attempt_end = flush_observability_at_attempt_end
 
     async def execute(self) -> WorkerCycleResult:
         """Open one session, execute one cycle, and close the session."""
@@ -111,6 +113,7 @@ class PostgreSqlAgentWorkerCycleRunner:
             execution_timeout_seconds=self._execution_timeout_seconds,
             utc_now=self._utc_now,
             observability_client=self._observability_client,
+            flush_observability_at_attempt_end=(self._flush_observability_at_attempt_end),
         )
 
         expire_pending_approvals = ExpirePendingApprovalRequests(

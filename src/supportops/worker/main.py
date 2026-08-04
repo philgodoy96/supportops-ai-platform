@@ -177,6 +177,7 @@ async def run_worker(
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
         approval_expiration_batch_size=(resolved_settings.approval_expiration_batch_size),
         observability_client=observability_client,
+        flush_observability_at_attempt_end=(resolved_settings.langfuse_flush_at_attempt_end),
     )
     worker_loop = RunAgentWorkerLoop(
         cycle=cycle_runner,

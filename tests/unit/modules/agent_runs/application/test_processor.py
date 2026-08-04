@@ -926,16 +926,21 @@ class RecordingObservabilityClient:
         fail_start_observation: bool = False,
         fail_update: bool = False,
         fail_exit: bool = False,
+        flush_error: Exception | None = None,
     ) -> None:
         self.provider = type("Provider", (), {"value": "recording"})()
         self.enabled = True
         self.traces: list[RecordingTraceScope] = []
         self.flush_calls = 0
         self.shutdown_calls = 0
+        self.lifecycle_events: list[str] = []
+        self.flush_observation_context: object | None = object()
+        self.flush_trace_context: object | None = object()
         self.fail_start_trace = fail_start_trace
         self.fail_start_observation = fail_start_observation
         self.fail_update = fail_update
         self.fail_exit = fail_exit
+        self.flush_error = flush_error
 
     def start_trace(
         self,
@@ -963,6 +968,7 @@ class RecordingObservabilityClient:
                 if client.fail_exit:
                     raise RuntimeError("trace exit failed")
                 trace.closed = True
+                client.lifecycle_events.append("trace_exit")
                 return False
 
         return Manager()
@@ -982,6 +988,11 @@ class RecordingObservabilityClient:
 
     def flush(self) -> None:
         self.flush_calls += 1
+        self.lifecycle_events.append("flush")
+        self.flush_observation_context = current_observation_context()
+        self.flush_trace_context = current_trace_context()
+        if self.flush_error is not None:
+            raise self.flush_error
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -1074,6 +1085,7 @@ class ContextTrackingObservabilityClient(RecordingObservabilityClient):
                             if client.fail_exit:
                                 raise RuntimeError("observation exit failed")
                             observation.closed = True
+                            client.lifecycle_events.append("observation_exit")
                             return False
 
                     return ObservationManager()
@@ -1101,6 +1113,7 @@ class ContextTrackingObservabilityClient(RecordingObservabilityClient):
                 if client.fail_exit:
                     raise RuntimeError("trace exit failed")
                 trace.closed = True
+                client.lifecycle_events.append("trace_exit")
                 return False
 
         return TraceManager()
@@ -1114,6 +1127,7 @@ def _create_traced_processor(
     ticket: Ticket | None = None,
     missing_ticket: bool = False,
     execution_timeout_seconds: float = 30.0,
+    flush_observability_at_attempt_end: bool = False,
 ) -> tuple[
     ProcessClaimedAgentRun,
     AsyncMock,
@@ -1145,6 +1159,7 @@ def _create_traced_processor(
         execution_timeout_seconds=execution_timeout_seconds,
         utc_now=lambda: _FINISHED_AT,
         observability_client=observability_client,
+        flush_observability_at_attempt_end=flush_observability_at_attempt_end,
     )
     return processor, agent_run_repository, transaction_manager
 
@@ -1472,3 +1487,299 @@ async def test_trace_closes_after_authoritative_persistence() -> None:
     )
     assert client.traces[0].closed is True
     assert client.traces[0].observations[0].closed is True
+
+
+async def test_disabled_flush_policy_skips_attempt_end_flush_for_major_outcomes() -> None:
+    outcomes: list[object] = [
+        RecordingExecutor(transaction_manager=RecordingTransactionManager()),
+        RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+            error=RetryableAgentRunExecutionError(
+                error_code="provider_unavailable",
+                error_summary="The processing provider is temporarily unavailable.",
+            ),
+        ),
+        RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+            error=TerminalAgentRunExecutionError(
+                error_code="unsupported_workflow",
+                error_summary="The AgentRun workflow is not supported by the executor.",
+            ),
+        ),
+        PausingExecutor(
+            approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            graph_thread_id="controlled-support:thread",
+        ),
+    ]
+
+    for executor in outcomes:
+        observability = RecordingObservabilityClient()
+        processor, _, _ = _create_traced_processor(
+            executor=executor,
+            observability_client=observability,
+            flush_observability_at_attempt_end=False,
+        )
+
+        await processor.execute(create_claim())
+
+        assert observability.flush_calls == 0
+        assert observability.shutdown_calls == 0
+
+
+async def _assert_single_attempt_end_flush(
+    *,
+    executor: object,
+    transition_result: AgentRunTransitionResult = AgentRunTransitionResult.APPLIED,
+    missing_ticket: bool = False,
+    execution_timeout_seconds: float = 30.0,
+) -> AgentRunTransitionResult:
+    observability = ContextTrackingObservabilityClient()
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+        transition_result=transition_result,
+        missing_ticket=missing_ticket,
+        execution_timeout_seconds=execution_timeout_seconds,
+        flush_observability_at_attempt_end=True,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert observability.flush_calls == 1
+    assert observability.traces[0].closed is True
+    assert observability.traces[0].observations[0].closed is True
+    assert observability.lifecycle_events == [
+        "observation_exit",
+        "trace_exit",
+        "flush",
+    ]
+    assert observability.flush_observation_context is None
+    assert observability.flush_trace_context is None
+    assert current_observation_context() is None
+    assert current_trace_context() is None
+    return result
+
+
+async def test_enabled_flush_after_succeeded_attempt() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+        ),
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_retryable_failure() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+            error=RetryableAgentRunExecutionError(
+                error_code="provider_unavailable",
+                error_summary="The processing provider is temporarily unavailable.",
+            ),
+        ),
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_terminal_failure() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+            error=TerminalAgentRunExecutionError(
+                error_code="unsupported_workflow",
+                error_summary="The AgentRun workflow is not supported by the executor.",
+            ),
+        ),
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_timeout() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=BlockingExecutor(),
+        execution_timeout_seconds=0.001,
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_waiting_for_approval() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=PausingExecutor(
+            approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            graph_thread_id="controlled-support:thread",
+        ),
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_lease_lost() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+        ),
+        transition_result=AgentRunTransitionResult.LEASE_LOST,
+    )
+    assert result is AgentRunTransitionResult.LEASE_LOST
+
+
+async def test_enabled_flush_after_ticket_not_found() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+        ),
+        missing_ticket=True,
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_after_unexpected_executor_failure() -> None:
+    result = await _assert_single_attempt_end_flush(
+        executor=RecordingExecutor(
+            transaction_manager=RecordingTransactionManager(),
+            error=RuntimeError("unexpected executor boom"),
+        ),
+    )
+    assert result is AgentRunTransitionResult.APPLIED
+
+
+async def test_enabled_flush_occurs_after_persistence_and_before_result_return() -> None:
+    transaction_manager = RecordingTransactionManager()
+    order: list[str] = []
+
+    agent_run_repository = AsyncMock()
+
+    async def mark_succeeded(command: object) -> AgentRunTransitionResult:
+        del command
+        order.append("persist")
+        return AgentRunTransitionResult.APPLIED
+
+    agent_run_repository.mark_succeeded.side_effect = mark_succeeded
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+
+    class OrderedFlushClient(ContextTrackingObservabilityClient):
+        def flush(self) -> None:
+            order.append("flush")
+            assert self.traces[0].closed is True
+            assert self.traces[0].observations[0].closed is True
+            assert current_observation_context() is None
+            assert current_trace_context() is None
+            super().flush()
+
+    client = OrderedFlushClient()
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+        observability_client=client,
+        flush_observability_at_attempt_end=True,
+    )
+
+    result = await processor.execute(create_claim())
+    order.append("result_returned")
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert order == ["persist", "flush", "result_returned"]
+    assert client.lifecycle_events == [
+        "observation_exit",
+        "trace_exit",
+        "flush",
+    ]
+
+
+@pytest.mark.parametrize(
+    "executor_kind",
+    ["success", "retryable", "terminal", "pause"],
+)
+async def test_flush_failure_is_fail_open_for_major_outcomes(
+    executor_kind: str,
+) -> None:
+    flush_error = RuntimeError("flush failed")
+    observability = ContextTrackingObservabilityClient(flush_error=flush_error)
+    transaction_manager = RecordingTransactionManager()
+
+    match executor_kind:
+        case "success":
+            executor: object = RecordingExecutor(
+                transaction_manager=transaction_manager,
+            )
+        case "retryable":
+            executor = RecordingExecutor(
+                transaction_manager=transaction_manager,
+                error=RetryableAgentRunExecutionError(
+                    error_code="provider_unavailable",
+                    error_summary="The processing provider is temporarily unavailable.",
+                ),
+            )
+        case "terminal":
+            executor = RecordingExecutor(
+                transaction_manager=transaction_manager,
+                error=TerminalAgentRunExecutionError(
+                    error_code="unsupported_workflow",
+                    error_summary=("The AgentRun workflow is not supported by the executor."),
+                ),
+            )
+        case "pause":
+            executor = PausingExecutor(
+                approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+                graph_thread_id="controlled-support:thread",
+            )
+        case _:
+            raise AssertionError(executor_kind)
+
+    processor, agent_run_repository, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+        flush_observability_at_attempt_end=True,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert observability.flush_calls == 1
+    assert observability.lifecycle_events.count("flush") == 1
+
+    if executor_kind == "success":
+        agent_run_repository.mark_succeeded.assert_awaited_once()
+    elif executor_kind == "pause":
+        agent_run_repository.mark_waiting_for_approval.assert_awaited_once()
+    else:
+        agent_run_repository.record_failure.assert_awaited_once()
+
+
+async def test_flush_is_not_invoked_during_executor_work() -> None:
+    """Flush belongs only at attempt end, not during executor work."""
+
+    class NestedWorkExecutor:
+        def __init__(self, client: RecordingObservabilityClient) -> None:
+            self._client = client
+            self.flush_calls_during_execute = 0
+
+        async def execute(
+            self,
+            context: AgentRunExecutionContext,
+        ) -> CompletedExecution:
+            del context
+            self.flush_calls_during_execute = self._client.flush_calls
+            return CompletedExecution()
+
+    observability = RecordingObservabilityClient()
+    executor = NestedWorkExecutor(observability)
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+        flush_observability_at_attempt_end=True,
+    )
+
+    await processor.execute(create_claim())
+
+    assert executor.flush_calls_during_execute == 0
+    assert observability.flush_calls == 1

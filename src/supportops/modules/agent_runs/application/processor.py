@@ -122,6 +122,7 @@ class ProcessClaimedAgentRun:
         execution_timeout_seconds: float,
         utc_now: UtcNowProvider | None = None,
         observability_client: ObservabilityClient | None = None,
+        flush_observability_at_attempt_end: bool = False,
     ) -> None:
         if execution_timeout_seconds <= 0:
             raise ValueError(
@@ -136,6 +137,7 @@ class ProcessClaimedAgentRun:
         self._execution_timeout_seconds = execution_timeout_seconds
         self._utc_now = utc_now or _utc_now
         self._observability_client = observability_client or NoOpObservabilityClient()
+        self._flush_observability_at_attempt_end = flush_observability_at_attempt_end
 
     async def execute(
         self,
@@ -174,6 +176,18 @@ class ProcessClaimedAgentRun:
             raise
         finally:
             telemetry.close()
+            self._flush_observability_after_attempt()
+
+    def _flush_observability_after_attempt(self) -> None:
+        """Best-effort flush after attempt telemetry scopes are closed."""
+
+        if not self._flush_observability_at_attempt_end:
+            return
+
+        try:
+            self._observability_client.flush()
+        except Exception:
+            return
 
     async def _execute_claimed(
         self,
