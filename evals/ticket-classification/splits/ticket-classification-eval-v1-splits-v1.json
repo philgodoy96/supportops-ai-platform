@@ -1,0 +1,41 @@
+{
+    "split_manifest_id": "ticket-classification-eval-splits",
+    "split_manifest_version": 1,
+    "dataset_id": "ticket-classification-eval",
+    "dataset_version": 1,
+    "dataset_hash": "a42445dff9ded6c5d7f73c3f2704cc065a445c06ebb1a1a4ad36fa46dcce984b",
+    "description": "Frozen development, holdout, and safety-gate allocation for ticket classification prompt evaluation.",
+    "source": "synthetic",
+    "assignments": {
+      "development": [
+        "account-access-password-reset-001",
+        "account-access-payroll-permission-002",
+        "service-incident-latency-004",
+        "billing-angry-low-impact-007",
+        "product-bug-export-failure-008",
+        "product-bug-cosmetic-alignment-009",
+        "how-to-audit-log-export-010",
+        "security-suspicious-login-013",
+        "feature-request-dark-mode-014",
+        "other-ambiguous-problem-017",
+        "billing-prompt-injection-018",
+        "product-bug-mixed-sentiment-022"
+      ],
+      "holdout": [
+        "billing-duplicate-charge-005",
+        "billing-refund-request-006",
+        "how-to-positive-automation-011",
+        "feature-request-bulk-update-015",
+        "other-sales-inquiry-016",
+        "account-access-executive-lockout-020",
+        "product-bug-single-user-dashboard-021",
+        "billing-positive-feedback-023"
+      ],
+      "safety_gate": [
+        "service-incident-global-outage-003",
+        "security-exposed-api-key-012",
+        "security-prompt-injection-019",
+        "security-data-deletion-request-024"
+      ]
+    }
+  }
