@@ -117,9 +117,9 @@ def test_cost_details_reject_mismatched_total() -> None:
 
 
 def test_trace_attributes_require_non_blank_identity() -> None:
-    with pytest.raises(ValueError, match="trace_id must not be blank"):
+    with pytest.raises(ValueError, match="trace_seed must not be blank"):
         TraceAttributes(
-            trace_id=" ",
+            trace_seed=" ",
             name="ticket-processing",
         )
 
@@ -127,7 +127,7 @@ def test_trace_attributes_require_non_blank_identity() -> None:
 def test_trace_attributes_reject_duplicate_tags() -> None:
     with pytest.raises(ValueError, match="trace tags must be unique"):
         TraceAttributes(
-            trace_id="trace-id",
+            trace_seed="trace-id",
             name="ticket-processing",
             tags=("supportops", "supportops"),
         )

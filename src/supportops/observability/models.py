@@ -166,16 +166,20 @@ class CostDetails:
 
 @dataclass(frozen=True, slots=True)
 class TraceAttributes:
-    """Attributes required to start one logical trace."""
+    """Attributes required to start one logical trace.
 
-    trace_id: str
+    The backend adapter derives or assigns the provider-compatible trace ID
+    from this deterministic application seed.
+    """
+
+    trace_seed: str
     name: str
     session_id: str | None = None
     metadata: Metadata = field(default_factory=dict)
     tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _require_non_blank("trace_id", self.trace_id)
+        _require_non_blank("trace_seed", self.trace_seed)
         _require_non_blank("name", self.name)
 
         if self.session_id is not None:

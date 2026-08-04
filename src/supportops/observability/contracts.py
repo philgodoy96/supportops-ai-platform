@@ -33,8 +33,12 @@ class TraceScope(ObservationContainer, Protocol):
     """Active logical trace scope."""
 
     @property
-    def trace_id(self) -> str:
-        """Return the application-visible trace identifier."""
+    def trace_seed(self) -> str:
+        """Return the deterministic application trace seed."""
+
+    @property
+    def trace_id(self) -> str | None:
+        """Return the backend-compatible trace identifier when available."""
 
     @property
     def session_id(self) -> str | None:
