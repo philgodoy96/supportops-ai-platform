@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextlib import AbstractContextManager, suppress
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -31,6 +32,11 @@ from supportops.knowledge_index.indexing.results import (
 from supportops.modules.knowledge_documents.domain.models import (
     DocumentMediaType,
     DocumentVersion,
+)
+from supportops.observability.context import (
+    ActiveTraceContext,
+    current_trace_context,
+    trace_context_scope,
 )
 from supportops.observability.contracts import ObservabilityClient
 from supportops.observability.identity import (
@@ -176,17 +182,30 @@ class RecordingTraceManager(AbstractContextManager[RecordingTraceScope]):
         scope: RecordingTraceScope,
         fail_enter: bool = False,
         fail_exit: bool = False,
+        on_enter: Callable[[str], None] | None = None,
+        on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self.scope = scope
         self.fail_enter = fail_enter
         self.fail_exit = fail_exit
+        self._on_enter = on_enter
+        self._on_exit = on_exit
         self.entered = False
         self.exited = False
+        self._context_manager = trace_context_scope(
+            ActiveTraceContext(
+                trace_seed=scope.attributes.trace_seed,
+                session_id=scope.attributes.session_id,
+            )
+        )
 
     def __enter__(self) -> RecordingTraceScope:
         if self.fail_enter:
             raise RuntimeError("synthetic trace enter failure")
+        self._context_manager.__enter__()
         self.entered = True
+        if self._on_enter is not None:
+            self._on_enter(self.scope.attributes.name)
         return self.scope
 
     def __exit__(
@@ -195,7 +214,9 @@ class RecordingTraceManager(AbstractContextManager[RecordingTraceScope]):
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        del exc_type, exc, traceback
+        if self._on_exit is not None:
+            self._on_exit(self.scope.attributes.name)
+        self._context_manager.__exit__(exc_type, exc, traceback)
         if self.fail_exit:
             raise RuntimeError("synthetic trace exit failure")
         self.exited = True
@@ -223,6 +244,8 @@ class RecordingObservabilityClient:
         self.trace_attributes: list[TraceAttributes] = []
         self.trace_scopes: list[RecordingTraceScope] = []
         self.trace_managers: list[RecordingTraceManager] = []
+        self.lifecycle: list[tuple[str, str]] = []
+        self.observation_start_calls = 0
 
     @property
     def provider(self) -> ObservabilityProvider:
@@ -247,6 +270,8 @@ class RecordingObservabilityClient:
             scope=scope,
             fail_enter=self._fail_enter,
             fail_exit=self._fail_exit,
+            on_enter=lambda name: self.lifecycle.append(("enter", name)),
+            on_exit=lambda name: self.lifecycle.append(("exit", name)),
         )
         self.trace_attributes.append(attributes)
         self.trace_scopes.append(scope)
@@ -258,6 +283,7 @@ class RecordingObservabilityClient:
         attributes: ObservationAttributes,
     ) -> AbstractContextManager[object]:
         del attributes
+        self.observation_start_calls += 1
         raise AssertionError("CLI must not start observations directly.")
 
     def record_event(self, event: EventObservation) -> None:
@@ -307,6 +333,7 @@ class FakeRuntime:
         )
         self.ensure_calls = 0
         self.index_calls: list[tuple[UUID, UUID, UUID]] = []
+        self.index_trace_seeds: list[str | None] = []
         self.closed = 0
         self.ensure_error: Exception | None = None
         self.index_error: Exception | None = None
@@ -331,6 +358,10 @@ class FakeRuntime:
                 document_id,
                 document_version_id,
             )
+        )
+        active_trace = current_trace_context()
+        self.index_trace_seeds.append(
+            None if active_trace is None else active_trace.trace_seed,
         )
         if self.index_error is not None:
             raise self.index_error
@@ -719,6 +750,12 @@ async def test_index_version_creates_one_deterministic_trace_before_shutdown() -
     assert attributes.metadata["workspace_id"] == str(_WORKSPACE_ID)
     assert attributes.metadata["document_id"] == str(_DOCUMENT_ID)
     assert attributes.metadata["document_version_id"] == str(_VERSION_ID)
+    assert attributes.metadata["embedding_provider"] == "mock"
+    assert attributes.metadata["embedding_model"] == "mock-hashing-embedding-v1"
+    assert attributes.metadata["embedding_dimensions"] == 64
+    assert attributes.metadata["batch_size"] == 64
+    assert attributes.metadata["chunking_strategy"] == "markdown-token"
+    assert attributes.metadata["chunking_version"] == "v1"
     assert "correlation_id" not in attributes.metadata
     _assert_content_free_metadata(attributes.metadata)
 
@@ -727,9 +764,17 @@ async def test_index_version_creates_one_deterministic_trace_before_shutdown() -
     assert manager.entered is True
     assert manager.exited is True
     assert scope.updates[-1].status is ObservationStatus.OK
-    assert manager.exited is True
+    assert len(observability.trace_attributes) == 1
+    assert observability.observation_start_calls == 0
+    assert runtime.index_trace_seeds == [identity.trace_seed]
+    assert observability.lifecycle == [
+        ("enter", "knowledge-index"),
+        ("exit", "knowledge-index"),
+    ]
+    assert current_trace_context() is None
     assert observability.shutdown_calls == 1
     assert runtime.closed == 1
+    assert observability.lifecycle[-1] == ("exit", "knowledge-index")
 
 
 async def test_index_version_failure_closes_trace_before_shutdown() -> None:

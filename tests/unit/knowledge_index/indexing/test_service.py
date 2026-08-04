@@ -1,6 +1,6 @@
 """Unit tests for explicit document-version indexing."""
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -53,6 +53,14 @@ from supportops.modules.knowledge_documents.domain.models import (
 )
 from supportops.modules.knowledge_documents.domain.repositories import (
     DocumentChunkConflictError,
+)
+from supportops.observability.context import (
+    ActiveObservationContext,
+    ActiveTraceContext,
+    current_observation_context,
+    current_trace_context,
+    observation_context_scope,
+    trace_context_scope,
 )
 from supportops.observability.contracts import ObservabilityClient
 from supportops.observability.models import (
@@ -311,6 +319,8 @@ class FakeEmbeddingProvider:
 
     def __init__(self) -> None:
         self.requests: list[EmbeddingRequest] = []
+        self.parent_observation_names: list[str | None] = []
+        self.parent_trace_seeds: list[str | None] = []
         self.error: Exception | None = None
         self.include_usage = True
         self.response_model = "mock-hashing-embedding-v1"
@@ -321,6 +331,14 @@ class FakeEmbeddingProvider:
         request: EmbeddingRequest,
     ) -> EmbeddingProviderResponse:
         self.requests.append(request)
+        parent_observation = current_observation_context()
+        parent_trace = current_trace_context()
+        self.parent_observation_names.append(
+            None if parent_observation is None else parent_observation.name,
+        )
+        self.parent_trace_seeds.append(
+            None if parent_trace is None else parent_trace.trace_seed,
+        )
 
         if self.error is not None:
             raise self.error
@@ -740,7 +758,13 @@ def test_service_rejects_invalid_runtime_limits(
 
 
 class RecordingObservationScope:
-    def __init__(self, *, fail_update: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        attributes: ObservationAttributes,
+        fail_update: bool = False,
+    ) -> None:
+        self.attributes = attributes
         self.fail_update = fail_update
         self.updates: list[ObservationUpdate] = []
         self.observation_id = "observation-test"
@@ -769,17 +793,30 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         scope: RecordingObservationScope,
         fail_enter: bool = False,
         fail_exit: bool = False,
+        on_enter: Callable[[str], None] | None = None,
+        on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self.scope = scope
         self.fail_enter = fail_enter
         self.fail_exit = fail_exit
+        self._on_enter = on_enter
+        self._on_exit = on_exit
         self.entered = False
         self.exited = False
+        self._context_manager = observation_context_scope(
+            ActiveObservationContext(
+                name=scope.attributes.name,
+                observation_id=scope.observation_id,
+            )
+        )
 
     def __enter__(self) -> RecordingObservationScope:
         if self.fail_enter:
             raise RuntimeError("synthetic observation enter failure")
+        self._context_manager.__enter__()
         self.entered = True
+        if self._on_enter is not None:
+            self._on_enter(self.scope.attributes.name)
         return self.scope
 
     def __exit__(
@@ -788,7 +825,9 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        del exc_type, exc, traceback
+        if self._on_exit is not None:
+            self._on_exit(self.scope.attributes.name)
+        self._context_manager.__exit__(exc_type, exc, traceback)
         if self.fail_exit:
             raise RuntimeError("synthetic observation exit failure")
         self.exited = True
@@ -811,6 +850,10 @@ class RecordingObservabilityClient:
         self.attributes: list[ObservationAttributes] = []
         self.scopes: list[RecordingObservationScope] = []
         self.managers: list[RecordingObservationManager] = []
+        self.parent_observation_names: list[str | None] = []
+        self.parent_trace_seeds: list[str | None] = []
+        self.lifecycle: list[tuple[str, str]] = []
+        self.trace_start_calls = 0
 
     @property
     def provider(self) -> ObservabilityProvider:
@@ -825,6 +868,7 @@ class RecordingObservabilityClient:
         attributes: TraceAttributes,
     ) -> AbstractContextManager[object]:
         del attributes
+        self.trace_start_calls += 1
         raise AssertionError("Indexing stages must not create traces.")
 
     def start_observation(
@@ -834,11 +878,25 @@ class RecordingObservabilityClient:
         if self._fail_start:
             raise RuntimeError("synthetic observation start failure")
 
-        scope = RecordingObservationScope(fail_update=self._fail_update)
+        parent_observation = current_observation_context()
+        parent_trace = current_trace_context()
+        self.parent_observation_names.append(
+            None if parent_observation is None else parent_observation.name,
+        )
+        self.parent_trace_seeds.append(
+            None if parent_trace is None else parent_trace.trace_seed,
+        )
+
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            fail_update=self._fail_update,
+        )
         manager = RecordingObservationManager(
             scope=scope,
             fail_enter=self._fail_enter,
             fail_exit=self._fail_exit,
+            on_enter=lambda name: self.lifecycle.append(("enter", name)),
+            on_exit=lambda name: self.lifecycle.append(("exit", name)),
         )
         self.attributes.append(attributes)
         self.scopes.append(scope)
@@ -950,6 +1008,13 @@ async def test_successful_indexing_records_stage_observations() -> None:
         )[-1].metadata["vector_count"]
         == 3
     )
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.upsert-vectors",
+        )[-1].metadata["chunk_count"]
+        == 3
+    )
     verify_update = _stage_updates(
         observability,
         "knowledge-index.verify-index",
@@ -965,6 +1030,7 @@ async def test_successful_indexing_records_stage_observations() -> None:
     )
     assert len(embedding_provider.requests) == 2
     assert "embedding.request" not in _stage_names(observability)
+    assert observability.trace_start_calls == 0
     _assert_metadata_is_content_free(observability)
 
 
@@ -1001,12 +1067,71 @@ async def test_embedding_calls_remain_unchanged_with_observing_provider() -> Non
     assert [len(request.inputs) for request in inner.requests] == [2, 1]
     stage_names = _stage_names(observability)
     assert stage_names.count("embedding.request") == 2
+    assert len(inner.requests) == stage_names.count("embedding.request")
     assert "knowledge-index.load-document-version" in stage_names
     assert ObservationType.EMBEDDING not in {
         attributes.observation_type
         for attributes in observability.attributes
         if attributes.name.startswith("knowledge-index.")
     }
+    assert observability.trace_start_calls == 0
+    chunk_exit_index = observability.lifecycle.index(
+        ("exit", "knowledge-index.chunk-document"),
+    )
+    first_embedding_enter = observability.lifecycle.index(
+        ("enter", "embedding.request"),
+    )
+    upsert_enter = observability.lifecycle.index(
+        ("enter", "knowledge-index.upsert-vectors"),
+    )
+    assert chunk_exit_index < first_embedding_enter < upsert_enter
+    _assert_metadata_is_content_free(observability)
+
+
+async def test_stages_and_embeddings_begin_under_indexing_trace_context() -> None:
+    observability = RecordingObservabilityClient()
+    inner = FakeEmbeddingProvider()
+    observing = ObservingEmbeddingProvider(
+        provider=inner,
+        observability_client=cast(ObservabilityClient, observability),
+    )
+    version_repository = FakeVersionRepository(create_pending_version())
+    chunk_repository = FakeChunkRepository()
+    chunker = FakeChunker()
+    vector_store = FakeVectorStore()
+    transaction_manager = FakeTransactionManager()
+    service = IndexDocumentVersion(
+        version_repository=version_repository,
+        chunk_repository=chunk_repository,
+        transaction_manager=transaction_manager,
+        chunker=chunker,
+        embedding_provider=observing,
+        vector_store=vector_store,
+        pricing_catalog=(DEFAULT_EMBEDDING_PRICING_CATALOG),
+        index_profile=create_profile(),
+        embedding_timeout_seconds=12,
+        embedding_batch_size=2,
+        clock=AdvancingClock(),
+        observability_client=cast(ObservabilityClient, observability),
+    )
+    trace_seed = "knowledge-index:execution-test"
+
+    with trace_context_scope(ActiveTraceContext(trace_seed=trace_seed)):
+        result = await execute(service)
+        active_trace = current_trace_context()
+        assert active_trace is not None
+        assert active_trace.trace_seed == trace_seed
+
+    assert result.version.status is DocumentVersionStatus.READY
+    assert observability.trace_start_calls == 0
+    assert all(seed == trace_seed for seed in observability.parent_trace_seeds)
+    assert all(seed == trace_seed for seed in inner.parent_trace_seeds)
+    assert inner.parent_observation_names == [
+        "embedding.request",
+        "embedding.request",
+    ]
+    assert current_trace_context() is None
+    assert current_observation_context() is None
     _assert_metadata_is_content_free(observability)
 
 

@@ -1,6 +1,6 @@
 """Unit tests for active authoritative semantic retrieval."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -41,6 +41,11 @@ from supportops.modules.knowledge_documents.domain.models import (
     DocumentChunk,
     DocumentMediaType,
     KnowledgeIndexProfile,
+)
+from supportops.observability.context import (
+    ActiveObservationContext,
+    current_observation_context,
+    observation_context_scope,
 )
 from supportops.observability.contracts import TraceScope
 from supportops.observability.models import (
@@ -219,6 +224,7 @@ class FakeEmbeddingProvider:
 
     def __init__(self) -> None:
         self.requests: list[EmbeddingRequest] = []
+        self.parent_observation_names: list[str | None] = []
         self.response_provider = "mock"
         self.response_model = "mock-hashing-embedding-v1"
         self.response_dimensions = 3
@@ -236,6 +242,10 @@ class FakeEmbeddingProvider:
         request: EmbeddingRequest,
     ) -> EmbeddingProviderResponse:
         self.requests.append(request)
+        parent = current_observation_context()
+        self.parent_observation_names.append(
+            None if parent is None else parent.name,
+        )
 
         if self.error is not None:
             raise self.error
@@ -283,8 +293,10 @@ class RecordingObservationScope:
     def __init__(
         self,
         *,
+        attributes: ObservationAttributes,
         fail_update: bool = False,
     ) -> None:
+        self.attributes = attributes
         self._fail_update = fail_update
         self.updates: list[ObservationUpdate] = []
 
@@ -317,16 +329,29 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         scope: RecordingObservationScope,
         fail_enter: bool = False,
         fail_exit: bool = False,
+        on_enter: Callable[[str], None] | None = None,
+        on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self._scope = scope
         self._fail_enter = fail_enter
         self._fail_exit = fail_exit
+        self._on_enter = on_enter
+        self._on_exit = on_exit
         self.exit_calls = 0
+        self._context_manager = observation_context_scope(
+            ActiveObservationContext(
+                name=scope.attributes.name,
+                observation_id=scope.observation_id,
+            )
+        )
 
     def __enter__(self) -> RecordingObservationScope:
         if self._fail_enter:
             raise RuntimeError("synthetic enter failure")
 
+        self._context_manager.__enter__()
+        if self._on_enter is not None:
+            self._on_enter(self._scope.attributes.name)
         return self._scope
 
     def __exit__(
@@ -335,11 +360,10 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        del exc_type
-        del exc
-        del traceback
-
         self.exit_calls += 1
+        if self._on_exit is not None:
+            self._on_exit(self._scope.attributes.name)
+        self._context_manager.__exit__(exc_type, exc, traceback)
 
         if self._fail_exit:
             raise RuntimeError("synthetic exit failure")
@@ -364,6 +388,8 @@ class RecordingObservabilityClient:
         self.attributes: list[ObservationAttributes] = []
         self.scopes: list[RecordingObservationScope] = []
         self.managers: list[RecordingObservationManager] = []
+        self.parent_observation_names: list[str | None] = []
+        self.lifecycle: list[tuple[str, str]] = []
 
     @property
     def provider(self) -> ObservabilityProvider:
@@ -387,11 +413,21 @@ class RecordingObservabilityClient:
         if self._fail_start:
             raise RuntimeError("synthetic start failure")
 
-        scope = RecordingObservationScope(fail_update=self._fail_update)
+        parent = current_observation_context()
+        self.parent_observation_names.append(
+            None if parent is None else parent.name,
+        )
+
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            fail_update=self._fail_update,
+        )
         manager = RecordingObservationManager(
             scope=scope,
             fail_enter=self._fail_enter,
             fail_exit=self._fail_exit,
+            on_enter=lambda name: self.lifecycle.append(("enter", name)),
+            on_exit=lambda name: self.lifecycle.append(("exit", name)),
         )
 
         self.attributes.append(attributes)
@@ -468,13 +504,14 @@ def _successful_search_fixture() -> tuple[
 
 
 async def test_empty_active_scope_returns_without_external_work() -> None:
+    observability = RecordingObservabilityClient()
     (
         service,
         resolver,
         hydrator,
         embedding_provider,
         vector_searcher,
-    ) = create_service()
+    ) = create_service(observability_client=observability)
 
     request = KnowledgeSearchRequest(
         workspace_id=_WORKSPACE_ID,
@@ -497,6 +534,13 @@ async def test_empty_active_scope_returns_without_external_work() -> None:
     assert embedding_provider.requests == []
     assert vector_searcher.requests == []
     assert hydrator.calls == []
+    assert len(observability.attributes) == 1
+    assert observability.attributes[0].name == "knowledge.search"
+    assert observability.attributes[0].observation_type is ObservationType.RETRIEVER
+    assert observability.scopes[0].updates[0].status is ObservationStatus.OK
+    assert observability.scopes[0].updates[0].metadata["evidence_count"] == 0
+    assert "embedding.request" not in [attributes.name for attributes in observability.attributes]
+    assert "How do I recover the database?" not in str(observability.attributes)
 
 
 async def test_incompatible_active_profile_is_safely_omitted(
@@ -1167,3 +1211,19 @@ async def test_observing_embedding_provider_nests_without_duplicate_manual_span(
     assert types.count(ObservationType.EMBEDDING) == 1
     assert names[0] == "knowledge.search"
     assert names[1] == "embedding.request"
+    assert observability.parent_observation_names == [
+        None,
+        "knowledge.search",
+    ]
+    assert inner_provider.parent_observation_names == ["embedding.request"]
+    assert observability.lifecycle == [
+        ("enter", "knowledge.search"),
+        ("enter", "embedding.request"),
+        ("exit", "embedding.request"),
+        ("exit", "knowledge.search"),
+    ]
+    assert all(manager.exit_calls == 1 for manager in observability.managers)
+    assert current_observation_context() is None
+    assert "recover the database" not in str(observability.attributes)
+    assert chunk.content not in str(observability.scopes[0].updates)
+    assert chunk.content not in str(observability.scopes[1].updates)

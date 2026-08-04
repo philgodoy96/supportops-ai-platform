@@ -669,9 +669,13 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         *,
         scope: RecordingObservationScope,
         exit_error: Exception | None = None,
+        on_enter: Callable[[str], None] | None = None,
+        on_exit: Callable[[str], None] | None = None,
     ) -> None:
         self._scope = scope
         self._exit_error = exit_error
+        self._on_enter = on_enter
+        self._on_exit = on_exit
         self.exit_args: (
             tuple[
                 type[BaseException] | None,
@@ -682,6 +686,8 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         ) = None
 
     def __enter__(self) -> RecordingObservationScope:
+        if self._on_enter is not None:
+            self._on_enter(self._scope.attributes.name)
         return self._scope
 
     def __exit__(
@@ -691,6 +697,8 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         traceback: TracebackType | None,
     ) -> Literal[False]:
         self.exit_args = (exc_type, exc, traceback)
+        if self._on_exit is not None:
+            self._on_exit(self._scope.attributes.name)
         if self._exit_error is not None:
             raise self._exit_error
         return False
@@ -703,6 +711,8 @@ class RecordingObservabilityClient:
         self.started_attributes: list[ObservationAttributes] = []
         self.scopes: list[RecordingObservationScope] = []
         self.managers: list[RecordingObservationManager] = []
+        self.lifecycle: list[tuple[str, str]] = []
+        self.record_event_calls = 0
         self.start_error: Exception | None = None
         self.update_error: Exception | None = None
         self.exit_error: Exception | None = None
@@ -735,6 +745,8 @@ class RecordingObservabilityClient:
         manager = RecordingObservationManager(
             scope=scope,
             exit_error=self.exit_error,
+            on_enter=lambda name: self.lifecycle.append(("enter", name)),
+            on_exit=lambda name: self.lifecycle.append(("exit", name)),
         )
         self.scopes.append(scope)
         self.managers.append(manager)
@@ -742,6 +754,7 @@ class RecordingObservabilityClient:
 
     def record_event(self, event: object) -> None:
         del event
+        self.record_event_calls += 1
 
     def flush(self) -> None:
         return None
@@ -872,10 +885,12 @@ async def test_successful_controlled_decision_creates_one_generation() -> None:
     assert attributes.metadata["prompt_hash"] == "hash-1"
     assert attributes.metadata["schema_version"] == ("controlled-support-decision-v1")
     assert attributes.metadata["agent_run_id"] == "agent-run-1"
+    assert attributes.metadata["agent_run_attempt_id"] == "attempt-1"
     assert attributes.metadata["workspace_id"] == "workspace-1"
     assert attributes.metadata["correlation_id"] == "correlation-1"
     assert attributes.input_paths == frozenset()
     assert attributes.output_paths == frozenset()
+    assert attributes.input_data is None
 
     assert update.status is ObservationStatus.OK
     assert update.error_code is None
@@ -898,8 +913,18 @@ async def test_successful_controlled_decision_creates_one_generation() -> None:
     assert update.metadata["decision_kind"] == "executable_tool_call"
     assert update.metadata["selected_tool_safety"] == (ToolSafetyLevel.READ_ONLY.value)
     assert "search_knowledge" not in update.metadata
+    assert "tool_schema" not in attributes.metadata
+    assert "tool_arguments" not in attributes.metadata
+    assert "description" not in attributes.metadata
     _assert_observation_is_content_free(attributes, observability.scopes[0].updates)
     assert observability.managers[0].exit_args == (None, None, None)
+    assert len(provider.requests) == 1
+    assert len(observability.scopes) == len(provider.requests)
+    assert observability.record_event_calls == 0
+    assert observability.lifecycle == [
+        ("enter", "llm.tool_decision"),
+        ("exit", "llm.tool_decision"),
+    ]
 
 
 async def test_successful_human_approved_decision_creates_one_generation() -> None:
@@ -926,7 +951,10 @@ async def test_successful_human_approved_decision_creates_one_generation() -> No
     )
 
     assert isinstance(result.decision, LLMExecutableToolCallDecision)
+    assert len(provider.requests) == 1
     assert len(observability.scopes) == 1
+    assert len(observability.scopes) == len(provider.requests)
+    assert observability.record_event_calls == 0
 
     attributes = observability.started_attributes[0]
     update = observability.scopes[0].updates[0]
@@ -934,6 +962,7 @@ async def test_successful_human_approved_decision_creates_one_generation() -> No
     assert attributes.name == "llm.tool_decision"
     assert attributes.observation_type is ObservationType.GENERATION
     assert attributes.metadata["decision_mode"] == "human_approved"
+    assert attributes.metadata["agent_run_attempt_id"] == "attempt-1"
     assert attributes.metadata["invocation_sequence"] == 1
     assert attributes.metadata["is_repair"] is False
     assert attributes.metadata["tool_count"] == 1
