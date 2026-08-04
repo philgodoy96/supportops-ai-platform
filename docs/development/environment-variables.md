@@ -1568,6 +1568,440 @@ Example safe value:
 - persisted index-profile compatibility is enforced on retry and retrieval;
 - unknown pricing remains null rather than being treated as zero.
 
+## AI observability configuration
+
+AI observability is optional and application-owned. The default provider is
+`noop`, which requires no credentials and performs no network access. Selecting
+`langfuse` enables the optional Langfuse adapter. Langfuse is not a readiness
+dependency. PostgreSQL remains authoritative for business, workflow, audit,
+usage, and estimated-cost records.
+
+Detailed generation, embedding, retrieval, tool, approval, and workflow
+instrumentation is delivered incrementally in subsequent Slice 7 pull requests.
+The variables below configure the observability foundation only.
+
+### `SUPPORTOPS_AI_OBSERVABILITY_PROVIDER`
+
+Explicit observability provider adapter selection.
+
+Settings field:
+
+```text
+ai_observability_provider
+```
+
+Type:
+
+```text
+enum string
+```
+
+Default:
+
+```text
+noop
+```
+
+Accepted values:
+
+```text
+noop
+langfuse
+```
+
+Applies to:
+
+```text
+API process startup
+worker process composition
+knowledge-indexing CLI composition
+```
+
+Purpose:
+
+- selects the process-scoped observability client;
+- keeps local development and CI network-free by default;
+- requires Langfuse credentials only when `langfuse` is selected.
+
+Example safe value:
+
+```text
+noop
+```
+
+### `SUPPORTOPS_LANGFUSE_PUBLIC_KEY`
+
+Optional Langfuse public key required when
+`SUPPORTOPS_AI_OBSERVABILITY_PROVIDER=langfuse`.
+
+Settings field:
+
+```text
+langfuse_public_key
+```
+
+Type:
+
+```text
+secret string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+Constraints:
+
+- blank values normalize to omitted;
+- Langfuse provider selection requires a nonblank value;
+- noop provider selection does not require a value.
+
+Applies to:
+
+```text
+API, worker, and indexing CLI when Langfuse is selected
+```
+
+Security requirements:
+
+- never commit a real value;
+- never include it in logs;
+- never include complete settings in logs;
+- use managed secret storage before production deployment.
+
+Synthetic placeholder only:
+
+```text
+pk-lf-example-public
+```
+
+### `SUPPORTOPS_LANGFUSE_SECRET_KEY`
+
+Optional Langfuse secret key required when
+`SUPPORTOPS_AI_OBSERVABILITY_PROVIDER=langfuse`.
+
+Settings field:
+
+```text
+langfuse_secret_key
+```
+
+Type:
+
+```text
+secret string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+Constraints:
+
+- blank values normalize to omitted;
+- Langfuse provider selection requires a nonblank value;
+- noop provider selection does not require a value.
+
+Applies to:
+
+```text
+API, worker, and indexing CLI when Langfuse is selected
+```
+
+Security requirements:
+
+- never commit a real value;
+- never include it in logs;
+- never include complete settings in logs;
+- use managed secret storage before production deployment.
+
+Synthetic placeholder only:
+
+```text
+sk-lf-example-secret
+```
+
+### `SUPPORTOPS_LANGFUSE_BASE_URL`
+
+HTTP or HTTPS base URL for Langfuse Cloud or an independently operated
+compatible Langfuse deployment.
+
+Settings field:
+
+```text
+langfuse_base_url
+```
+
+Type:
+
+```text
+HTTP or HTTPS URL
+```
+
+Default:
+
+```text
+https://cloud.langfuse.com
+```
+
+Applies to:
+
+```text
+Langfuse adapter construction when Langfuse is selected
+```
+
+Purpose:
+
+- targets Langfuse Cloud or a compatible self-operated deployment;
+- is not used when the provider is `noop`.
+
+Langfuse is not added to the local Docker Compose stack.
+
+Example safe value:
+
+```text
+https://cloud.langfuse.com
+```
+
+### `SUPPORTOPS_LANGFUSE_ENVIRONMENT`
+
+Deployment environment label exported with Langfuse telemetry.
+
+Settings field:
+
+```text
+langfuse_environment
+```
+
+Type:
+
+```text
+string
+```
+
+Default:
+
+```text
+local
+```
+
+Constraints:
+
+- 1 through 64 characters after trimming;
+- must start with an ASCII letter or digit;
+- may contain ASCII letters, digits, `.`, `_`, and `-`.
+
+Applies to:
+
+```text
+Langfuse adapter construction when Langfuse is selected
+```
+
+Example safe value:
+
+```text
+local
+```
+
+### `SUPPORTOPS_LANGFUSE_RELEASE`
+
+Optional release identifier exported with Langfuse telemetry.
+
+Settings field:
+
+```text
+langfuse_release
+```
+
+Type:
+
+```text
+string or omitted
+```
+
+Default:
+
+```text
+omitted
+```
+
+Constraints:
+
+- blank values normalize to omitted;
+- maximum 128 characters;
+- when provided, must start with an ASCII letter or digit and may contain
+  ASCII letters, digits, `.`, `_`, `+`, and `-`.
+
+Applies to:
+
+```text
+Langfuse adapter construction when Langfuse is selected
+```
+
+Release is optional. Omit it when no release label is available.
+
+Example safe value:
+
+```text
+0.1.0
+```
+
+### `SUPPORTOPS_LANGFUSE_CAPTURE_MODE`
+
+Privacy-aware export policy applied before data reaches the Langfuse SDK.
+
+Settings field:
+
+```text
+langfuse_capture_mode
+```
+
+Type:
+
+```text
+enum string
+```
+
+Default:
+
+```text
+metadata_only
+```
+
+Accepted values:
+
+```text
+metadata_only
+redacted_content
+```
+
+Applies to:
+
+```text
+Langfuse adapter privacy policy
+```
+
+Purpose:
+
+- `metadata_only` omits business content and exports operational metadata;
+- `redacted_content` accepts only structured, allowlisted fields after masking,
+  truncation, and collection bounds;
+- unrestricted raw-content capture is not supported.
+
+Regex masking reduces exposure but does not prove de-identification.
+
+Example safe value:
+
+```text
+metadata_only
+```
+
+### `SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END`
+
+Configuration flag for flushing buffered Langfuse telemetry at AgentRunAttempt
+boundaries.
+
+Settings field:
+
+```text
+langfuse_flush_at_attempt_end
+```
+
+Type:
+
+```text
+boolean
+```
+
+Default:
+
+```text
+false
+```
+
+Applies to:
+
+```text
+future AgentRun tracing instrumentation
+```
+
+Purpose:
+
+- reserves explicit attempt-end flush behavior for later Slice 7 AgentRun
+  tracing;
+- is currently configuration-ready but not used until AgentRun tracing is
+  introduced.
+
+Example safe value:
+
+```text
+false
+```
+
+### `SUPPORTOPS_LANGFUSE_TIMEOUT_SECONDS`
+
+Timeout applied to Langfuse SDK client configuration.
+
+Settings field:
+
+```text
+langfuse_timeout_seconds
+```
+
+Type:
+
+```text
+float seconds
+```
+
+Default:
+
+```text
+5.0
+```
+
+Accepted range:
+
+```text
+greater than 0 and no more than 30
+```
+
+Applies to:
+
+```text
+Langfuse SDK construction when Langfuse is selected
+```
+
+Purpose:
+
+- bounds SDK network configuration;
+- does not make Langfuse a readiness dependency;
+- runtime export failures remain fail-open.
+
+Example safe value:
+
+```text
+5.0
+```
+
+### Observability-provider semantics
+
+- default provider is `noop`;
+- Langfuse credentials are required only when `langfuse` is selected;
+- Langfuse is not required in noop mode;
+- default capture mode is `metadata_only`;
+- `redacted_content` is an explicit opt-in;
+- unrestricted raw-content capture is not supported;
+- release is optional;
+- attempt-end flushing is configuration-ready but unused until AgentRun tracing;
+- timeout applies to SDK configuration only;
+- Langfuse is not a readiness dependency;
+- PostgreSQL remains authoritative for business and usage records.
+
 ## Docker Compose variables
 
 These variables configure local infrastructure containers.
@@ -1695,10 +2129,12 @@ SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS=2
 to appear in the local example file for basic local development. Set
 `SUPPORTOPS_WORKER_ID` explicitly when distinguishing concurrent local workers.
 `SUPPORTOPS_EMBEDDING_*` values likewise use validated mock defaults when unset.
-The AI runtime section above matches `.env.example`, including the empty
-`SUPPORTOPS_OPENAI_API_KEY=` placeholder. When overriding LLM request timeout
-locally, keep worker execution timeout and lease values large enough for the
-selected workflow budget and the 15-second safety margins.
+`SUPPORTOPS_AI_OBSERVABILITY_PROVIDER` and `SUPPORTOPS_LANGFUSE_*` values use
+validated noop defaults when unset. Local development and CI require no Langfuse
+credentials. The AI runtime section above matches `.env.example`, including the
+empty `SUPPORTOPS_OPENAI_API_KEY=` placeholder. When overriding LLM request
+timeout locally, keep worker execution timeout and lease values large enough for
+the selected workflow budget and the 15-second safety margins.
 
 ## Validation behavior
 
@@ -1735,6 +2171,12 @@ Examples of invalid configuration include:
 - unsupported embedding provider;
 - unsupported ticket-processing workflow version;
 - OpenAI LLM or embedding selection without an API key;
+- unsupported AI observability provider;
+- Langfuse provider selection without public or secret keys;
+- unsupported Langfuse capture mode;
+- invalid Langfuse base URL;
+- invalid Langfuse environment or release characters;
+- Langfuse timeout outside its accepted range;
 - request timeout outside its accepted range;
 - embedding request timeout outside its accepted range;
 - transport retry count outside 0 through 2;
@@ -1768,6 +2210,10 @@ The repository foundation follows these rules:
 - OpenAI API keys are not logged;
 - `.env.example` leaves the OpenAI key empty;
 - real OpenAI credentials require environment-appropriate secret management;
+- Langfuse public and secret keys use a secret settings type;
+- Langfuse keys are not logged and must not be committed;
+- Langfuse credentials are required only when the Langfuse provider is selected;
+- real Langfuse credentials require environment-appropriate secret management;
 - CI uses non-production service credentials;
 - no external secret management system is introduced in the local foundation.
 
