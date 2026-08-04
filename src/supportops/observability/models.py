@@ -11,6 +11,8 @@ from enum import StrEnum
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type Metadata = Mapping[str, JsonValue]
+type FieldPath = tuple[str, ...]
+type FieldPaths = frozenset[FieldPath]
 
 
 class ObservabilityProvider(StrEnum):
@@ -176,6 +178,7 @@ class TraceAttributes:
     name: str
     session_id: str | None = None
     metadata: Metadata = field(default_factory=dict)
+    metadata_paths: FieldPaths = frozenset()
     tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -191,6 +194,8 @@ class TraceAttributes:
         if len(set(self.tags)) != len(self.tags):
             raise ValueError("trace tags must be unique")
 
+        _validate_field_paths("metadata_paths", self.metadata_paths)
+
 
 @dataclass(frozen=True, slots=True)
 class ObservationAttributes:
@@ -199,7 +204,10 @@ class ObservationAttributes:
     name: str
     observation_type: ObservationType
     metadata: Metadata = field(default_factory=dict)
+    metadata_paths: FieldPaths = frozenset()
     input_data: JsonValue = None
+    input_paths: FieldPaths = frozenset()
+    output_paths: FieldPaths = frozenset()
     provider: str | None = None
     model: str | None = None
 
@@ -211,6 +219,10 @@ class ObservationAttributes:
 
         if self.model is not None:
             _require_non_blank("model", self.model)
+
+        _validate_field_paths("metadata_paths", self.metadata_paths)
+        _validate_field_paths("input_paths", self.input_paths)
+        _validate_field_paths("output_paths", self.output_paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +251,7 @@ class EventObservation:
 
     name: str
     metadata: Metadata = field(default_factory=dict)
+    metadata_paths: FieldPaths = frozenset()
     status: ObservationStatus = ObservationStatus.OK
     occurred_at: datetime | None = None
     error_code: str | None = None
@@ -252,7 +265,19 @@ class EventObservation:
         if self.occurred_at is not None and self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
 
+        _validate_field_paths("metadata_paths", self.metadata_paths)
+
 
 def _require_non_blank(field_name: str, value: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} must not be blank")
+
+
+def _validate_field_paths(field_name: str, paths: FieldPaths) -> None:
+    for path in paths:
+        if not path:
+            raise ValueError(f"{field_name} must not contain an empty path")
+
+        for segment in path:
+            if not segment.strip():
+                raise ValueError(f"{field_name} must not contain blank path segments")

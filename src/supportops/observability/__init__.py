@@ -1,5 +1,7 @@
 """Application-owned AI observability contracts and models."""
 
+from typing import TYPE_CHECKING
+
 from supportops.observability.context import (
     ActiveObservationContext,
     ActiveTraceContext,
@@ -32,6 +34,8 @@ from supportops.observability.identity import (
 from supportops.observability.models import (
     CostDetails,
     EventObservation,
+    FieldPath,
+    FieldPaths,
     ObservabilityCaptureMode,
     ObservabilityProvider,
     ObservationAttributes,
@@ -52,13 +56,22 @@ from supportops.observability.privacy import (
     SanitizedObservationPayload,
 )
 
+if TYPE_CHECKING:
+    from supportops.observability.composition import create_observability_client
+    from supportops.observability.langfuse import LangfuseObservabilityClient
+    from supportops.observability.noop import NoOpObservabilityClient
+
 __all__ = [
     "ActiveObservationContext",
     "ActiveTraceContext",
     "CostDetails",
     "EventObservation",
     "ExportFieldPolicy",
+    "FieldPath",
+    "FieldPaths",
+    "LangfuseObservabilityClient",
     "MetadataOnlyExportPolicy",
+    "NoOpObservabilityClient",
     "ObservabilityCaptureMode",
     "ObservabilityClient",
     "ObservabilityConfigurationError",
@@ -85,6 +98,7 @@ __all__ = [
     "TraceScope",
     "UsageDetails",
     "agent_run_trace_identity",
+    "create_observability_client",
     "current_observation_context",
     "current_trace_context",
     "knowledge_index_trace_identity",
@@ -93,3 +107,26 @@ __all__ = [
     "ticket_session_id",
     "trace_context_scope",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "create_observability_client":
+        from supportops.observability.composition import (
+            create_observability_client,
+        )
+
+        return create_observability_client
+
+    if name == "LangfuseObservabilityClient":
+        from supportops.observability.langfuse import (
+            LangfuseObservabilityClient,
+        )
+
+        return LangfuseObservabilityClient
+
+    if name == "NoOpObservabilityClient":
+        from supportops.observability.noop import NoOpObservabilityClient
+
+        return NoOpObservabilityClient
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

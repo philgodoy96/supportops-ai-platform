@@ -157,3 +157,46 @@ def test_event_accepts_authoritative_timezone_aware_timestamp() -> None:
 
     assert event.occurred_at is not None
     assert event.occurred_at.tzinfo is UTC
+
+
+def test_trace_attributes_reject_empty_allowlist_paths() -> None:
+    with pytest.raises(ValueError, match="must not contain an empty path"):
+        TraceAttributes(
+            trace_seed="trace-id",
+            name="ticket-processing",
+            metadata_paths=frozenset({()}),
+        )
+
+
+def test_observation_attributes_reject_blank_path_segments() -> None:
+    with pytest.raises(
+        ValueError,
+        match="must not contain blank path segments",
+    ):
+        ObservationAttributes(
+            name="worker-attempt",
+            observation_type=ObservationType.SPAN,
+            metadata_paths=frozenset({(" ",)}),
+        )
+
+
+def test_observation_attributes_accept_explicit_nested_paths() -> None:
+    attributes = ObservationAttributes(
+        name="generation",
+        observation_type=ObservationType.GENERATION,
+        metadata_paths=frozenset({("operation", "name")}),
+        input_paths=frozenset({("messages", "role")}),
+        output_paths=frozenset({("choices", "text")}),
+    )
+
+    assert attributes.metadata_paths == frozenset({("operation", "name")})
+    assert attributes.input_paths == frozenset({("messages", "role")})
+    assert attributes.output_paths == frozenset({("choices", "text")})
+
+
+def test_event_observation_rejects_empty_allowlist_paths() -> None:
+    with pytest.raises(ValueError, match="must not contain an empty path"):
+        EventObservation(
+            name="workflow_paused",
+            metadata_paths=frozenset({()}),
+        )
