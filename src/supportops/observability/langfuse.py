@@ -20,6 +20,7 @@ from supportops.observability.context import (
     trace_context_scope,
 )
 from supportops.observability.contracts import ObservationScope, TraceScope
+from supportops.observability.identity import TraceIdentity
 from supportops.observability.models import (
     CostDetails,
     EventObservation,
@@ -131,6 +132,38 @@ class LangfuseObservabilityClient:
                 metadata=payload.metadata,
                 **_event_update(event),
             )
+        except Exception:
+            self._warn_once("event_export_failed")
+
+    def record_trace_event(
+        self,
+        *,
+        identity: TraceIdentity,
+        event: EventObservation,
+    ) -> None:
+        trace_id = self._create_trace_id(identity.trace_seed)
+        if trace_id is None:
+            return
+
+        try:
+            payload = self._export_policy.sanitize(
+                metadata=cast(
+                    Mapping[str, object],
+                    event.metadata,
+                ),
+                field_policy=_event_policy(event.metadata_paths),
+            )
+            with propagate_attributes(
+                session_id=identity.session_id,
+                tags=list(identity.tags),
+                trace_name=identity.trace_name,
+            ):
+                self._sdk_client.create_event(
+                    name=event.name,
+                    metadata=payload.metadata,
+                    trace_context={"trace_id": trace_id},
+                    **_event_update(event),
+                )
         except Exception:
             self._warn_once("event_export_failed")
 
@@ -407,6 +440,9 @@ class _LangfuseTraceScope:
             attributes=attributes,
         )
 
+    def update(self, update: ObservationUpdate) -> None:
+        self._safe_update(update)
+
     def record_event(self, event: EventObservation) -> None:
         self._client.record_event(event)
 
@@ -415,7 +451,18 @@ class _LangfuseTraceScope:
             return
 
         try:
-            self._sdk_observation.update(**_observation_update(update))
+            payload = self._client._export_policy.sanitize(
+                metadata=cast(
+                    Mapping[str, object],
+                    update.metadata,
+                ),
+                field_policy=_trace_policy(self._attributes.metadata_paths),
+            )
+
+            kwargs = _observation_update(update)
+            kwargs["metadata"] = payload.metadata
+
+            self._sdk_observation.update(**kwargs)
         except Exception:
             self._client._warn_once("trace_update_failed")
 

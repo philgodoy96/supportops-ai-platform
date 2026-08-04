@@ -47,7 +47,11 @@ class FakeObservabilityClient:
     def __init__(self) -> None:
         self.enabled = False
         self.shutdown_calls = 0
+        self.flush_calls = 0
         self.shutdown_error: Exception | None = None
+
+    def flush(self) -> None:
+        self.flush_calls += 1
 
     def shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -802,4 +806,6 @@ async def test_run_worker_holds_one_process_observability_client() -> None:
     create_runtime.assert_called_once()
     assert create_runtime.call_args.kwargs["observability_client"] is (observability_client)
     assert controlled_runtime.observability_client is observability_client
+    assert _captured_cycle_runner_kwargs()["observability_client"] is (observability_client)
     assert observability_client.shutdown_calls == 1
+    assert observability_client.flush_calls == 0

@@ -38,6 +38,8 @@ from supportops.modules.approvals.infrastructure.repository import (
 from supportops.modules.tickets.infrastructure.repository import (
     SqlAlchemyTicketRepository,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.noop import NoOpObservabilityClient
 
 UtcNowProvider = Callable[[], datetime]
 UuidProvider = Callable[[], UUID]
@@ -62,6 +64,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         approval_expiration_batch_size: int,
         utc_now: UtcNowProvider | None = None,
         uuid_provider: UuidProvider | None = None,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._worker_id = worker_id
@@ -72,6 +75,7 @@ class PostgreSqlAgentWorkerCycleRunner:
         self._approval_expiration_batch_size = approval_expiration_batch_size
         self._utc_now = utc_now
         self._uuid_provider = uuid_provider
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(self) -> WorkerCycleResult:
         """Open one session, execute one cycle, and close the session."""
@@ -106,6 +110,7 @@ class PostgreSqlAgentWorkerCycleRunner:
             retry_policy=self._retry_policy,
             execution_timeout_seconds=self._execution_timeout_seconds,
             utc_now=self._utc_now,
+            observability_client=self._observability_client,
         )
 
         expire_pending_approvals = ExpirePendingApprovalRequests(

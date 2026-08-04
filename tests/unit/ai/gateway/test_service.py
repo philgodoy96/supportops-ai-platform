@@ -232,6 +232,10 @@ class RecordingObservabilityClient:
         del event
         self.record_event_calls += 1
 
+    def record_trace_event(self, *, identity: object, event: object) -> None:
+        del identity, event
+        self.record_event_calls += 1
+
     def flush(self) -> None:
         return None
 

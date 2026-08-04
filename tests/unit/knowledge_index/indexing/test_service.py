@@ -907,6 +907,10 @@ class RecordingObservabilityClient:
         del event
         raise AssertionError("Indexing stages must not emit events.")
 
+    def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
+        del identity, event
+        raise AssertionError("Indexing stages must not emit events.")
+
     def flush(self) -> None:
         return None
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from typing import Protocol, runtime_checkable
 
+from supportops.observability.identity import TraceIdentity
 from supportops.observability.models import (
     EventObservation,
     ObservabilityProvider,
@@ -44,6 +45,9 @@ class TraceScope(ObservationContainer, Protocol):
     def session_id(self) -> str | None:
         """Return the optional application session identifier."""
 
+    def update(self, update: ObservationUpdate) -> None:
+        """Update the logical trace observation."""
+
 
 @runtime_checkable
 class ObservationScope(ObservationContainer, Protocol):
@@ -74,6 +78,14 @@ class ObservabilityClient(ObservationContainer, Protocol):
         attributes: TraceAttributes,
     ) -> AbstractContextManager[TraceScope]:
         """Start or re-enter one logical trace."""
+
+    def record_trace_event(
+        self,
+        *,
+        identity: TraceIdentity,
+        event: EventObservation,
+    ) -> None:
+        """Record a discrete event against a deterministic logical trace."""
 
     def flush(self) -> None:
         """Flush buffered telemetry when the process policy requires it."""
