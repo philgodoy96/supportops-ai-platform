@@ -17,6 +17,9 @@ from supportops.ai.embeddings.mock import (
     MOCK_HASHING_EMBEDDING_MODEL,
     MockEmbeddingProvider,
 )
+from supportops.ai.embeddings.observability import (
+    ObservingEmbeddingProvider,
+)
 from supportops.ai.embeddings.openai import (
     OpenAIEmbeddingProvider,
 )
@@ -199,13 +202,17 @@ async def create_knowledge_index_runtime(
     """Create one process-scoped knowledge indexing runtime."""
 
     index_profile = build_knowledge_index_profile(settings)
-    embedding_provider = create_embedding_provider(settings)
     observability_client = create_observability_client(settings)
 
+    embedding_provider: EmbeddingProvider | None = None
     engine: AsyncEngine | None = None
     qdrant_client: AsyncQdrantClient | None = None
 
     try:
+        embedding_provider = create_embedding_provider(
+            settings,
+            observability_client=observability_client,
+        )
         engine = create_postgresql_engine(settings)
         session_factory = create_postgresql_session_factory(engine)
         qdrant_client = create_qdrant_client(settings)
@@ -282,22 +289,25 @@ def build_knowledge_index_profile(
 
 def create_embedding_provider(
     settings: Settings,
+    *,
+    observability_client: ObservabilityClient | None = None,
 ) -> EmbeddingProvider:
     """Create the configured process-scoped embedding adapter."""
 
+    provider: EmbeddingProvider
+
     if settings.embedding_provider is EmbeddingProviderName.MOCK:
-        return MockEmbeddingProvider(
+        provider = MockEmbeddingProvider(
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
         )
-
-    if settings.embedding_provider is EmbeddingProviderName.OPENAI:
+    elif settings.embedding_provider is EmbeddingProviderName.OPENAI:
         if settings.openai_api_key is None:
             raise KnowledgeIndexCompositionError(
                 "OpenAI API key is required for OpenAI knowledge indexing."
             )
 
-        return OpenAIEmbeddingProvider.create(
+        provider = OpenAIEmbeddingProvider.create(
             api_key=(settings.openai_api_key.get_secret_value()),
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
@@ -305,23 +315,30 @@ def create_embedding_provider(
             transport_max_retries=(settings.embedding_transport_max_retries),
             base_url=settings.openai_base_url,
         )
+    else:
+        raise KnowledgeIndexCompositionError("Unsupported embedding provider.")
 
-    raise KnowledgeIndexCompositionError("Unsupported embedding provider.")
+    return ObservingEmbeddingProvider(
+        provider=provider,
+        observability_client=observability_client,
+        pricing_catalog=DEFAULT_EMBEDDING_PRICING_CATALOG,
+    )
 
 
 async def _close_partial_runtime(
     *,
-    embedding_provider: EmbeddingProvider,
+    embedding_provider: EmbeddingProvider | None,
     qdrant_client: AsyncQdrantClient | None,
     engine: AsyncEngine | None,
     observability_client: ObservabilityClient,
 ) -> None:
     failures: list[Exception] = []
 
-    try:
-        await embedding_provider.close()
-    except Exception as error:
-        failures.append(error)
+    if embedding_provider is not None:
+        try:
+            await embedding_provider.close()
+        except Exception as error:
+            failures.append(error)
 
     if qdrant_client is not None:
         try:

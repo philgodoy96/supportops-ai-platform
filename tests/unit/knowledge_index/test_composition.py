@@ -17,6 +17,9 @@ from supportops.ai.embeddings.contracts import (
 from supportops.ai.embeddings.mock import (
     MockEmbeddingProvider,
 )
+from supportops.ai.embeddings.observability import (
+    ObservingEmbeddingProvider,
+)
 from supportops.ai.embeddings.openai import (
     OpenAIEmbeddingProvider,
 )
@@ -146,13 +149,14 @@ def test_rejects_incompatible_openai_profile(
 def test_creates_mock_provider() -> None:
     provider = create_embedding_provider(create_settings())
 
+    assert isinstance(provider, ObservingEmbeddingProvider)
     assert isinstance(
-        provider,
+        provider.wrapped_provider,
         MockEmbeddingProvider,
     )
     assert provider.provider_name == "mock"
-    assert provider.model == ("mock-hashing-embedding-v1")
-    assert provider.dimensions == 64
+    assert provider.wrapped_provider.model == ("mock-hashing-embedding-v1")
+    assert provider.wrapped_provider.dimensions == 64
 
 
 async def test_creates_and_closes_openai_provider_without_network() -> None:
@@ -165,13 +169,14 @@ async def test_creates_and_closes_openai_provider_without_network() -> None:
 
     provider = create_embedding_provider(settings)
 
+    assert isinstance(provider, ObservingEmbeddingProvider)
     assert isinstance(
-        provider,
+        provider.wrapped_provider,
         OpenAIEmbeddingProvider,
     )
     assert provider.provider_name == "openai"
-    assert provider.model == ("text-embedding-3-small")
-    assert provider.dimensions == 1536
+    assert provider.wrapped_provider.model == ("text-embedding-3-small")
+    assert provider.wrapped_provider.dimensions == 1536
 
     await provider.close()
 
@@ -504,7 +509,168 @@ async def test_create_runtime_composes_one_observability_client(
     try:
         assert runtime.observability_client is cast(Any, observability_client)
         assert factory_calls == [settings]
+        assert isinstance(
+            runtime.embedding_provider,
+            ObservingEmbeddingProvider,
+        )
+        assert runtime.embedding_provider._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert isinstance(
+            runtime.embedding_provider.wrapped_provider,
+            MockEmbeddingProvider,
+        )
     finally:
         await runtime.close()
 
+    assert observability_client.shutdown_calls == 1
+
+
+def test_create_embedding_provider_uses_supplied_observability_client() -> None:
+    observability_client = FakeObservabilityClient()
+
+    provider = create_embedding_provider(
+        create_settings(),
+        observability_client=cast(Any, observability_client),
+    )
+
+    assert isinstance(provider, ObservingEmbeddingProvider)
+    assert provider._observability_client is cast(
+        Any,
+        observability_client,
+    )
+
+
+async def test_partial_startup_after_client_shuts_client_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = create_settings()
+    observability_client = FakeObservabilityClient()
+    provider = FakeProvider()
+
+    monkeypatch.setattr(
+        composition,
+        "create_observability_client",
+        lambda configured_settings: observability_client,
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_embedding_provider",
+        lambda configured_settings, *, observability_client=None: cast(
+            EmbeddingProvider,
+            provider,
+        ),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_postgresql_engine",
+        lambda configured_settings: (_ for _ in ()).throw(RuntimeError("postgresql unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="postgresql unavailable"):
+        await composition.create_knowledge_index_runtime(
+            settings=settings,
+        )
+
+    assert provider.closed == 1
+    assert observability_client.shutdown_calls == 1
+
+
+async def test_partial_startup_before_provider_skips_provider_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = create_settings()
+    observability_client = FakeObservabilityClient()
+
+    monkeypatch.setattr(
+        composition,
+        "create_observability_client",
+        lambda configured_settings: observability_client,
+    )
+
+    def failing_embedding_provider(
+        configured_settings: Settings,
+        *,
+        observability_client: object | None = None,
+    ) -> EmbeddingProvider:
+        del configured_settings, observability_client
+        raise RuntimeError("embedding provider unavailable")
+
+    monkeypatch.setattr(
+        composition,
+        "create_embedding_provider",
+        failing_embedding_provider,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="embedding provider unavailable",
+    ):
+        await composition.create_knowledge_index_runtime(
+            settings=settings,
+        )
+
+    assert observability_client.shutdown_calls == 1
+
+
+async def test_partial_startup_qdrant_failure_closes_provider_and_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = create_settings()
+    observability_client = FakeObservabilityClient()
+    provider = FakeProvider()
+
+    monkeypatch.setattr(
+        composition,
+        "create_observability_client",
+        lambda configured_settings: observability_client,
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_embedding_provider",
+        lambda configured_settings, *, observability_client=None: cast(
+            EmbeddingProvider,
+            provider,
+        ),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_postgresql_engine",
+        lambda configured_settings: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_postgresql_session_factory",
+        lambda engine: object(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_qdrant_client",
+        lambda configured_settings: (_ for _ in ()).throw(RuntimeError("qdrant unavailable")),
+    )
+
+    async def close_qdrant(client: object) -> None:
+        del client
+
+    async def dispose_engine(engine: object) -> None:
+        del engine
+
+    monkeypatch.setattr(
+        composition,
+        "close_qdrant_client",
+        close_qdrant,
+    )
+    monkeypatch.setattr(
+        composition,
+        "dispose_postgresql_engine",
+        dispose_engine,
+    )
+
+    with pytest.raises(RuntimeError, match="qdrant unavailable"):
+        await composition.create_knowledge_index_runtime(
+            settings=settings,
+        )
+
+    assert provider.closed == 1
     assert observability_client.shutdown_calls == 1

@@ -87,7 +87,7 @@ async def test_application_lifespan_creates_and_releases_resources() -> None:
         patch(
             "supportops.api.lifespan.create_embedding_provider",
             return_value=embedding_provider,
-        ),
+        ) as create_provider,
         patch(
             "supportops.api.lifespan.create_postgresql_engine",
             return_value=engine,
@@ -126,6 +126,10 @@ async def test_application_lifespan_creates_and_releases_resources() -> None:
             log_level=settings.log_level,
         )
         create_client.assert_called_once_with(settings)
+        create_provider.assert_called_once_with(
+            settings,
+            observability_client=observability_client,
+        )
         embedding_provider.close.assert_awaited_once_with()
         close_client.assert_awaited_once_with(qdrant_client)
         dispose_engine.assert_awaited_once_with(engine)
@@ -136,6 +140,7 @@ async def test_application_lifespan_creates_one_observability_client() -> None:
     app = FastAPI()
     settings = create_settings()
     observability_client = create_observability_client_mock()
+    embedding_provider = create_embedding_provider_mock()
 
     with (
         patch("supportops.api.lifespan.configure_logging"),
@@ -149,8 +154,8 @@ async def test_application_lifespan_creates_one_observability_client() -> None:
         ),
         patch(
             "supportops.api.lifespan.create_embedding_provider",
-            return_value=create_embedding_provider_mock(),
-        ),
+            return_value=embedding_provider,
+        ) as create_provider,
         patch(
             "supportops.api.lifespan.create_postgresql_engine",
             return_value=MagicMock(spec=AsyncEngine),
@@ -174,9 +179,75 @@ async def test_application_lifespan_creates_one_observability_client() -> None:
     ):
         async with application_lifespan(app, settings=settings):
             assert app.state.supportops.observability_client is (observability_client)
+            assert app.state.supportops.embedding_provider is embedding_provider
 
         create_client.assert_called_once_with(settings)
+        create_provider.assert_called_once_with(
+            settings,
+            observability_client=observability_client,
+        )
+        embedding_provider.close.assert_awaited_once_with()
         observability_client.shutdown.assert_called_once_with()
+
+
+async def test_application_lifespan_closes_provider_before_observability() -> None:
+    app = FastAPI()
+    settings = create_settings()
+    embedding_provider = create_embedding_provider_mock()
+    observability_client = create_observability_client_mock()
+    call_order: list[str] = []
+
+    async def record_provider_close() -> None:
+        call_order.append("provider_close")
+
+    def record_observability_shutdown() -> None:
+        call_order.append("observability_shutdown")
+
+    embedding_provider.close = AsyncMock(side_effect=record_provider_close)
+    observability_client.shutdown = MagicMock(
+        side_effect=record_observability_shutdown,
+    )
+
+    with (
+        patch("supportops.api.lifespan.configure_logging"),
+        patch(
+            "supportops.api.lifespan.create_observability_client",
+            return_value=observability_client,
+        ),
+        patch(
+            "supportops.api.lifespan.build_knowledge_index_profile",
+            return_value=create_knowledge_index_profile(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_embedding_provider",
+            return_value=embedding_provider,
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_engine",
+            return_value=MagicMock(spec=AsyncEngine),
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_session_factory",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_qdrant_client",
+            return_value=MagicMock(spec=AsyncQdrantClient),
+        ),
+        patch(
+            "supportops.api.lifespan.dispose_postgresql_engine",
+            new=AsyncMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.close_qdrant_client",
+            new=AsyncMock(),
+        ),
+    ):
+        async with application_lifespan(app, settings=settings):
+            pass
+
+    assert call_order[0] == "provider_close"
+    assert call_order[-1] == "observability_shutdown"
 
 
 async def test_application_lifespan_attempts_all_cleanup_operations() -> None:
@@ -259,7 +330,7 @@ async def test_application_lifespan_cleans_up_partial_startup_failure() -> None:
         patch(
             "supportops.api.lifespan.create_embedding_provider",
             return_value=embedding_provider,
-        ),
+        ) as create_provider,
         patch(
             "supportops.api.lifespan.create_postgresql_engine",
             return_value=engine,
@@ -285,6 +356,10 @@ async def test_application_lifespan_cleans_up_partial_startup_failure() -> None:
         async with application_lifespan(app, settings=settings):
             pass
 
+    create_provider.assert_called_once_with(
+        settings,
+        observability_client=observability_client,
+    )
     embedding_provider.close.assert_awaited_once_with()
     close_client.assert_not_awaited()
     dispose_engine.assert_awaited_once_with(engine)
