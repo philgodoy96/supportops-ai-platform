@@ -45,11 +45,17 @@ from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationPersistenceResult,
     TicketEscalationRepository,
 )
+from supportops.observability.context import (
+    current_observation_context,
+    current_trace_context,
+)
 from supportops.observability.contracts import (
     ObservabilityClient,
     ObservationScope,
 )
+from supportops.observability.identity import agent_run_trace_identity
 from supportops.observability.models import (
+    EventObservation,
     JsonValue,
     ObservationAttributes,
     ObservationStatus,
@@ -62,6 +68,7 @@ type UtcNowProvider = Callable[[], datetime]
 type UuidFactory = Callable[[], UUID]
 
 _OBSERVATION_NAME: Final = "tool.execute"
+_ESCALATION_EVENT_NAME: Final = "ticket.escalated"
 _UNEXPECTED_FAILURE_CODE: Final = "tool_execution_unexpected_failure"
 
 _OBSERVATION_METADATA_KEYS: Final = frozenset(
@@ -84,6 +91,25 @@ _OBSERVATION_METADATA_KEYS: Final = frozenset(
     }
 )
 _OBSERVATION_METADATA_PATHS: Final = frozenset((key,) for key in _OBSERVATION_METADATA_KEYS)
+_ESCALATION_EVENT_METADATA_KEYS: Final = frozenset(
+    {
+        "escalation_id",
+        "agent_run_id",
+        "agent_run_attempt_id",
+        "workspace_id",
+        "ticket_id",
+        "approval_request_id",
+        "agent_tool_call_id",
+        "tool_name",
+        "target_queue",
+        "status",
+        "escalation_outcome",
+        "idempotent_replay",
+    }
+)
+_ESCALATION_EVENT_METADATA_PATHS: Final = frozenset(
+    (key,) for key in _ESCALATION_EVENT_METADATA_KEYS
+)
 
 
 class SensitiveExecutionStatus(StrEnum):
@@ -309,6 +335,11 @@ class ExecuteApprovedTicketEscalation:
                         latency_ms=_elapsed_milliseconds(started_monotonic),
                     )
                 )
+                if result.status is SensitiveExecutionStatus.APPLIED:
+                    observation.record_escalation_event(
+                        context=context,
+                        result=result,
+                    )
                 return result
             except Exception:
                 observation.update(
@@ -351,6 +382,29 @@ class _SafeToolObservation:
             self._scope.update(update)
         except Exception:
             return
+
+    def record_escalation_event(
+        self,
+        *,
+        context: AgentRunExecutionContext,
+        result: SensitiveExecutionResult,
+    ) -> None:
+        event = _ticket_escalated_event(result=result)
+        if event is None:
+            return
+
+        if self._scope is not None:
+            try:
+                self._scope.record_event(event)
+                return
+            except Exception:
+                pass
+
+        _safe_record_ticket_escalated(
+            client=self._client,
+            context=context,
+            event=event,
+        )
 
     def close(self) -> None:
         if self._manager is None:
@@ -466,6 +520,59 @@ def _unexpected_failure_update(
         )
     except Exception:
         return None
+
+
+def _ticket_escalated_event(
+    *,
+    result: SensitiveExecutionResult,
+) -> EventObservation | None:
+    try:
+        escalation = result.escalation
+        return EventObservation(
+            name=_ESCALATION_EVENT_NAME,
+            status=ObservationStatus.OK,
+            metadata={
+                "escalation_id": str(escalation.id),
+                "agent_run_id": str(escalation.agent_run_id),
+                "agent_run_attempt_id": str(
+                    escalation.executed_by_agent_run_attempt_id,
+                ),
+                "workspace_id": str(escalation.workspace_id),
+                "ticket_id": str(escalation.ticket_id),
+                "approval_request_id": str(escalation.approval_request_id),
+                "agent_tool_call_id": str(escalation.agent_tool_call_id),
+                "tool_name": "escalate_ticket",
+                "target_queue": escalation.target_queue.value,
+                "status": result.output.status,
+                "escalation_outcome": "applied",
+                "idempotent_replay": False,
+            },
+            metadata_paths=_ESCALATION_EVENT_METADATA_PATHS,
+        )
+    except Exception:
+        return None
+
+
+def _safe_record_ticket_escalated(
+    *,
+    client: ObservabilityClient,
+    context: AgentRunExecutionContext,
+    event: EventObservation,
+) -> None:
+    try:
+        if current_observation_context() is not None or current_trace_context() is not None:
+            client.record_event(event)
+            return
+
+        client.record_trace_event(
+            identity=agent_run_trace_identity(
+                agent_run_id=context.agent_run.id,
+                ticket_id=context.ticket.id,
+            ),
+            event=event,
+        )
+    except Exception:
+        return
 
 
 def _requires_approval(safety_level: ToolSafetyLevel) -> bool:

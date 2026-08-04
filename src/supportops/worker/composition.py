@@ -27,6 +27,10 @@ from supportops.agent_graph.application.human_approved_workflow import (
 )
 from supportops.agent_graph.application.recommendation_execution import (
     ControlledSupportRecommendationExecutor,
+    recommendation_failed_event,
+    recommendation_generated_event,
+    recommendation_persisted_event,
+    safe_record_recommendation_event,
 )
 from supportops.agent_graph.application.resume_planning import (
     HumanApprovedGraphResumePlanner,
@@ -652,6 +656,7 @@ class HumanApprovedSupportRecommendationExecutor:
         pricing_catalog: PricingCatalog = DEFAULT_PRICING_CATALOG,
         utc_now: UtcNowProvider | None = None,
         uuid_factory: UuidFactory = uuid4,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         _validate_required_text(
             model,
@@ -670,6 +675,7 @@ class HumanApprovedSupportRecommendationExecutor:
         self._pricing_catalog = pricing_catalog
         self._utc_now = utc_now or _utc_now
         self._uuid_factory = uuid_factory
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(
         self,
@@ -803,6 +809,15 @@ class HumanApprovedSupportRecommendationExecutor:
             model=accepted_invocation.model,
             now=persisted_at,
         )
+        safe_record_recommendation_event(
+            client=self._observability_client,
+            context=context,
+            event=recommendation_generated_event(
+                context=context,
+                recommendation=recommendation,
+                citation_count=0,
+            ),
+        )
         persistence_result = await self._persist(
             PersistSupportRecommendationCommand(
                 workspace_id=state.workspace_id,
@@ -821,6 +836,16 @@ class HumanApprovedSupportRecommendationExecutor:
         )
 
         if persistence_result is SupportRecommendationPersistenceResult.LEASE_LOST:
+            safe_record_recommendation_event(
+                client=self._observability_client,
+                context=context,
+                event=recommendation_failed_event(
+                    context=context,
+                    recommendation=recommendation,
+                    citation_count=0,
+                    error_code="human_approved_recommendation_lease_lost",
+                ),
+            )
             raise RetryableAgentRunExecutionError(
                 error_code="human_approved_recommendation_lease_lost",
                 error_summary=(
@@ -830,6 +855,15 @@ class HumanApprovedSupportRecommendationExecutor:
             )
 
         if persistence_result is SupportRecommendationPersistenceResult.APPLIED:
+            safe_record_recommendation_event(
+                client=self._observability_client,
+                context=context,
+                event=recommendation_persisted_event(
+                    context=context,
+                    recommendation=recommendation,
+                    citation_count=0,
+                ),
+            )
             return HumanApprovedRecommendationOutcome(
                 invocation_id=accepted_invocation.id,
                 recommendation=recommendation,
@@ -1252,6 +1286,7 @@ def create_session_scoped_executor_registry(
         invocation_query_repository=(invocation_query_repository),
         recommendation_query_repository=(recommendation_query_repository),
         execution_repository=(recommendation_execution_repository),
+        observability_client=(controlled_runtime.observability_client),
     )
     nodes = ControlledSupportWorkflowNodes(
         transaction_manager=transaction_manager,
@@ -1328,6 +1363,7 @@ def create_session_scoped_executor_registry(
         invocation_query_repository=(invocation_query_repository),
         recommendation_query_repository=(recommendation_query_repository),
         execution_repository=(recommendation_execution_repository),
+        observability_client=(controlled_runtime.observability_client),
     )
     human_approved_nodes = HumanApprovedSupportWorkflowNodes(
         transaction_manager=transaction_manager,

@@ -847,10 +847,13 @@ class RecordingObservationScope:
         *,
         attributes: ObservationAttributes,
         fail_update: bool = False,
+        fail_event: bool = False,
     ) -> None:
         self.attributes = attributes
         self._fail_update = fail_update
+        self._fail_event = fail_event
         self.updates: list[ObservationUpdate] = []
+        self.events: list[EventObservation] = []
 
     @property
     def observation_id(self) -> str | None:
@@ -870,8 +873,10 @@ class RecordingObservationScope:
         raise AssertionError("Nested observations are not expected.")
 
     def record_event(self, event: EventObservation) -> None:
-        del event
-        raise AssertionError("Events are not expected.")
+        if self._fail_event:
+            raise RuntimeError("synthetic scope event failure")
+
+        self.events.append(event)
 
 
 class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
@@ -923,15 +928,23 @@ class RecordingObservabilityClient:
         fail_enter: bool = False,
         fail_update: bool = False,
         fail_exit: bool = False,
+        fail_scope_event: bool = False,
+        fail_event: bool = False,
+        fail_trace_event: bool = False,
     ) -> None:
         self._fail_start = fail_start
         self._fail_enter = fail_enter
         self._fail_update = fail_update
         self._fail_exit = fail_exit
+        self._fail_scope_event = fail_scope_event
+        self._fail_event = fail_event
+        self._fail_trace_event = fail_trace_event
         self.attributes: list[ObservationAttributes] = []
         self.scopes: list[RecordingObservationScope] = []
         self.managers: list[RecordingObservationManager] = []
         self.parent_observation_names: list[str | None] = []
+        self.events: list[EventObservation] = []
+        self.trace_events: list[tuple[object, EventObservation]] = []
 
     @property
     def provider(self) -> ObservabilityProvider:
@@ -962,6 +975,7 @@ class RecordingObservabilityClient:
         scope = RecordingObservationScope(
             attributes=attributes,
             fail_update=self._fail_update,
+            fail_event=self._fail_scope_event,
         )
         manager = RecordingObservationManager(
             scope=scope,
@@ -974,18 +988,36 @@ class RecordingObservabilityClient:
         return manager
 
     def record_event(self, event: EventObservation) -> None:
-        del event
-        raise AssertionError("Tool tracing must not emit events.")
+        if self._fail_event:
+            raise RuntimeError("synthetic event failure")
+
+        self.events.append(event)
 
     def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
-        del identity, event
-        raise AssertionError("Tool tracing must not emit events.")
+        if self._fail_trace_event:
+            raise RuntimeError("synthetic trace event failure")
+
+        self.trace_events.append((identity, event))
 
     def flush(self) -> None:
         return None
 
     def shutdown(self) -> None:
         return None
+
+
+def _escalation_events(
+    observability: RecordingObservabilityClient,
+) -> list[EventObservation]:
+    scoped = [
+        event
+        for scope in observability.scopes
+        for event in scope.events
+        if event.name == "ticket.escalated"
+    ]
+    client = [event for event in observability.events if event.name == "ticket.escalated"]
+    traced = [event for _, event in observability.trace_events if event.name == "ticket.escalated"]
+    return [*scoped, *client, *traced]
 
 
 def _applied_repositories() -> tuple[Any, Any, Any]:
@@ -1276,6 +1308,9 @@ async def test_sensitive_observability_failures_fail_open() -> None:
         {"fail_enter": True},
         {"fail_update": True},
         {"fail_exit": True},
+        {"fail_event": True},
+        {"fail_scope_event": True},
+        {"fail_trace_event": True},
     ):
         tool_repository = SimpleNamespace(
             get_by_id_for_update=AsyncMock(return_value=tool_call),
@@ -1327,4 +1362,252 @@ async def test_sensitive_tool_observation_nests_under_active_parent() -> None:
         )
 
     assert observability.parent_observation_names == ["graph-node.execute_sensitive_tool"]
+    assert len(_escalation_events(observability)) == 1
+    assert observability.scopes[0].events[0].name == "ticket.escalated"
     assert current_observation_context() is None
+
+
+@pytest.mark.asyncio
+async def test_applied_escalation_emits_one_ticket_escalated_event() -> None:
+    context, tool_call, approval = _records()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+    tool_repository = SimpleNamespace(
+        get_by_id_for_update=AsyncMock(return_value=tool_call),
+        save_granted_execution_success=AsyncMock(),
+    )
+    observability = RecordingObservabilityClient()
+    order: list[str] = []
+
+    async def persist_escalation(escalation: object) -> TicketEscalationPersistenceResult:
+        del escalation
+        order.append("escalation_persisted")
+        return TicketEscalationPersistenceResult.APPLIED
+
+    async def save_tool_call(*, tool_call: object) -> None:
+        del tool_call
+        order.append("tool_call_saved")
+
+    original_record = RecordingObservationScope.record_event
+
+    def tracking_record(
+        self: RecordingObservationScope,
+        event: EventObservation,
+    ) -> None:
+        order.append(f"event:{event.name}")
+        original_record(self, event)
+
+    RecordingObservationScope.record_event = tracking_record  # type: ignore[method-assign]
+    try:
+        escalation_repository.persist = AsyncMock(side_effect=persist_escalation)
+        tool_repository.save_granted_execution_success = AsyncMock(
+            side_effect=save_tool_call,
+        )
+        result = await _executor(
+            context=context,
+            tool_call=tool_call,
+            approval=approval,
+            grant_repository=grant_repository,
+            escalation_repository=escalation_repository,
+            tool_repository=tool_repository,
+            observability_client=observability,
+        ).execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+    finally:
+        RecordingObservationScope.record_event = original_record  # type: ignore[method-assign]
+
+    events = _escalation_events(observability)
+    assert result.status is SensitiveExecutionStatus.APPLIED
+    assert len(events) == 1
+    event = events[0]
+    assert event.name == "ticket.escalated"
+    assert event.status is ObservationStatus.OK
+    assert event.metadata["escalation_id"] == str(result.escalation.id)
+    assert event.metadata["agent_run_id"] == str(context.agent_run.id)
+    assert event.metadata["agent_run_attempt_id"] == str(context.attempt.id)
+    assert event.metadata["workspace_id"] == str(context.agent_run.workspace_id)
+    assert event.metadata["ticket_id"] == str(context.ticket.id)
+    assert event.metadata["approval_request_id"] == str(approval.id)
+    assert event.metadata["agent_tool_call_id"] == str(tool_call.id)
+    assert event.metadata["tool_name"] == "escalate_ticket"
+    assert event.metadata["target_queue"] == TicketEscalationTargetQueue.ENGINEERING_SUPPORT.value
+    assert event.metadata["status"] == "escalated"
+    assert event.metadata["escalation_outcome"] == "applied"
+    assert event.metadata["idempotent_replay"] is False
+    assert order.index("escalation_persisted") < order.index("event:ticket.escalated")
+    assert order.index("tool_call_saved") < order.index("event:ticket.escalated")
+    assert len(observability.attributes) == 1
+    assert observability.attributes[0].name == "tool.execute"
+    exported = repr(event)
+    assert "A product defect requires review." not in exported
+    assert "proposed_input" not in exported
+    assert "approval_comment" not in exported
+    assert "lease_token" not in exported
+    assert "execution_grant" not in exported
+    assert "granted_input" not in exported
+
+
+@pytest.mark.asyncio
+async def test_already_recorded_paths_do_not_emit_ticket_escalated() -> None:
+    context, tool_call, approval = _records()
+    durable_grant = _grant(
+        approval,
+        tool_call,
+        executed_by_agent_run_attempt_id=context.attempt.id,
+    )
+    durable_escalation = _escalation(durable_grant)
+
+    early_observability = RecordingObservabilityClient()
+    succeeded = tool_call.complete_granted_execution_success(
+        executed_by_agent_run_attempt_id=context.attempt.id,
+        execution_started_at=_NOW + timedelta(minutes=6),
+        finished_at=_NOW + timedelta(minutes=6),
+        safe_output={
+            "escalation_id": str(durable_escalation.id),
+            "ticket_id": str(durable_escalation.ticket_id),
+            "target_queue": "engineering_support",
+            "status": "escalated",
+        },
+    )
+    early_result = await _executor(
+        context=context,
+        tool_call=succeeded,
+        approval=approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_grant),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_escalation),
+        ),
+        tool_repository=SimpleNamespace(
+            get_by_id_for_update=AsyncMock(return_value=succeeded),
+            save_granted_execution_success=AsyncMock(),
+        ),
+        observability_client=early_observability,
+    ).execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+    assert early_result.status is SensitiveExecutionStatus.ALREADY_RECORDED
+    assert _escalation_events(early_observability) == []
+
+    in_boundary_observability = RecordingObservabilityClient()
+    in_boundary_result = await _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(
+                return_value=(SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_grant),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(
+                return_value=(TicketEscalationPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_escalation),
+        ),
+        tool_repository=SimpleNamespace(
+            get_by_id_for_update=AsyncMock(return_value=tool_call),
+            save_granted_execution_success=AsyncMock(),
+        ),
+        observability_client=in_boundary_observability,
+    ).execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+    assert in_boundary_result.status is SensitiveExecutionStatus.ALREADY_RECORDED
+    assert _escalation_events(in_boundary_observability) == []
+    assert len(in_boundary_observability.attributes) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_grant_or_persistence_emits_no_ticket_escalated() -> None:
+    context, tool_call, approval = _records()
+    observability = RecordingObservabilityClient()
+
+    with pytest.raises(SensitiveExecutionConsistencyError):
+        await _executor(
+            context=context,
+            tool_call=tool_call,
+            approval=approval,
+            grant_repository=SimpleNamespace(
+                persist=AsyncMock(
+                    return_value=(SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED),
+                ),
+                get_by_agent_tool_call_id=AsyncMock(return_value=None),
+            ),
+            escalation_repository=SimpleNamespace(
+                persist=AsyncMock(),
+                get_by_agent_tool_call_id=AsyncMock(),
+            ),
+            observability_client=observability,
+        ).execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    assert _escalation_events(observability) == []
+    assert len(observability.attributes) == 1
+
+    conflict_observability = RecordingObservabilityClient()
+    with pytest.raises(TicketEscalationConsistencyError):
+        await _executor(
+            context=context,
+            tool_call=tool_call,
+            approval=approval,
+            grant_repository=SimpleNamespace(
+                persist=AsyncMock(
+                    return_value=(SensitiveExecutionGrantPersistenceResult.APPLIED),
+                ),
+                get_by_agent_tool_call_id=AsyncMock(),
+            ),
+            escalation_repository=SimpleNamespace(
+                persist=AsyncMock(
+                    side_effect=TicketEscalationConsistencyError(
+                        "conflicting escalation",
+                    ),
+                ),
+                get_by_agent_tool_call_id=AsyncMock(),
+            ),
+            observability_client=conflict_observability,
+        ).execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    assert _escalation_events(conflict_observability) == []
+
+
+@pytest.mark.asyncio
+async def test_ticket_escalated_falls_back_to_client_when_scope_event_fails() -> None:
+    context, tool_call, approval = _records()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+    observability = RecordingObservabilityClient(fail_scope_event=True)
+
+    result = await _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+        observability_client=observability,
+    ).execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is SensitiveExecutionStatus.APPLIED
+    assert observability.scopes[0].events == []
+    assert len(observability.events) == 1
+    assert observability.events[0].name == "ticket.escalated"
