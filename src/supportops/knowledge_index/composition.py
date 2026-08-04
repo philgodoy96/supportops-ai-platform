@@ -1,5 +1,6 @@
 """Process composition for explicit knowledge indexing commands."""
 
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID
@@ -66,6 +67,8 @@ from supportops.modules.knowledge_documents.infrastructure.repository import (
     SqlAlchemyDocumentChunkRepository,
     SqlAlchemyDocumentVersionRepository,
 )
+from supportops.observability.composition import create_observability_client
+from supportops.observability.contracts import ObservabilityClient
 
 MOCK_KNOWLEDGE_COLLECTION = "supportops-knowledge-mock-v1"
 OPENAI_KNOWLEDGE_COLLECTION = "supportops-knowledge-openai-v1"
@@ -91,6 +94,7 @@ class KnowledgeIndexRuntime:
     index_profile: KnowledgeIndexProfile
     chunker: MarkdownTokenChunker
     vector_store: QdrantKnowledgeVectorStore
+    observability_client: ObservabilityClient
     _closed: bool = field(
         default=False,
         init=False,
@@ -170,6 +174,9 @@ class KnowledgeIndexRuntime:
         except Exception as error:
             failures.append(error)
 
+        with suppress(Exception):
+            self.observability_client.shutdown()
+
         if failures:
             primary_failure = failures[0]
             for secondary_failure in failures[1:]:
@@ -193,6 +200,7 @@ async def create_knowledge_index_runtime(
 
     index_profile = build_knowledge_index_profile(settings)
     embedding_provider = create_embedding_provider(settings)
+    observability_client = create_observability_client(settings)
 
     engine: AsyncEngine | None = None
     qdrant_client: AsyncQdrantClient | None = None
@@ -218,12 +226,14 @@ async def create_knowledge_index_runtime(
             index_profile=index_profile,
             chunker=chunker,
             vector_store=vector_store,
+            observability_client=observability_client,
         )
     except Exception:
         await _close_partial_runtime(
             embedding_provider=embedding_provider,
             qdrant_client=qdrant_client,
             engine=engine,
+            observability_client=observability_client,
         )
         raise
 
@@ -304,6 +314,7 @@ async def _close_partial_runtime(
     embedding_provider: EmbeddingProvider,
     qdrant_client: AsyncQdrantClient | None,
     engine: AsyncEngine | None,
+    observability_client: ObservabilityClient,
 ) -> None:
     failures: list[Exception] = []
 
@@ -323,6 +334,9 @@ async def _close_partial_runtime(
             await dispose_postgresql_engine(engine)
         except Exception as error:
             failures.append(error)
+
+    with suppress(Exception):
+        observability_client.shutdown()
 
     if failures:
         primary_failure = failures[0]

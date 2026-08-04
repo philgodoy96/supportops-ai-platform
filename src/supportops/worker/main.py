@@ -190,6 +190,9 @@ async def run_worker(
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
         approval_ttl_seconds=resolved_settings.approval_ttl_seconds,
         approval_expiration_batch_size=(resolved_settings.approval_expiration_batch_size),
+        observability_provider=(resolved_settings.ai_observability_provider.value),
+        observability_enabled=(controlled_runtime.observability_client.enabled),
+        observability_capture_mode=(resolved_settings.langfuse_capture_mode.value),
     )
 
     exit_code = _EXIT_SUCCESS

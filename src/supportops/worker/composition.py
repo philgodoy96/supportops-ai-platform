@@ -1,6 +1,7 @@
 """Process-scoped LLM and session-scoped executor composition."""
 
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
@@ -213,6 +214,9 @@ from supportops.modules.ticket_classifications.infrastructure.repository import 
 from supportops.modules.tickets.infrastructure.escalation_repository import (
     SqlAlchemyTicketEscalationRepository,
 )
+from supportops.observability.composition import create_observability_client
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.noop import NoOpObservabilityClient
 
 MOCK_LLM_PROVIDER_NAME = "mock"
 OPENAI_LLM_PROVIDER_NAME = "openai"
@@ -227,6 +231,7 @@ type KnowledgeIndexProfileFactory = Callable[
     [Settings],
     KnowledgeIndexProfile,
 ]
+type ObservabilityClientFactory = Callable[[Settings], ObservabilityClient]
 type UtcNowProvider = Callable[[], datetime]
 type UuidFactory = Callable[[], UUID]
 
@@ -255,6 +260,9 @@ class WorkerControlledSupportRuntime:
     index_profile: KnowledgeIndexProfile
     vector_store: QdrantKnowledgeVectorStore
     vector_searcher: QdrantKnowledgeVectorSearcher
+    observability_client: ObservabilityClient = field(
+        default_factory=NoOpObservabilityClient,
+    )
     approval_ttl_seconds: float = 86400.0
     agent_graph_tool_timeout_seconds: float = 15.0
     _closed: bool = field(
@@ -286,6 +294,9 @@ class WorkerControlledSupportRuntime:
             await close_qdrant_client(self.qdrant_client)
         except Exception as error:
             failures.append(error)
+
+        with suppress(Exception):
+            self.observability_client.shutdown()
 
         if failures:
             primary_failure = failures[0]
@@ -1072,6 +1083,7 @@ async def create_worker_controlled_support_runtime(
     embedding_provider_factory: EmbeddingProviderFactory = (create_embedding_provider),
     qdrant_client_factory: QdrantClientFactory = (create_qdrant_client),
     index_profile_factory: KnowledgeIndexProfileFactory = (build_knowledge_index_profile),
+    observability_client_factory: ObservabilityClientFactory = (create_observability_client),
 ) -> WorkerControlledSupportRuntime:
     """Create one process-scoped controlled-support runtime."""
 
@@ -1083,8 +1095,10 @@ async def create_worker_controlled_support_runtime(
     checkpoint_runtime: PostgresCheckpointRuntime | None = None
     embedding_provider: EmbeddingProvider | None = None
     qdrant_client: AsyncQdrantClient | None = None
+    observability_client: ObservabilityClient | None = None
 
     try:
+        observability_client = observability_client_factory(settings)
         checkpoint_runtime = await checkpoint_runtime_factory(
             database_url=checkpoint_database_url,
         )
@@ -1105,6 +1119,7 @@ async def create_worker_controlled_support_runtime(
             checkpoint_runtime=checkpoint_runtime,
             embedding_provider=embedding_provider,
             qdrant_client=qdrant_client,
+            observability_client=observability_client,
         )
         raise
 
@@ -1115,6 +1130,7 @@ async def create_worker_controlled_support_runtime(
         index_profile=index_profile,
         vector_store=vector_store,
         vector_searcher=vector_searcher,
+        observability_client=observability_client,
         approval_ttl_seconds=settings.approval_ttl_seconds,
         agent_graph_tool_timeout_seconds=(settings.agent_graph_tool_timeout_seconds),
     )
@@ -1361,6 +1377,7 @@ async def _close_partial_controlled_support_resources(
     checkpoint_runtime: PostgresCheckpointRuntime | None,
     embedding_provider: EmbeddingProvider | None,
     qdrant_client: AsyncQdrantClient | None,
+    observability_client: ObservabilityClient | None,
 ) -> None:
     failures: list[Exception] = []
 
@@ -1381,6 +1398,10 @@ async def _close_partial_controlled_support_resources(
             await close_qdrant_client(qdrant_client)
         except Exception as error:
             failures.append(error)
+
+    if observability_client is not None:
+        with suppress(Exception):
+            observability_client.shutdown()
 
     if failures:
         primary_failure = failures[0]

@@ -1,6 +1,6 @@
 """Unit tests for knowledge indexing runtime composition."""
 
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from qdrant_client import AsyncQdrantClient
@@ -191,6 +191,19 @@ class FakeProvider:
         self.closed += 1
 
 
+class FakeObservabilityClient:
+    """Record observability shutdown."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.shutdown_error: Exception | None = None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
 class FakeQdrantClient:
     """Qdrant placeholder for lifecycle tests."""
 
@@ -233,6 +246,7 @@ async def test_runtime_close_releases_every_resource_once(
 
     settings = create_settings()
     profile = build_knowledge_index_profile(settings)
+    observability_client = FakeObservabilityClient()
 
     runtime = KnowledgeIndexRuntime(
         settings=settings,
@@ -261,6 +275,10 @@ async def test_runtime_close_releases_every_resource_once(
             QdrantKnowledgeVectorStore,
             object(),
         ),
+        observability_client=cast(
+            Any,
+            observability_client,
+        ),
     )
 
     await runtime.close()
@@ -269,6 +287,7 @@ async def test_runtime_close_releases_every_resource_once(
     assert provider.closed == 1
     assert qdrant_close_count == 1
     assert engine_dispose_count == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def test_runtime_close_attempts_all_resources_after_failure(
@@ -314,6 +333,7 @@ async def test_runtime_close_attempts_all_resources_after_failure(
     )
 
     settings = create_settings()
+    observability_client = FakeObservabilityClient()
     runtime = KnowledgeIndexRuntime(
         settings=settings,
         engine=cast(
@@ -341,6 +361,10 @@ async def test_runtime_close_attempts_all_resources_after_failure(
             QdrantKnowledgeVectorStore,
             object(),
         ),
+        observability_client=cast(
+            Any,
+            observability_client,
+        ),
     )
 
     with pytest.raises(
@@ -351,3 +375,136 @@ async def test_runtime_close_attempts_all_resources_after_failure(
 
     assert qdrant_closed
     assert engine_disposed
+    assert observability_client.shutdown_calls == 1
+
+
+async def test_runtime_observability_shutdown_failure_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeProvider()
+    observability_client = FakeObservabilityClient()
+    observability_client.shutdown_error = RuntimeError("shutdown failed")
+
+    async def close_qdrant(
+        client: AsyncQdrantClient,
+    ) -> None:
+        del client
+
+    async def dispose_engine(
+        engine: AsyncEngine,
+    ) -> None:
+        del engine
+
+    monkeypatch.setattr(
+        composition,
+        "close_qdrant_client",
+        close_qdrant,
+    )
+    monkeypatch.setattr(
+        composition,
+        "dispose_postgresql_engine",
+        dispose_engine,
+    )
+
+    settings = create_settings()
+    runtime = KnowledgeIndexRuntime(
+        settings=settings,
+        engine=cast(
+            AsyncEngine,
+            FakeEngine(),
+        ),
+        session_factory=cast(
+            async_sessionmaker[AsyncSession],
+            object(),
+        ),
+        qdrant_client=cast(
+            AsyncQdrantClient,
+            FakeQdrantClient(),
+        ),
+        embedding_provider=cast(
+            EmbeddingProvider,
+            provider,
+        ),
+        index_profile=(build_knowledge_index_profile(settings)),
+        chunker=cast(
+            MarkdownTokenChunker,
+            object(),
+        ),
+        vector_store=cast(
+            QdrantKnowledgeVectorStore,
+            object(),
+        ),
+        observability_client=cast(
+            Any,
+            observability_client,
+        ),
+    )
+
+    await runtime.close()
+
+    assert provider.closed == 1
+    assert observability_client.shutdown_calls == 1
+
+
+async def test_create_runtime_composes_one_observability_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = create_settings()
+    observability_client = FakeObservabilityClient()
+    factory_calls: list[Settings] = []
+
+    def fake_observability_factory(
+        configured_settings: Settings,
+    ) -> FakeObservabilityClient:
+        factory_calls.append(configured_settings)
+        return observability_client
+
+    monkeypatch.setattr(
+        composition,
+        "create_observability_client",
+        fake_observability_factory,
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_postgresql_engine",
+        lambda configured_settings: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_postgresql_session_factory",
+        lambda engine: object(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "create_qdrant_client",
+        lambda configured_settings: FakeQdrantClient(),
+    )
+
+    async def close_qdrant(client: object) -> None:
+        del client
+
+    async def dispose_engine(engine: object) -> None:
+        del engine
+
+    monkeypatch.setattr(
+        composition,
+        "close_qdrant_client",
+        close_qdrant,
+    )
+    monkeypatch.setattr(
+        composition,
+        "dispose_postgresql_engine",
+        dispose_engine,
+    )
+
+    runtime = await composition.create_knowledge_index_runtime(
+        settings=settings,
+    )
+
+    try:
+        assert runtime.observability_client is cast(Any, observability_client)
+        assert factory_calls == [settings]
+    finally:
+        await runtime.close()
+
+    assert observability_client.shutdown_calls == 1

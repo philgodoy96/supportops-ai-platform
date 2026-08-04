@@ -1,6 +1,7 @@
 """Unit tests for the operator-controlled knowledge indexing CLI."""
 
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
@@ -100,6 +101,19 @@ def create_ready_result(
     )
 
 
+class FakeObservabilityClient:
+    """Record observability shutdown for CLI lifecycle tests."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self.shutdown_error: Exception | None = None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
 class FakeRuntime:
     """Record CLI calls without infrastructure access."""
 
@@ -109,6 +123,7 @@ class FakeRuntime:
         settings: Settings,
     ) -> None:
         self.index_profile = build_knowledge_index_profile(settings)
+        self.observability_client = FakeObservabilityClient()
         self.ensure_calls = 0
         self.index_calls: list[tuple[UUID, UUID, UUID]] = []
         self.closed = 0
@@ -142,6 +157,8 @@ class FakeRuntime:
 
     async def close(self) -> None:
         self.closed += 1
+        with suppress(Exception):
+            self.observability_client.shutdown()
         if self.close_error is not None:
             raise self.close_error
 
@@ -392,7 +409,111 @@ async def test_close_failure_changes_success_to_runtime_failure() -> None:
     assert exit_code == 1
     assert runtime.ensure_calls == 1
     assert runtime.closed == 1
+    assert runtime.observability_client.shutdown_calls == 1
     assert json.loads(stdout.getvalue())["status"] == "compatible"
     assert stderr.getvalue() == (
         "indexing_runtime_error: Knowledge indexing resources could not be closed safely.\n"
+    )
+
+
+async def test_observability_shutdown_on_success() -> None:
+    settings = create_settings()
+    runtime = FakeRuntime(settings=settings)
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        ["ensure-collection"],
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert len(factory.calls) == 1
+    assert runtime.closed == 1
+    assert runtime.observability_client.shutdown_calls == 1
+
+
+async def test_observability_shutdown_on_indexing_failure() -> None:
+    settings = create_settings()
+    runtime = FakeRuntime(settings=settings)
+    runtime.index_error = EmbeddingTimeoutError()
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        [
+            "index-version",
+            "--workspace-id",
+            str(_WORKSPACE_ID),
+            "--document-id",
+            str(_DOCUMENT_ID),
+            "--document-version-id",
+            str(_VERSION_ID),
+        ],
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 1
+    assert runtime.closed == 1
+    assert runtime.observability_client.shutdown_calls == 1
+
+
+async def test_observability_shutdown_failure_preserves_successful_exit_code() -> None:
+    settings = create_settings()
+    runtime = FakeRuntime(settings=settings)
+    runtime.observability_client.shutdown_error = RuntimeError(
+        "observability shutdown failed",
+    )
+    factory = FakeRuntimeFactory(runtime)
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        ["ensure-collection"],
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert runtime.closed == 1
+    assert runtime.observability_client.shutdown_calls == 1
+    assert stderr.getvalue() == ""
+
+
+async def test_observability_shutdown_failure_preserves_indexing_failure() -> None:
+    settings = create_settings()
+    runtime = FakeRuntime(settings=settings)
+    runtime.index_error = EmbeddingTimeoutError()
+    runtime.observability_client.shutdown_error = RuntimeError(
+        "observability shutdown failed",
+    )
+    factory = FakeRuntimeFactory(runtime)
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        [
+            "index-version",
+            "--workspace-id",
+            str(_WORKSPACE_ID),
+            "--document-id",
+            str(_DOCUMENT_ID),
+            "--document-version-id",
+            str(_VERSION_ID),
+        ],
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 1
+    assert runtime.closed == 1
+    assert runtime.observability_client.shutdown_calls == 1
+    assert stderr.getvalue() == (
+        "indexing_runtime_error: The embedding provider request exceeded its configured timeout.\n"
     )

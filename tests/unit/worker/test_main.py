@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,6 +41,20 @@ def test_default_ticket_processing_workflow_remains_controlled_support() -> None
     assert settings.ticket_processing_workflow_version == ("controlled-support-v1")
 
 
+class FakeObservabilityClient:
+    """Process-scoped observability stand-in for worker tests."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.shutdown_calls = 0
+        self.shutdown_error: Exception | None = None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
 class FakeProvider:
     """Minimal provider exposing a stable process-scoped name."""
 
@@ -72,11 +87,14 @@ class FakeControlledRuntime:
     """Process-scoped controlled-support runtime stand-in."""
 
     def __init__(self) -> None:
+        self.observability_client = FakeObservabilityClient()
         self.close_calls = 0
         self.close_error: Exception | None = None
 
     async def close(self) -> None:
         self.close_calls += 1
+        with suppress(Exception):
+            self.observability_client.shutdown()
         if self.close_error is not None:
             raise self.close_error
 
@@ -394,6 +412,7 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
     create_controlled_runtime.assert_awaited_once_with(settings=settings)
     assert callable(_captured_cycle_runner_kwargs()["executor_factory"])
     assert controlled_runtime.close_calls == 1
+    assert controlled_runtime.observability_client.shutdown_calls == 1
     assert llm_runtime.close_calls == 1
     assert engine.dispose_calls == 1
 
@@ -411,6 +430,9 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
     assert started["ticket_processing_workflow_version"] == ("ticket-classification-v1")
     assert started["approval_ttl_seconds"] == 86400.0
     assert started["approval_expiration_batch_size"] == 100
+    assert started["observability_provider"] == "noop"
+    assert started["observability_enabled"] is False
+    assert started["observability_capture_mode"] == "metadata_only"
     assert "secret-openai-key" not in json.dumps(started)
     assert "openai_api_key" not in started
 
@@ -624,5 +646,95 @@ async def test_run_worker_disposes_engine_when_provider_close_fails() -> None:
         )
 
     assert controlled_runtime.close_calls == 1
+    assert controlled_runtime.observability_client.shutdown_calls == 1
     assert llm_runtime.close_calls == 1
     assert engine.dispose_calls == 1
+
+
+async def test_run_worker_observability_shutdown_failure_preserves_exit_code() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
+    controlled_runtime.observability_client.shutdown_error = RuntimeError(
+        "observability shutdown failed",
+    )
+    engine = FakeEngine()
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        exit_code = await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
+        )
+
+    assert exit_code == 0
+    assert controlled_runtime.close_calls == 1
+    assert controlled_runtime.observability_client.shutdown_calls == 1
+    assert llm_runtime.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+async def test_run_worker_holds_one_process_observability_client() -> None:
+    settings = _create_settings()
+    llm_runtime = FakeLLMRuntime()
+    controlled_runtime = FakeControlledRuntime()
+    engine = FakeEngine()
+    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
+    _reset_capturing_cycle_runner()
+
+    with (
+        patch(
+            "supportops.worker.main.create_worker_llm_runtime",
+            return_value=llm_runtime,
+        ),
+        patch(
+            "supportops.worker.main.async_sessionmaker",
+            return_value=object(),
+        ),
+        patch(
+            "supportops.worker.main.PostgreSqlAgentWorkerCycleRunner",
+            CapturingCycleRunner,
+        ),
+        patch(
+            "supportops.worker.main.RunAgentWorkerLoop",
+            ImmediateWorkerLoop,
+        ),
+        patch(
+            "supportops.worker.main.install_shutdown_handlers",
+            return_value=lambda: None,
+        ),
+    ):
+        exit_code = await run_worker(
+            settings=settings,
+            engine_factory=_as_engine_factory(engine),
+            controlled_runtime_factory=create_controlled_runtime,
+        )
+
+        executor_factory = _captured_cycle_runner_kwargs()["executor_factory"]
+        assert callable(executor_factory)
+
+    assert exit_code == 0
+    create_controlled_runtime.assert_awaited_once_with(settings=settings)
+    assert controlled_runtime.observability_client.shutdown_calls == 1

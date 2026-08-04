@@ -14,6 +14,8 @@ from supportops.core.settings import Settings
 from supportops.modules.knowledge_documents.domain.models import (
     KnowledgeIndexProfile,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.models import ObservabilityProvider
 
 
 def create_settings() -> Settings:
@@ -50,11 +52,22 @@ def create_embedding_provider_mock() -> MagicMock:
     return provider
 
 
+def create_observability_client_mock() -> MagicMock:
+    """Create a fake process-scoped observability client."""
+
+    client = MagicMock(spec=ObservabilityClient)
+    client.provider = ObservabilityProvider.NOOP
+    client.enabled = False
+    client.shutdown = MagicMock()
+    return client
+
+
 async def test_application_lifespan_creates_and_releases_resources() -> None:
     app = FastAPI()
     settings = create_settings()
     profile = create_knowledge_index_profile()
     embedding_provider = create_embedding_provider_mock()
+    observability_client = create_observability_client_mock()
     engine = MagicMock(spec=AsyncEngine)
     session_factory = MagicMock(spec=async_sessionmaker[AsyncSession])
     qdrant_client = MagicMock(spec=AsyncQdrantClient)
@@ -63,6 +76,10 @@ async def test_application_lifespan_creates_and_releases_resources() -> None:
         patch(
             "supportops.api.lifespan.configure_logging",
         ) as configure_logging,
+        patch(
+            "supportops.api.lifespan.create_observability_client",
+            return_value=observability_client,
+        ) as create_client,
         patch(
             "supportops.api.lifespan.build_knowledge_index_profile",
             return_value=profile,
@@ -102,14 +119,64 @@ async def test_application_lifespan_creates_and_releases_resources() -> None:
             assert state.postgresql_engine is engine
             assert state.postgresql_session_factory is session_factory
             assert state.qdrant_client is qdrant_client
+            assert state.observability_client is observability_client
 
         configure_logging.assert_called_once_with(
             environment=settings.environment,
             log_level=settings.log_level,
         )
+        create_client.assert_called_once_with(settings)
         embedding_provider.close.assert_awaited_once_with()
         close_client.assert_awaited_once_with(qdrant_client)
         dispose_engine.assert_awaited_once_with(engine)
+        observability_client.shutdown.assert_called_once_with()
+
+
+async def test_application_lifespan_creates_one_observability_client() -> None:
+    app = FastAPI()
+    settings = create_settings()
+    observability_client = create_observability_client_mock()
+
+    with (
+        patch("supportops.api.lifespan.configure_logging"),
+        patch(
+            "supportops.api.lifespan.create_observability_client",
+            return_value=observability_client,
+        ) as create_client,
+        patch(
+            "supportops.api.lifespan.build_knowledge_index_profile",
+            return_value=create_knowledge_index_profile(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_embedding_provider",
+            return_value=create_embedding_provider_mock(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_engine",
+            return_value=MagicMock(spec=AsyncEngine),
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_session_factory",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_qdrant_client",
+            return_value=MagicMock(spec=AsyncQdrantClient),
+        ),
+        patch(
+            "supportops.api.lifespan.dispose_postgresql_engine",
+            new=AsyncMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.close_qdrant_client",
+            new=AsyncMock(),
+        ),
+    ):
+        async with application_lifespan(app, settings=settings):
+            assert app.state.supportops.observability_client is (observability_client)
+
+        create_client.assert_called_once_with(settings)
+        observability_client.shutdown.assert_called_once_with()
 
 
 async def test_application_lifespan_attempts_all_cleanup_operations() -> None:
@@ -118,6 +185,8 @@ async def test_application_lifespan_attempts_all_cleanup_operations() -> None:
     profile = create_knowledge_index_profile()
     embedding_provider = create_embedding_provider_mock()
     embedding_provider.close = AsyncMock(side_effect=RuntimeError("close failed"))
+    observability_client = create_observability_client_mock()
+    observability_client.shutdown = MagicMock(side_effect=RuntimeError("shutdown failed"))
     engine = MagicMock(spec=AsyncEngine)
     qdrant_client = MagicMock(spec=AsyncQdrantClient)
     close_client = AsyncMock(side_effect=RuntimeError("close failed"))
@@ -125,6 +194,10 @@ async def test_application_lifespan_attempts_all_cleanup_operations() -> None:
 
     with (
         patch("supportops.api.lifespan.configure_logging"),
+        patch(
+            "supportops.api.lifespan.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.api.lifespan.build_knowledge_index_profile",
             return_value=profile,
@@ -160,6 +233,7 @@ async def test_application_lifespan_attempts_all_cleanup_operations() -> None:
     embedding_provider.close.assert_awaited_once_with()
     close_client.assert_awaited_once_with(qdrant_client)
     dispose_engine.assert_awaited_once_with(engine)
+    observability_client.shutdown.assert_called_once_with()
 
 
 async def test_application_lifespan_cleans_up_partial_startup_failure() -> None:
@@ -167,12 +241,17 @@ async def test_application_lifespan_cleans_up_partial_startup_failure() -> None:
     settings = create_settings()
     profile = create_knowledge_index_profile()
     embedding_provider = create_embedding_provider_mock()
+    observability_client = create_observability_client_mock()
     engine = MagicMock(spec=AsyncEngine)
     close_client = AsyncMock()
     dispose_engine = AsyncMock()
 
     with (
         patch("supportops.api.lifespan.configure_logging"),
+        patch(
+            "supportops.api.lifespan.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.api.lifespan.build_knowledge_index_profile",
             return_value=profile,
@@ -209,3 +288,59 @@ async def test_application_lifespan_cleans_up_partial_startup_failure() -> None:
     embedding_provider.close.assert_awaited_once_with()
     close_client.assert_not_awaited()
     dispose_engine.assert_awaited_once_with(engine)
+    observability_client.shutdown.assert_called_once_with()
+
+
+async def test_application_lifespan_default_noop_needs_no_credentials() -> None:
+    app = FastAPI()
+    settings = create_settings()
+    assert settings.ai_observability_provider is ObservabilityProvider.NOOP
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+
+    with (
+        patch("supportops.api.lifespan.configure_logging"),
+        patch(
+            "supportops.api.lifespan.build_knowledge_index_profile",
+            return_value=create_knowledge_index_profile(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_embedding_provider",
+            return_value=create_embedding_provider_mock(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_engine",
+            return_value=MagicMock(spec=AsyncEngine),
+        ),
+        patch(
+            "supportops.api.lifespan.create_postgresql_session_factory",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.create_qdrant_client",
+            return_value=MagicMock(spec=AsyncQdrantClient),
+        ),
+        patch(
+            "supportops.api.lifespan.dispose_postgresql_engine",
+            new=AsyncMock(),
+        ),
+        patch(
+            "supportops.api.lifespan.close_qdrant_client",
+            new=AsyncMock(),
+        ),
+    ):
+        async with application_lifespan(app, settings=settings):
+            client = app.state.supportops.observability_client
+            assert client.provider is ObservabilityProvider.NOOP
+            assert client.enabled is False
+
+
+def test_readiness_does_not_depend_on_observability() -> None:
+    import inspect
+
+    from supportops.api.health.service import build_readiness_response
+
+    parameter_names = set(inspect.signature(build_readiness_response).parameters)
+
+    assert "observability_client" not in parameter_names
+    assert "observability" not in parameter_names
