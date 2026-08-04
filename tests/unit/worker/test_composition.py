@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -28,6 +28,7 @@ from supportops.agent_graph.domain.state import (
 from supportops.agent_tools.infrastructure.query_repository import (
     SqlAlchemyAgentToolCallQueryRepository,
 )
+from supportops.ai.gateway.tool_decisions import LLMToolDecisionGateway
 from supportops.ai.providers.mock import (
     MOCK_TICKET_CLASSIFIER_MODEL,
     MockLLMProvider,
@@ -226,6 +227,94 @@ async def test_worker_runtimes_share_one_observability_client() -> None:
     )
 
     try:
+        assert llm_runtime.gateway._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert controlled_runtime.observability_client is cast(
+            Any,
+            observability_client,
+        )
+    finally:
+        await controlled_runtime.close()
+        await llm_runtime.close()
+
+    assert observability_client.shutdown_calls == 1
+
+
+async def test_session_factory_shares_observability_with_tool_decision_gateway() -> None:
+    settings = _create_settings()
+    checkpoint_runtime = FakeCheckpointRuntime()
+    embedding_provider = FakeEmbeddingProvider()
+    qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
+    created_clients: list[object] = []
+
+    class CapturingGateway(LLMToolDecisionGateway):
+        def __init__(self, **kwargs: Any) -> None:
+            created_clients.append(kwargs.get("observability_client"))
+            super().__init__(**kwargs)
+
+    async def checkpoint_runtime_factory(
+        *,
+        database_url: SecretStr,
+    ) -> FakeCheckpointRuntime:
+        del database_url
+        return checkpoint_runtime
+
+    llm_runtime = create_worker_llm_runtime(
+        provider_name="mock",
+        openai_api_key=None,
+        openai_model="gpt-5-nano",
+        openai_base_url=None,
+        request_timeout_seconds=12,
+        transport_max_retries=2,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability_client),
+    )
+    controlled_runtime = await create_worker_controlled_support_runtime(
+        settings=settings,
+        checkpoint_runtime_factory=cast(
+            Any,
+            checkpoint_runtime_factory,
+        ),
+        embedding_provider_factory=cast(
+            Any,
+            lambda configured_settings: embedding_provider,
+        ),
+        qdrant_client_factory=cast(
+            Any,
+            lambda configured_settings: qdrant_client,
+        ),
+        index_profile_factory=cast(
+            Any,
+            lambda configured_settings: _mock_index_profile(),
+        ),
+        observability_client=cast(Any, observability_client),
+    )
+    session = cast(
+        AsyncSession,
+        MagicMock(spec=AsyncSession),
+    )
+
+    try:
+        with patch(
+            "supportops.worker.composition.LLMToolDecisionGateway",
+            CapturingGateway,
+        ):
+            create_session_scoped_executor_registry(
+                session=session,
+                transaction_manager=NoOpTransactionManager(),
+                gateway=llm_runtime.gateway,
+                provider=llm_runtime.provider,
+                model=llm_runtime.model,
+                request_timeout_seconds=12,
+                controlled_runtime=controlled_runtime,
+                embedding_timeout_seconds=12,
+            )
+
+        assert len(created_clients) == 1
+        assert created_clients[0] is cast(Any, observability_client)
         assert llm_runtime.gateway._observability_client is cast(
             Any,
             observability_client,

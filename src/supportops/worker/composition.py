@@ -1221,6 +1221,7 @@ def create_session_scoped_executor_registry(
     )
     decision_gateway = LLMToolDecisionGateway(
         provider=cast(LLMToolDecisionProvider, provider),
+        observability_client=(controlled_runtime.observability_client),
     )
     decision_executor = ControlledSupportDecisionExecutor(
         gateway=decision_gateway,
