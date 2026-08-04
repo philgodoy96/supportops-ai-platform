@@ -74,11 +74,17 @@ They validate:
 - classification API schemas and routes;
 - cross-module AgentRun inspection composition;
 - evaluation dataset models and loader;
+- evaluation contracts, manifests, prediction envelopes, hashing, and atomic
+  artifact writes;
+- split-manifest validation and frozen allocation;
 - pinned dataset hash;
 - prediction artifact validation;
-- deterministic evaluation metrics;
+- deterministic evaluation metrics, including validity, urgency recall,
+  high-risk human-review recall, latency, and token aggregates;
+- standalone release-gate evaluation;
 - Gateway predictor behavior;
 - sequential evaluation runner;
+- explicit prompt-version selection;
 - evaluation settings and composition;
 - CLI provider safety gates;
 - evaluation artifact reproducibility;
@@ -195,6 +201,45 @@ Classification evaluation unit coverage:
 uv run pytest tests/unit/evaluation
 ```
 
+Focused evaluation contract coverage:
+
+```powershell
+uv run pytest tests/unit/evaluation/contracts
+```
+
+Focused split-manifest coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_split_manifest.py
+```
+
+Focused ticket-classification evaluator coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_evaluator.py
+```
+
+Focused prompt-version selection coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_predictor.py `
+  tests/unit/evaluation/ticket_classification/test_runner.py `
+  tests/unit/evaluation/ticket_classification/test_cli.py `
+  -k prompt_version
+```
+
+Focused release-gate coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_evaluator.py `
+  tests/unit/evaluation/ticket_classification/test_runner.py `
+  -k "release_gate or not_applicable or coverage_gate or recall_gate or validity_gate"
+```
+
 AgentRun inspection application coverage verifies:
 
 - workspace-scoped AgentRun retrieval;
@@ -223,15 +268,33 @@ Classification inspection unit coverage verifies:
 
 Evaluation unit coverage verifies:
 
+- shared evaluation contract hashing and atomic artifact writes;
+- evaluation manifest and prediction-envelope validation;
 - dataset model validation and loader behavior;
 - pinned dataset content hash;
+- split-manifest validation and frozen development, holdout, and safety-gate
+  allocation;
 - prediction artifact validation and hashing;
 - deterministic full-label exact match and field accuracies;
+- structured-output validity and invalid-output rate;
+- high urgency, critical urgency, and high-risk human-review recall;
+- average latency and average input, output, and total token metrics;
 - human-review precision, recall, and F1;
+- standalone release-gate outcomes and aggregate statuses;
+- quality and efficiency gates remaining not applicable without paired
+  baseline evidence;
 - Gateway predictor and sequential runner behavior;
+- explicit prompt-version selection with default version `1`;
+- unsupported prompt versions failing without provider execution or artifact
+  overwrite;
 - evaluation settings and composition;
 - CLI provider safety gates, including the external-provider permission flag;
 - artifact reload and report reproducibility.
+
+Normal pytest execution performs no paid provider calls. External provider
+evaluation remains a manual operation that requires explicit acknowledgement.
+Holdout discipline is procedural: holdout outcomes must not guide prompt
+drafting.
 
 ## Knowledge-document tests
 
@@ -350,8 +413,10 @@ Default tests use mock embeddings and make no OpenAI network calls.
 ## AI observability tests
 
 Slice 7 includes provider, embedding, retrieval, indexing, and durable
-workflow observability coverage. Evaluation workflows, RAGAS, and prompt
-iteration remain Slice 8 follow-up work.
+workflow observability coverage. Multi-domain evaluation, RAGAS, prompt
+version 2, paired prompt comparison, and prompt promotion remain Slice 8
+follow-up work beyond the repository-owned classification evaluation
+foundation.
 
 ### Provider, embedding, retrieval, and indexing coverage
 
@@ -468,10 +533,11 @@ Normal tests:
 - do not call Langfuse Cloud;
 - validate trace shape and privacy at the application contract boundary.
 
-External Langfuse smoke validation remains an opt-in follow-up. RAGAS and
-Langfuse evaluation workflows remain deferred to Slice 8. PostgreSQL remains
-authoritative for durable LLM invocation and indexing usage and estimated-cost
-records. Query-embedding usage and cost remain ephemeral observability data.
+External Langfuse smoke validation remains an opt-in follow-up. RAGAS,
+Langfuse evaluation workflows, paired prompt comparison, and multi-domain
+evaluation remain deferred to Slice 8. PostgreSQL remains authoritative for
+durable LLM invocation and indexing usage and estimated-cost records.
+Query-embedding usage and cost remain ephemeral observability data.
 
 ## Integration tests
 
@@ -1004,6 +1070,7 @@ Mock evaluation validates pipeline wiring and does not measure model quality:
 ```powershell
 uv run supportops-evaluate-classification run `
   --provider mock `
+  --prompt-version 1 `
   --dataset `
     evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
   --predictions-output `
@@ -1024,10 +1091,12 @@ uv run supportops-evaluate-classification score `
     artifacts/classification-mock-rescored-report.json
 ```
 
-Unit and integration tests do not call OpenAI. OpenAI evaluation is an explicit
-manual operation and requires `--allow-external-provider` plus a configured API
-key. Generated evaluation artifacts are ignored by Git. Versioned datasets
-remain committed under `evals/`.
+Normal pytest execution performs no paid provider calls. Unit and integration
+tests do not call OpenAI. External provider evaluation is a manual operation
+and requires `--allow-external-provider` plus a configured API key. Holdout
+discipline is procedural and holdout outcomes must not guide prompt drafting.
+Generated evaluation artifacts are ignored by Git. Versioned datasets and split
+manifests remain committed under `evals/`.
 
 ## Workspace, ticket, and AgentRun API tests
 
@@ -1096,6 +1165,11 @@ Focused classification inspection and evaluation coverage:
 ```powershell
 uv run pytest tests/unit/modules/ticket_classifications
 uv run pytest tests/unit/evaluation
+uv run pytest tests/unit/evaluation/contracts
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_split_manifest.py
+uv run pytest `
+  tests/unit/evaluation/ticket_classification/test_evaluator.py
 uv run pytest `
   tests/integration/api/test_ticket_classifications.py
 ```
@@ -1424,11 +1498,14 @@ Later implementation phases are expected to add tests for:
 - opt-in live Langfuse smoke validation;
 - Langfuse evaluation workflows;
 - prompt version 2 regression comparison;
+- paired prompt comparison and promotion decision coverage;
 - scheduled evaluation and evaluation history persistence;
-- retrieval and generation evaluation beyond structured classification;
+- retrieval, controlled-support, and approval-workflow evaluation;
+- grounded recommendation evaluation;
+- generation evaluation beyond structured classification;
 - RAGAS;
 - production feedback ingestion;
-- evaluation dashboards and quality gates;
+- evaluation dashboards beyond standalone classification release gates;
 - idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
@@ -1439,5 +1516,6 @@ workflow coverage, approval and escalation inspection and decision APIs,
 immutable knowledge-document versioning, explicit knowledge indexing,
 active-version semantic knowledge retrieval, optional application-owned AI
 observability with provider, embedding, retrieval, indexing, and durable
-workflow coverage, and offline classification evaluation are part of the
-current suite.
+workflow coverage, and repository-owned offline classification evaluation with
+contracts, split manifests, explicit prompt-version selection, and standalone
+release gates are part of the current suite.

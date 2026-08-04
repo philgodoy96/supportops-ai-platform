@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, controlled support inspection, human-approved interrupt and resume with approval and escalation APIs, and the optional application-owned AI observability foundation with default no-op mode, optional Langfuse adapter, provider and retrieval instrumentation, and durable workflow tracing are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation with repository-owned evaluation contracts, typed prediction envelopes, canonical hashing, atomic artifact writes, immutable ticket-classification dataset version 1, versioned split manifests, explicit evaluation prompt-version selection, deterministic safety and reliability metrics, and standalone classification release-gate evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, controlled support inspection, human-approved interrupt and resume with approval and escalation APIs, and the optional application-owned AI observability foundation with default no-op mode, optional Langfuse adapter, provider and retrieval instrumentation, and durable workflow tracing are implemented.
 
 The current platform includes:
 
@@ -82,7 +82,14 @@ The current platform includes:
 - token usage mapping and versioned estimated-cost calculation;
 - validated LLM runtime settings;
 - a versioned synthetic classification dataset;
-- a deterministic classification evaluator;
+- repository-owned evaluation manifest contracts;
+- typed prediction envelopes;
+- deterministic canonical serialization and SHA-256 hashing;
+- atomic evaluation artifact writes;
+- a versioned sidecar split manifest with development, holdout, and safety-gate allocation;
+- explicit evaluation prompt-version selection with no implicit latest selection;
+- a deterministic classification evaluator with structured-output validity, invalid-output rate, urgency recall, high-risk human-review recall, latency, and token aggregates;
+- standalone classification release-gate evaluation with safety, quality, reliability, and efficiency categories;
 - offline scoring of prediction artifacts;
 - an opt-in external-provider evaluation CLI;
 - canonical dataset, prediction, and report provenance;
@@ -141,7 +148,7 @@ Workspace scoping is a data ownership boundary. It is not authentication or auth
 
 Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `controlled-support-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status. The controlled workflow may execute read-only tools and persist a support recommendation without mutating the ticket or executing write-capable actions. The deterministic baseline and direct classification workflows remain registered for historical or explicitly scheduled runs.
 
-Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant. Slice 7 observability is implemented end to end for provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation telemetry. PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry for operational debugging and later evaluation workflows.
+Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline through repository-owned artifacts and does not write to PostgreSQL or Qdrant. Runtime classification remains independently pinned; evaluation prompt selection does not change the production default. Standalone release-gate reports cannot authorize prompt promotion. Slice 7 observability is implemented end to end for provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation telemetry. PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry for operational debugging and is not the evaluation source of truth.
 
 ## Engineering goals
 
@@ -465,7 +472,8 @@ The repository provides an application-owned LLM Gateway under `supportops.ai` a
 - workspace-scoped classification detail and ticket classification history;
 - optional minimal accepted-classification reference on AgentRun detail;
 - AgentRun-scoped logical invocation history;
-- offline deterministic evaluation against a versioned synthetic dataset.
+- offline deterministic evaluation against an immutable versioned synthetic dataset;
+- repository-owned evaluation contracts, split manifests, and standalone release gates.
 
 Current classification flow:
 
@@ -473,7 +481,7 @@ Current classification flow:
 configured AgentRun scheduled
 → worker classifies and persists provenance
 → client inspects classification and logical invocation state
-→ AI engineer evaluates the same prompt/schema boundary offline
+→ AI engineer evaluates an explicit prompt version against the same schema boundary offline
 ```
 
 Implemented inspection routes:
@@ -486,7 +494,7 @@ GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
 
 AgentRun detail includes an optional minimal classification reference.
 
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). Semantic knowledge retrieval is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md). Controlled support workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md). AgentRun and LangGraph durability ownership is recorded in [`docs/decisions/0010-separate-agent-run-and-langgraph-durability.md`](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
+Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Repository-owned evaluation and regression architecture is documented in [`docs/architecture/evaluation-and-regression.md`](docs/architecture/evaluation-and-regression.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). Semantic knowledge retrieval is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md). Controlled support workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md). AgentRun and LangGraph durability ownership is recorded in [`docs/decisions/0010-separate-agent-run-and-langgraph-durability.md`](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
 
 ### Controlled support workflow and inspection
 
@@ -600,7 +608,7 @@ The repository includes:
 - PostgreSQL mock classification workflow integration;
 - retry and recovery idempotency coverage;
 - classification inspection integration coverage;
-- evaluation dataset, metrics, predictor, runner, and CLI unit coverage;
+- evaluation contract, split-manifest, dataset, metrics, predictor, runner, release-gate, and CLI unit coverage;
 - Alembic upgrade, downgrade, and metadata-parity coverage for classification and knowledge-document tables;
 - knowledge-document domain, persistence mapping, repository, application-service, pagination, and API coverage;
 - PostgreSQL concurrency tests for distinct and duplicate normalized document-version creation;
@@ -631,18 +639,19 @@ Normal unit and integration tests do not require an OpenAI API key, Langfuse cre
 
 ## Planned platform modules
 
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the optional `supportops.observability` foundation, the offline `supportops.evaluation.ticket_classification` package, the explicit `supportops.knowledge_index` indexing package, the `supportops.knowledge_retrieval` semantic search package, the `supportops.agent_graph` controlled orchestration package, and the `supportops.agent_tools` bounded tool registry. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.modules.support_recommendations` module persists recommendations and citations. The `supportops.modules.controlled_support_inspection` module exposes the read-only controlled support inspection aggregate. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns active-version resolution, query embedding composition, Qdrant candidate search, PostgreSQL hydration, provenance validation, deterministic ranking, citations, and the workspace-scoped search route.
+The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the optional `supportops.observability` foundation, the repository-owned `supportops.evaluation.contracts` and `supportops.evaluation.ticket_classification` packages, the explicit `supportops.knowledge_index` indexing package, the `supportops.knowledge_retrieval` semantic search package, the `supportops.agent_graph` controlled orchestration package, and the `supportops.agent_tools` bounded tool registry. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.modules.support_recommendations` module persists recommendations and citations. The `supportops.modules.controlled_support_inspection` module exposes the read-only controlled support inspection aggregate. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns active-version resolution, query embedding composition, Qdrant candidate search, PostgreSQL hydration, provenance validation, deterministic ranking, citations, and the workspace-scoped search route. The evaluation packages own shared evaluation contracts, immutable classification datasets, split manifests, deterministic metrics, standalone release gates, and the evaluation CLI.
 
 Future modules or extensions will introduce:
 
 - reranking of retrieval candidates;
 - retrieval evaluation datasets and deterministic scoring;
+- controlled-support and approval-workflow evaluation datasets and scorers;
 - evidence-driven prompt version 2;
-- prompt regression comparison across versions;
+- paired prompt comparison and evidence-driven promotion decisions;
 - scheduled evaluation and evaluation history persistence;
 - multi-profile score fusion;
 - Langfuse evaluation workflows, RAGAS, and production feedback ingestion;
-- evaluation dashboards and quality gates.
+- evaluation dashboards beyond the current standalone classification release gates.
 
 Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
 
@@ -662,6 +671,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── agent-run-scheduling.md
 │   │   ├── classification-evaluation.md
 │   │   ├── controlled-support-workflow.md
+│   │   ├── evaluation-and-regression.md
 │   │   ├── knowledge-documents.md
 │   │   ├── knowledge-indexing.md
 │   │   ├── llm-gateway.md
@@ -682,7 +692,9 @@ Additional modules will be introduced only when they have concrete responsibilit
 │   │   ├── 0009-hydrate-retrieval-evidence-from-postgresql.md
 │   │   ├── 0010-separate-agent-run-and-langgraph-durability.md
 │   │   ├── 0011-treat-langgraph-checkpoints-as-framework-owned-schema.md
-│   │   └── 0013-use-optional-application-owned-langfuse-observability.md
+│   │   ├── 0012-use-application-owned-approval-records-with-langgraph-interrupts.md
+│   │   ├── 0013-use-optional-application-owned-langfuse-observability.md
+│   │   └── 0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md
 │   └── development/
 │       ├── api-examples.md
 │       ├── environment-variables.md
@@ -691,8 +703,10 @@ Additional modules will be introduced only when they have concrete responsibilit
 ├── evals/
 │   └── ticket-classification/
 │       ├── README.md
-│       └── datasets/
-│           └── ticket-classification-eval-v1.jsonl
+│       ├── datasets/
+│       │   └── ticket-classification-eval-v1.jsonl
+│       └── splits/
+│           └── ticket-classification-eval-v1-splits-v1.json
 ├── src/
 │   └── supportops/
 │       ├── ai/
@@ -720,6 +734,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 │       │   ├── settings.py
 │       │   └── transactions.py
 │       ├── evaluation/
+│       │   ├── contracts/
 │       │   └── ticket_classification/
 │       ├── infrastructure/
 │       │   ├── postgresql/
@@ -791,7 +806,7 @@ Additional modules will be introduced only when they have concrete responsibilit
 └── uv.lock
 ```
 
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules include domain, application, and infrastructure layers as required. The `agent_runs`, `ticket_classifications`, and `controlled_support_inspection` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM, checkpoint, embedding, and Qdrant composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.agent_graph` package owns bounded LangGraph orchestration for controlled support. The `supportops.agent_tools` package owns the read-only controlled tool registry. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns semantic search contracts, adapters, orchestration, and the workspace-scoped HTTP search route. The `supportops.evaluation.ticket_classification` package owns offline datasets, prediction artifacts, deterministic metrics, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, tool-call, recommendation, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Versioned evaluation datasets remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
+Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules include domain, application, and infrastructure layers as required. The `agent_runs`, `ticket_classifications`, and `controlled_support_inspection` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM, checkpoint, embedding, and Qdrant composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.agent_graph` package owns bounded LangGraph orchestration for controlled support. The `supportops.agent_tools` package owns the read-only controlled tool registry. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns semantic search contracts, adapters, orchestration, and the workspace-scoped HTTP search route. The `supportops.evaluation.contracts` package owns shared evaluation manifests, prediction envelopes, canonical hashing, and atomic artifact writes. The `supportops.evaluation.ticket_classification` package owns offline datasets, split manifests, prediction artifacts, deterministic metrics, release gates, and the evaluation CLI. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, tool-call, recommendation, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Versioned evaluation datasets and split manifests remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
 
 ## Local setup
 
@@ -891,16 +906,23 @@ The complete setup procedure is documented in [`docs/development/local-setup.md`
 
 ## Classification evaluation
 
-Offline classification evaluation uses the versioned synthetic dataset and the
-`supportops-evaluate-classification` CLI. Evaluation accesses neither PostgreSQL
-nor Qdrant. Generated outputs belong under ignored `artifacts/`. Versioned
-datasets remain committed under `evals/`.
+Offline classification evaluation uses the immutable versioned synthetic
+dataset, the versioned split sidecar, and the
+`supportops-evaluate-classification` CLI. Evaluation accesses neither
+PostgreSQL nor Qdrant. Generated outputs belong under ignored `artifacts/`.
+Versioned datasets and split manifests remain committed under `evals/`.
+
+Prompt selection is explicit. The command-specific prompt ID remains
+`ticket-classification`. The default evaluation prompt version is `1`. There is
+no implicit latest selection. Unsupported versions fail without fallback or
+provider execution. Runtime classification remains independently pinned.
 
 Mock pipeline:
 
 ```powershell
 uv run supportops-evaluate-classification run `
   --provider mock `
+  --prompt-version 1 `
   --dataset `
     evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
   --predictions-output `
@@ -931,6 +953,7 @@ OpenAI evaluation:
 uv run supportops-evaluate-classification run `
   --provider openai `
   --allow-external-provider `
+  --prompt-version 1 `
   --dataset `
     evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
   --predictions-output `
@@ -940,10 +963,13 @@ uv run supportops-evaluate-classification run `
 ```
 
 OpenAI evaluation requires `--allow-external-provider` and a configured API key.
-Evaluation results do not alter production prompt selection automatically.
+Standalone release-gate reports cannot authorize prompt promotion. Evaluation
+results do not alter production prompt selection automatically.
 
 Classification inspection and evaluation architecture is documented in
 [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md).
+Repository-owned evaluation and regression architecture is documented in
+[`docs/architecture/evaluation-and-regression.md`](docs/architecture/evaluation-and-regression.md).
 
 ## Configuration
 
@@ -1134,7 +1160,9 @@ The repository records the following accepted decisions:
 - [Hydrate retrieval evidence from PostgreSQL](docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md)
 - [Separate AgentRun and LangGraph durability](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md)
 - [Treat LangGraph checkpoints as framework-owned schema](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md)
+- [Use application-owned approval records with LangGraph interrupts](docs/decisions/0012-use-application-owned-approval-records-with-langgraph-interrupts.md)
 - [Use optional application-owned Langfuse observability](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md)
+- [Use repository-owned evaluation and evidence-driven prompt promotion](docs/decisions/0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md)
 
 ## Roadmap
 
@@ -1235,12 +1263,15 @@ Implemented:
 - classification inspection API;
 - synthetic classification dataset;
 - deterministic classification evaluator;
+- repository-owned evaluation contracts and split manifests;
+- explicit evaluation prompt-version selection;
+- standalone classification release-gate evaluation;
 - opt-in real-model evaluation.
 
 Planned:
 
 - evidence-driven prompt version 2;
-- prompt regression comparison across versions;
+- paired prompt comparison across versions;
 - cross-provider fallback after baseline behavior is observable;
 - operational cost reporting and invoice reconciliation.
 
@@ -1300,9 +1331,21 @@ Implemented:
 
 - token usage and estimated-cost persistence with durable invocation provenance;
 - prompt `ticket-classification` version 1;
-- versioned synthetic classification dataset;
+- immutable versioned synthetic classification dataset;
+- versioned development, holdout, and safety-gate split allocation;
+- repository-owned evaluation manifest contracts;
+- typed prediction envelopes;
+- deterministic canonical serialization and SHA-256 hashing;
+- atomic evaluation artifact writes;
 - deterministic classification evaluator;
+- structured-output validity and invalid-output rate;
+- high urgency, critical urgency, and high-risk human-review recall;
+- average latency and average input, output, and total token metrics;
+- standalone classification release-gate evaluation;
+- explicit gate outcomes `passed`, `failed`, and `not_applicable`;
+- standalone aggregate statuses `passed`, `failed`, and `incomplete`;
 - offline scoring;
+- explicit evaluation prompt-version selection with no implicit latest selection;
 - opt-in external-provider evaluation CLI;
 - canonical dataset, prediction, and report provenance;
 - application-owned AI observability abstraction;
@@ -1325,7 +1368,7 @@ Implemented:
 - privacy-aware metadata-only export with redacted-content opt-in;
 - fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
 
-Slice 7 observability is complete for the application-owned foundation, provider and retrieval instrumentation, and durable workflow telemetry. Slice 8 intentionally owns evaluation workflows and quality iteration.
+Slice 7 observability is complete for the application-owned foundation, provider and retrieval instrumentation, and durable workflow telemetry. Slice 8 intentionally owns evaluation workflows and quality iteration beyond the repository-owned classification evaluation foundation delivered here.
 
 Planned:
 
@@ -1333,13 +1376,17 @@ Planned:
 - opt-in live Langfuse smoke validation;
 - Langfuse evaluation workflows;
 - evidence-driven prompt version 2;
-- prompt regression comparison across versions;
-- scheduled evaluation;
+- paired prompt comparison across versions;
+- prompt promotion, rejection, or inconclusive decisions;
+- canonical baseline evidence for paired comparison;
+- scheduled or online evaluation;
 - evaluation history persistence;
 - retrieval evaluation;
+- controlled-support and approval-workflow evaluation;
+- grounded recommendation evaluation;
 - generation evaluation beyond structured classification;
 - production feedback ingestion;
-- evaluation dashboards and quality gates;
+- evaluation dashboards beyond standalone classification release gates;
 - RAGAS.
 
 ## Intentionally deferred capabilities
@@ -1355,8 +1402,9 @@ The following capabilities remain deferred to preserve architectural focus and a
 - frontend monitoring applications;
 - Redis, Celery, Kafka, and SQS;
 - evidence-driven prompt version 2;
-- prompt regression comparison across versions;
-- scheduled evaluation;
+- paired prompt comparison across versions;
+- prompt promotion, rejection, or inconclusive decisions;
+- scheduled or online evaluation;
 - evaluation history persistence;
 - cross-provider fallback and automatic model routing;
 - Anthropic provider;
@@ -1369,12 +1417,13 @@ The following capabilities remain deferred to preserve architectural focus and a
 - write-capable tools beyond the current grant-gated escalation path;
 - opt-in live Langfuse smoke validation;
 - Phoenix integration;
-- Langfuse evaluation workflows;
+- Langfuse evaluation workflows and Langfuse datasets or experiments;
 - RAGAS evaluation;
 - production feedback ingestion;
-- evaluation dashboards and quality gates;
-- prompt regression comparison across versions;
-- retrieval and generation evaluation beyond structured classification;
+- evaluation dashboards beyond standalone classification release gates;
+- retrieval, controlled-support, and approval-workflow evaluation;
+- grounded recommendation evaluation;
+- generation evaluation beyond structured classification;
 - OpenTelemetry;
 - Prometheus and Grafana;
 - frontend applications;
@@ -1386,7 +1435,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, human-approved workflow with approval and escalation APIs, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation instrumentation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, Langfuse evaluation workflows, reranking, and retrieval evaluation remain intentionally separated into Slice 8 and later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, human-approved workflow with approval and escalation APIs, classification inspection, controlled support inspection, repository-owned offline classification evaluation with standalone release gates, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation instrumentation are implemented. Evidence-driven prompt version 2, paired prompt comparison, prompt promotion decisions, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, Langfuse evaluation workflows, reranking, and multi-domain retrieval or workflow evaluation remain intentionally separated into Slice 8 and later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
@@ -1399,6 +1448,7 @@ The architecture keeps room for these capabilities without introducing dependenc
 - [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
 - [Durable ticket classification](docs/architecture/ticket-classification.md)
 - [Classification inspection and evaluation](docs/architecture/classification-evaluation.md)
+- [Evaluation and regression architecture](docs/architecture/evaluation-and-regression.md)
 - [Versioned knowledge documents](docs/architecture/knowledge-documents.md)
 - [Knowledge indexing pipeline](docs/architecture/knowledge-indexing.md)
 - [Semantic knowledge retrieval](docs/architecture/semantic-knowledge-retrieval.md)
