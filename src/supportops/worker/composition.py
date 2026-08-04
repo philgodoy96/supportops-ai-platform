@@ -1194,6 +1194,7 @@ def create_session_scoped_executor_registry(
         vector_searcher=controlled_runtime.vector_searcher,
         index_profile=controlled_runtime.index_profile,
         embedding_timeout_seconds=embedding_timeout_seconds,
+        observability_client=(controlled_runtime.observability_client),
     )
     tool_registry = create_controlled_support_tool_registry(
         knowledge_search=knowledge_search,

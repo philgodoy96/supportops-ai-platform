@@ -419,3 +419,47 @@ def test_readiness_does_not_depend_on_observability() -> None:
 
     assert "observability_client" not in parameter_names
     assert "observability" not in parameter_names
+
+
+def test_search_knowledge_dependency_shares_process_observability_client() -> None:
+    from supportops.knowledge_retrieval.api.dependencies import (
+        get_search_knowledge,
+    )
+
+    settings = create_settings()
+    profile = create_knowledge_index_profile()
+    embedding_provider = create_embedding_provider_mock()
+    embedding_provider.provider_name = profile.embedding_provider
+    observability_client = create_observability_client_mock()
+    session = MagicMock(spec=AsyncSession)
+    state = ApplicationState(
+        settings=settings,
+        embedding_provider=embedding_provider,
+        knowledge_index_profile=profile,
+        postgresql_engine=MagicMock(spec=AsyncEngine),
+        postgresql_session_factory=MagicMock(
+            spec=async_sessionmaker[AsyncSession],
+        ),
+        qdrant_client=MagicMock(spec=AsyncQdrantClient),
+        observability_client=observability_client,
+    )
+
+    with (
+        patch(
+            "supportops.knowledge_retrieval.api.dependencies.QdrantKnowledgeVectorStore",
+        ),
+        patch(
+            "supportops.knowledge_retrieval.api.dependencies.QdrantKnowledgeVectorSearcher",
+        ),
+        patch(
+            "supportops.knowledge_retrieval.api.dependencies.SqlAlchemyActiveKnowledgeVersionResolver",
+        ),
+        patch(
+            "supportops.knowledge_retrieval.api.dependencies.SqlAlchemyKnowledgeChunkHydrator",
+        ),
+    ):
+        service = get_search_knowledge(session=session, state=state)
+
+    assert service._observability_client is observability_client
+    assert state.embedding_provider is embedding_provider
+    assert state.observability_client is observability_client
