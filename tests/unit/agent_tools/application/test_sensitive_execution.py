@@ -1,9 +1,11 @@
 """Unit tests for approved sensitive execution."""
 
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
+from contextlib import AbstractContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
-from typing import Any
+from types import SimpleNamespace, TracebackType
+from typing import Any, Literal
 from unittest.mock import AsyncMock, call
 from uuid import UUID, uuid4
 
@@ -29,6 +31,21 @@ from supportops.modules.tickets.domain.escalation import TicketEscalation
 from supportops.modules.tickets.domain.escalation_repositories import (
     TicketEscalationConsistencyError,
     TicketEscalationPersistenceResult,
+)
+from supportops.observability.context import (
+    ActiveObservationContext,
+    current_observation_context,
+    observation_context_scope,
+)
+from supportops.observability.contracts import TraceScope
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    TraceAttributes,
 )
 
 _NOW = datetime(2026, 8, 3, 19, 0, tzinfo=UTC)
@@ -129,6 +146,7 @@ def _executor(
     escalation_repository: Any,
     tool_repository: Any | None = None,
     transaction_manager: FakeTransactionManager | None = None,
+    observability_client: object | None = None,
 ) -> ExecuteApprovedTicketEscalation:
     return ExecuteApprovedTicketEscalation(
         transaction_manager=transaction_manager or FakeTransactionManager(),
@@ -148,6 +166,7 @@ def _executor(
         escalation_repository=escalation_repository,
         utc_now=lambda: _NOW + timedelta(minutes=6),
         uuid_factory=uuid4,
+        observability_client=observability_client,  # type: ignore[arg-type]
     )
 
 
@@ -820,3 +839,492 @@ async def test_exact_replay_returns_already_recorded() -> None:
     grant_repository.persist.assert_not_awaited()
     escalation_repository.persist.assert_not_awaited()
     tool_repository.save_granted_execution_success.assert_not_awaited()
+
+
+class RecordingObservationScope:
+    def __init__(
+        self,
+        *,
+        attributes: ObservationAttributes,
+        fail_update: bool = False,
+    ) -> None:
+        self.attributes = attributes
+        self._fail_update = fail_update
+        self.updates: list[ObservationUpdate] = []
+
+    @property
+    def observation_id(self) -> str | None:
+        return "sensitive-tool-observation-1"
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self._fail_update:
+            raise RuntimeError("synthetic update failure")
+
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        del attributes
+        raise AssertionError("Nested observations are not expected.")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Events are not expected.")
+
+
+class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    def __init__(
+        self,
+        *,
+        scope: RecordingObservationScope,
+        fail_enter: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self._scope = scope
+        self._fail_enter = fail_enter
+        self._fail_exit = fail_exit
+        self.exit_calls = 0
+        self._context_manager = observation_context_scope(
+            ActiveObservationContext(
+                name=scope.attributes.name,
+                observation_id=scope.observation_id,
+            )
+        )
+
+    def __enter__(self) -> RecordingObservationScope:
+        if self._fail_enter:
+            raise RuntimeError("synthetic enter failure")
+
+        self._context_manager.__enter__()
+        return self._scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        self.exit_calls += 1
+        self._context_manager.__exit__(exc_type, exc, traceback)
+
+        if self._fail_exit:
+            raise RuntimeError("synthetic exit failure")
+
+        return False
+
+
+class RecordingObservabilityClient:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_enter: bool = False,
+        fail_update: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self._fail_start = fail_start
+        self._fail_enter = fail_enter
+        self._fail_update = fail_update
+        self._fail_exit = fail_exit
+        self.attributes: list[ObservationAttributes] = []
+        self.scopes: list[RecordingObservationScope] = []
+        self.managers: list[RecordingObservationManager] = []
+        self.parent_observation_names: list[str | None] = []
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[TraceScope]:
+        del attributes
+        raise AssertionError("Tool tracing must not create roots.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        if self._fail_start:
+            raise RuntimeError("synthetic start failure")
+
+        parent = current_observation_context()
+        self.parent_observation_names.append(
+            None if parent is None else parent.name,
+        )
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            fail_update=self._fail_update,
+        )
+        manager = RecordingObservationManager(
+            scope=scope,
+            fail_enter=self._fail_enter,
+            fail_exit=self._fail_exit,
+        )
+        self.attributes.append(attributes)
+        self.scopes.append(scope)
+        self.managers.append(manager)
+        return manager
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Tool tracing must not emit events.")
+
+    def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
+        del identity, event
+        raise AssertionError("Tool tracing must not emit events.")
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _applied_repositories() -> tuple[Any, Any, Any]:
+    grant_repository = SimpleNamespace(
+        persist=AsyncMock(
+            return_value=(SensitiveExecutionGrantPersistenceResult.APPLIED),
+        ),
+        get_by_agent_tool_call_id=AsyncMock(),
+    )
+    escalation_repository = SimpleNamespace(
+        persist=AsyncMock(
+            return_value=TicketEscalationPersistenceResult.APPLIED,
+        ),
+        get_by_agent_tool_call_id=AsyncMock(),
+    )
+    return grant_repository, escalation_repository, None
+
+
+@pytest.mark.asyncio
+async def test_records_one_tool_observation_for_approved_sensitive_execution() -> None:
+    context, tool_call, approval = _records()
+    context.agent_run.correlation_id = uuid4()
+    context.attempt.execution_request_id = uuid4()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+    tool_repository = SimpleNamespace(
+        get_by_id_for_update=AsyncMock(return_value=tool_call),
+        save_granted_execution_success=AsyncMock(),
+    )
+    observability = RecordingObservabilityClient()
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+        tool_repository=tool_repository,
+        observability_client=observability,
+    )
+
+    result = await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is SensitiveExecutionStatus.APPLIED
+    assert len(observability.attributes) == 1
+    attributes = observability.attributes[0]
+    assert attributes.name == "tool.execute"
+    assert attributes.observation_type is ObservationType.TOOL
+    assert attributes.metadata["tool_name"] == "escalate_ticket"
+    assert attributes.metadata["tool_safety"] == "sensitive_write"
+    assert attributes.metadata["requires_approval"] is True
+    assert attributes.metadata["tool_call_id"] == str(tool_call.id)
+    assert attributes.metadata["correlation_id"] == str(
+        context.agent_run.correlation_id,
+    )
+    assert attributes.metadata["execution_request_id"] == str(
+        context.attempt.execution_request_id,
+    )
+    assert "lease_token" not in attributes.metadata
+    assert "execution_grant" not in attributes.metadata
+    assert "granted_input" not in attributes.metadata
+    assert attributes.input_data is None
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.OK
+    assert update.metadata["tool_outcome"] == "succeeded"
+    assert update.output_data is None
+    tool_repository.save_granted_execution_success.assert_awaited_once()
+    assert current_observation_context() is None
+
+
+@pytest.mark.asyncio
+async def test_already_recorded_before_execution_creates_no_tool_observation() -> None:
+    context, tool_call, approval = _records()
+    durable_grant = _grant(
+        approval,
+        tool_call,
+        executed_by_agent_run_attempt_id=context.attempt.id,
+    )
+    durable_escalation = _escalation(durable_grant)
+    succeeded = tool_call.complete_granted_execution_success(
+        executed_by_agent_run_attempt_id=context.attempt.id,
+        execution_started_at=_NOW + timedelta(minutes=6),
+        finished_at=_NOW + timedelta(minutes=6),
+        safe_output={
+            "escalation_id": str(durable_escalation.id),
+            "ticket_id": str(durable_escalation.ticket_id),
+            "target_queue": "engineering_support",
+            "status": "escalated",
+        },
+    )
+    observability = RecordingObservabilityClient()
+    executor = _executor(
+        context=context,
+        tool_call=succeeded,
+        approval=approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_grant),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(
+                return_value=durable_escalation,
+            ),
+        ),
+        tool_repository=SimpleNamespace(
+            get_by_id_for_update=AsyncMock(return_value=succeeded),
+            save_granted_execution_success=AsyncMock(),
+        ),
+        observability_client=observability,
+    )
+
+    result = await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is SensitiveExecutionStatus.ALREADY_RECORDED
+    assert observability.attributes == []
+
+
+@pytest.mark.asyncio
+async def test_idempotent_in_boundary_records_already_recorded_outcome() -> None:
+    context, tool_call, approval = _records()
+    durable_grant = _grant(
+        approval,
+        tool_call,
+        executed_by_agent_run_attempt_id=context.attempt.id,
+    )
+    durable_escalation = _escalation(durable_grant)
+    observability = RecordingObservabilityClient()
+    tool_repository = SimpleNamespace(
+        get_by_id_for_update=AsyncMock(return_value=tool_call),
+        save_granted_execution_success=AsyncMock(),
+    )
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(
+                return_value=(SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(return_value=durable_grant),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(
+                return_value=(TicketEscalationPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(
+                return_value=durable_escalation,
+            ),
+        ),
+        tool_repository=tool_repository,
+        observability_client=observability,
+    )
+
+    result = await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    assert result.status is SensitiveExecutionStatus.ALREADY_RECORDED
+    assert len(observability.attributes) == 1
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.OK
+    assert update.metadata["tool_outcome"] == "already_recorded"
+    assert update.metadata["idempotent_replay"] is True
+    tool_repository.save_granted_execution_success.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sensitive_consistency_failure_inside_boundary_is_error() -> None:
+    context, tool_call, approval = _records()
+    observability = RecordingObservabilityClient()
+    expected = SensitiveExecutionConsistencyError("Recorded grant could not be loaded.")
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(
+                return_value=(SensitiveExecutionGrantPersistenceResult.ALREADY_RECORDED),
+            ),
+            get_by_agent_tool_call_id=AsyncMock(return_value=None),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        observability_client=observability,
+    )
+
+    with pytest.raises(SensitiveExecutionConsistencyError) as raised:
+        await executor.execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    assert type(raised.value) is SensitiveExecutionConsistencyError
+    assert str(raised.value) == str(expected)
+    assert len(observability.attributes) == 1
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.metadata["tool_outcome"] == "unexpected_failure"
+    assert update.metadata["error_code"] == ("tool_execution_unexpected_failure")
+    assert current_observation_context() is None
+
+
+@pytest.mark.asyncio
+async def test_proposal_waiting_paths_are_outside_tool_observation_boundary() -> None:
+    """Approval proposal and wait paths never enter this executor boundary."""
+
+    observability = RecordingObservabilityClient()
+    context, tool_call, _approval = _records()
+    pending_approval = ApprovalRequest.create_pending(
+        tool_call=tool_call,
+        requested_by_llm_invocation_id=uuid4(),
+        request_reason="A product defect requires review.",
+        expires_at=_NOW + timedelta(days=1),
+        now=_NOW,
+    )
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=pending_approval,
+        grant_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        escalation_repository=SimpleNamespace(
+            persist=AsyncMock(),
+            get_by_agent_tool_call_id=AsyncMock(),
+        ),
+        observability_client=observability,
+    )
+
+    with pytest.raises(SensitiveExecutionConsistencyError):
+        await executor.execute(
+            context=context,
+            approval_request_id=pending_approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    assert observability.attributes == []
+
+
+@pytest.mark.asyncio
+async def test_sensitive_observation_omits_approval_and_escalation_content() -> None:
+    context, tool_call, approval = _records()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+    observability = RecordingObservabilityClient()
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+        observability_client=observability,
+    )
+
+    await executor.execute(
+        context=context,
+        approval_request_id=approval.id,
+        agent_tool_call_id=tool_call.id,
+    )
+
+    exported = repr(observability.attributes[0]) + repr(observability.scopes[0].updates[0])
+    assert "A product defect requires review." not in exported
+    assert "proposed_input" not in exported
+    assert "approval_comment" not in exported
+    assert "escalation_reason" not in exported
+    assert "engineering_support" not in exported
+
+
+@pytest.mark.asyncio
+async def test_sensitive_observability_failures_fail_open() -> None:
+    context, tool_call, approval = _records()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+
+    for kwargs in (
+        {"fail_start": True},
+        {"fail_enter": True},
+        {"fail_update": True},
+        {"fail_exit": True},
+    ):
+        tool_repository = SimpleNamespace(
+            get_by_id_for_update=AsyncMock(return_value=tool_call),
+            save_granted_execution_success=AsyncMock(),
+        )
+        result = await _executor(
+            context=context,
+            tool_call=tool_call,
+            approval=approval,
+            grant_repository=grant_repository,
+            escalation_repository=escalation_repository,
+            tool_repository=tool_repository,
+            observability_client=RecordingObservabilityClient(**kwargs),
+        ).execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+        assert result.status is SensitiveExecutionStatus.APPLIED
+        tool_repository.save_granted_execution_success.assert_awaited_once()
+        assert current_observation_context() is None
+
+
+@pytest.mark.asyncio
+async def test_sensitive_tool_observation_nests_under_active_parent() -> None:
+    context, tool_call, approval = _records()
+    grant_repository, escalation_repository, _ = _applied_repositories()
+    observability = RecordingObservabilityClient()
+    executor = _executor(
+        context=context,
+        tool_call=tool_call,
+        approval=approval,
+        grant_repository=grant_repository,
+        escalation_repository=escalation_repository,
+        observability_client=observability,
+    )
+
+    with observation_context_scope(
+        ActiveObservationContext(
+            name="graph-node.execute_sensitive_tool",
+            observation_id="node-1",
+        )
+    ):
+        await executor.execute(
+            context=context,
+            approval_request_id=approval.id,
+            agent_tool_call_id=tool_call.id,
+        )
+
+    assert observability.parent_observation_names == ["graph-node.execute_sensitive_tool"]
+    assert current_observation_context() is None

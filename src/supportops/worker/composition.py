@@ -1202,6 +1202,7 @@ def create_session_scoped_executor_registry(
     )
     bounded_tool_executor = BoundedReadOnlyToolExecutor(
         registry=tool_registry,
+        observability_client=(controlled_runtime.observability_client),
     )
     tool_call_execution_repository = SqlAlchemyAgentToolCallExecutionRepository(
         session,
@@ -1313,6 +1314,7 @@ def create_session_scoped_executor_registry(
         tool_call_repository=tool_call_execution_repository,
         grant_repository=grant_repository,
         escalation_repository=escalation_repository,
+        observability_client=(controlled_runtime.observability_client),
     )
     sensitive_tool_execution = SensitiveToolExecutionNode(
         executor=approved_escalation_executor,
