@@ -56,7 +56,10 @@ async def application_lifespan(
     try:
         observability_client = create_observability_client(settings)
         knowledge_index_profile = build_knowledge_index_profile(settings)
-        embedding_provider = create_embedding_provider(settings)
+        embedding_provider = create_embedding_provider(
+            settings,
+            observability_client=observability_client,
+        )
         postgresql_engine = create_postgresql_engine(settings)
         postgresql_session_factory = create_postgresql_session_factory(
             postgresql_engine,

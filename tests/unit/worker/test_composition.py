@@ -28,6 +28,7 @@ from supportops.agent_graph.domain.state import (
 from supportops.agent_tools.infrastructure.query_repository import (
     SqlAlchemyAgentToolCallQueryRepository,
 )
+from supportops.ai.embeddings.observability import ObservingEmbeddingProvider
 from supportops.ai.gateway.tool_decisions import LLMToolDecisionGateway
 from supportops.ai.providers.mock import (
     MOCK_TICKET_CLASSIFIER_MODEL,
@@ -159,6 +160,41 @@ def _mock_index_profile() -> KnowledgeIndexProfile:
     )
 
 
+def _embedding_provider_factory(
+    provider: FakeEmbeddingProvider,
+) -> object:
+    """Return a factory matching the observability-aware signature."""
+
+    def factory(
+        configured_settings: Settings,
+        *,
+        observability_client: object | None = None,
+    ) -> FakeEmbeddingProvider:
+        del configured_settings, observability_client
+        return provider
+
+    return factory
+
+
+def _capturing_embedding_provider_factory(
+    provider: FakeEmbeddingProvider,
+    captured_clients: list[object],
+) -> object:
+    """Return a factory that records the supplied observability client."""
+
+    def factory(
+        configured_settings: Settings,
+        *,
+        observability_client: object | None = None,
+    ) -> FakeEmbeddingProvider:
+        del configured_settings
+        if observability_client is not None:
+            captured_clients.append(observability_client)
+        return provider
+
+    return factory
+
+
 async def test_creates_process_scoped_mock_runtime() -> None:
     runtime = create_worker_llm_runtime(
         provider_name="mock",
@@ -187,6 +223,7 @@ async def test_worker_runtimes_share_one_observability_client() -> None:
     embedding_provider = FakeEmbeddingProvider()
     qdrant_client = FakeQdrantClient()
     observability_client = FakeObservabilityClient()
+    embedding_clients: list[object] = []
 
     async def checkpoint_runtime_factory(
         *,
@@ -213,7 +250,10 @@ async def test_worker_runtimes_share_one_observability_client() -> None:
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _capturing_embedding_provider_factory(
+                embedding_provider,
+                embedding_clients,
+            ),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -235,6 +275,7 @@ async def test_worker_runtimes_share_one_observability_client() -> None:
             Any,
             observability_client,
         )
+        assert embedding_clients == [observability_client]
     finally:
         await controlled_runtime.close()
         await llm_runtime.close()
@@ -249,6 +290,7 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
     qdrant_client = FakeQdrantClient()
     observability_client = FakeObservabilityClient()
     created_clients: list[object] = []
+    embedding_clients: list[object] = []
 
     class CapturingGateway(LLMToolDecisionGateway):
         def __init__(self, **kwargs: Any) -> None:
@@ -280,7 +322,10 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _capturing_embedding_provider_factory(
+                embedding_provider,
+                embedding_clients,
+            ),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -315,6 +360,7 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
 
         assert len(created_clients) == 1
         assert created_clients[0] is cast(Any, observability_client)
+        assert embedding_clients == [observability_client]
         assert llm_runtime.gateway._observability_client is cast(
             Any,
             observability_client,
@@ -328,6 +374,75 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
         await llm_runtime.close()
 
     assert observability_client.shutdown_calls == 1
+
+
+async def test_controlled_runtime_passes_observability_to_real_embedding_factory() -> None:
+    settings = _create_settings()
+    checkpoint_runtime = FakeCheckpointRuntime()
+    qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
+    factory_calls = 0
+
+    async def checkpoint_runtime_factory(
+        *,
+        database_url: SecretStr,
+    ) -> FakeCheckpointRuntime:
+        del database_url
+        return checkpoint_runtime
+
+    def embedding_provider_factory(
+        configured_settings: Settings,
+        *,
+        observability_client: object | None = None,
+    ) -> ObservingEmbeddingProvider:
+        nonlocal factory_calls
+        factory_calls += 1
+        del configured_settings
+        return ObservingEmbeddingProvider(
+            provider=cast(Any, FakeEmbeddingProvider()),
+            observability_client=cast(Any, observability_client),
+        )
+
+    runtime = await create_worker_controlled_support_runtime(
+        settings=settings,
+        checkpoint_runtime_factory=cast(
+            Any,
+            checkpoint_runtime_factory,
+        ),
+        embedding_provider_factory=cast(
+            Any,
+            embedding_provider_factory,
+        ),
+        qdrant_client_factory=cast(
+            Any,
+            lambda configured_settings: qdrant_client,
+        ),
+        index_profile_factory=cast(
+            Any,
+            lambda configured_settings: _mock_index_profile(),
+        ),
+        observability_client=cast(Any, observability_client),
+    )
+
+    try:
+        assert factory_calls == 1
+        assert isinstance(
+            runtime.embedding_provider,
+            ObservingEmbeddingProvider,
+        )
+        assert runtime.embedding_provider._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert runtime.observability_client is cast(
+            Any,
+            observability_client,
+        )
+    finally:
+        await runtime.close()
+
+    assert observability_client.shutdown_calls == 1
+    assert factory_calls == 1
 
 
 async def test_creates_process_scoped_openai_runtime_without_network() -> None:
@@ -436,7 +551,7 @@ async def test_creates_process_scoped_controlled_support_runtime() -> None:
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -503,7 +618,7 @@ async def test_controlled_runtime_partial_construction_cleans_up() -> None:
             ),
             embedding_provider_factory=cast(
                 Any,
-                lambda configured_settings: embedding_provider,
+                _embedding_provider_factory(embedding_provider),
             ),
             qdrant_client_factory=cast(
                 Any,
@@ -547,7 +662,7 @@ async def test_controlled_runtime_close_is_idempotent() -> None:
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -595,7 +710,7 @@ async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() 
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -647,7 +762,7 @@ async def test_controlled_runtime_observability_shutdown_failure_is_isolated() -
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -700,7 +815,7 @@ async def _build_registry_with_stubs() -> tuple[Any, Any, AsyncSession]:
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,
@@ -838,7 +953,7 @@ async def test_session_factory_rejects_invalid_request_timeout() -> None:
         ),
         embedding_provider_factory=cast(
             Any,
-            lambda configured_settings: embedding_provider,
+            _embedding_provider_factory(embedding_provider),
         ),
         qdrant_client_factory=cast(
             Any,

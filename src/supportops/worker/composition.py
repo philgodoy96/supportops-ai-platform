@@ -225,7 +225,7 @@ type CheckpointRuntimeFactory = Callable[
     ...,
     Awaitable[PostgresCheckpointRuntime],
 ]
-type EmbeddingProviderFactory = Callable[[Settings], EmbeddingProvider]
+type EmbeddingProviderFactory = Callable[..., EmbeddingProvider]
 type QdrantClientFactory = Callable[[Settings], AsyncQdrantClient]
 type KnowledgeIndexProfileFactory = Callable[
     [Settings],
@@ -1114,7 +1114,10 @@ async def create_worker_controlled_support_runtime(
         await checkpoint_runtime.setup()
 
         index_profile = index_profile_factory(settings)
-        embedding_provider = embedding_provider_factory(settings)
+        embedding_provider = embedding_provider_factory(
+            settings,
+            observability_client=owned_observability_client,
+        )
         qdrant_client = qdrant_client_factory(settings)
         vector_store = QdrantKnowledgeVectorStore(
             client=qdrant_client,
