@@ -14,6 +14,7 @@ from supportops.observability.context import (
     trace_context_scope,
 )
 from supportops.observability.contracts import ObservationScope, TraceScope
+from supportops.observability.identity import TraceIdentity
 from supportops.observability.models import (
     EventObservation,
     ObservabilityProvider,
@@ -48,6 +49,14 @@ class NoOpObservabilityClient:
 
     def record_event(self, event: EventObservation) -> None:
         del event
+
+    def record_trace_event(
+        self,
+        *,
+        identity: TraceIdentity,
+        event: EventObservation,
+    ) -> None:
+        del identity, event
 
     def flush(self) -> None:
         return None
@@ -119,6 +128,9 @@ class _NoOpTraceScope:
     @property
     def session_id(self) -> str | None:
         return self._attributes.session_id
+
+    def update(self, update: ObservationUpdate) -> None:
+        del update
 
     def start_observation(
         self,

@@ -1,10 +1,12 @@
 """Unit tests for processing one claimed AgentRun."""
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import replace
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AbstractContextManager, asynccontextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from types import TracebackType
+from typing import Literal
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -36,6 +38,18 @@ from supportops.modules.agent_runs.domain.transitions import (
     AgentRunTransitionResult,
 )
 from supportops.modules.tickets.domain.models import Ticket
+from supportops.observability.context import (
+    current_observation_context,
+    current_trace_context,
+)
+from supportops.observability.models import (
+    EventObservation,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    TraceAttributes,
+)
 
 _NOW = datetime(
     2026,
@@ -820,3 +834,641 @@ def test_processor_requires_positive_timeout(
             ),
             execution_timeout_seconds=execution_timeout_seconds,
         )
+
+
+@dataclass
+class RecordingObservationScope:
+    attributes: ObservationAttributes
+    updates: list[ObservationUpdate] = field(default_factory=list)
+    events: list[EventObservation] = field(default_factory=list)
+    closed: bool = False
+    children: list["RecordingObservationScope"] = field(default_factory=list)
+
+    @property
+    def observation_id(self) -> str | None:
+        return "observation-1"
+
+    def update(self, update: ObservationUpdate) -> None:
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager["RecordingObservationScope"]:
+        child = RecordingObservationScope(attributes=attributes)
+        self.children.append(child)
+        return _RecordingObservationManager(child)
+
+    def record_event(self, event: EventObservation) -> None:
+        self.events.append(event)
+
+
+@dataclass
+class RecordingTraceScope:
+    attributes: TraceAttributes
+    updates: list[ObservationUpdate] = field(default_factory=list)
+    events: list[EventObservation] = field(default_factory=list)
+    observations: list[RecordingObservationScope] = field(default_factory=list)
+    closed: bool = False
+
+    @property
+    def trace_seed(self) -> str:
+        return self.attributes.trace_seed
+
+    @property
+    def trace_id(self) -> str | None:
+        return None
+
+    @property
+    def session_id(self) -> str | None:
+        return self.attributes.session_id
+
+    def update(self, update: ObservationUpdate) -> None:
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        observation = RecordingObservationScope(attributes=attributes)
+        self.observations.append(observation)
+        return _RecordingObservationManager(observation)
+
+    def record_event(self, event: EventObservation) -> None:
+        self.events.append(event)
+
+
+class _RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    def __init__(self, scope: RecordingObservationScope) -> None:
+        self._scope = scope
+
+    def __enter__(self) -> RecordingObservationScope:
+        return self._scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, exc, traceback
+        self._scope.closed = True
+        return False
+
+
+class RecordingObservabilityClient:
+    """Capture AgentRun telemetry without exporting to a provider."""
+
+    def __init__(
+        self,
+        *,
+        fail_start_trace: bool = False,
+        fail_start_observation: bool = False,
+        fail_update: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self.provider = type("Provider", (), {"value": "recording"})()
+        self.enabled = True
+        self.traces: list[RecordingTraceScope] = []
+        self.flush_calls = 0
+        self.shutdown_calls = 0
+        self.fail_start_trace = fail_start_trace
+        self.fail_start_observation = fail_start_observation
+        self.fail_update = fail_update
+        self.fail_exit = fail_exit
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[RecordingTraceScope]:
+        if self.fail_start_trace:
+            raise RuntimeError("trace start failed")
+
+        trace = RecordingTraceScope(attributes=attributes)
+        self.traces.append(trace)
+
+        client = self
+
+        class Manager(AbstractContextManager[RecordingTraceScope]):
+            def __enter__(self) -> RecordingTraceScope:
+                return trace
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> Literal[False]:
+                del exc_type, exc, traceback
+                if client.fail_exit:
+                    raise RuntimeError("trace exit failed")
+                trace.closed = True
+                return False
+
+        return Manager()
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        del attributes
+        raise AssertionError("processor must start observations under the AgentRun trace")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+
+    def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
+        del identity, event
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class ContextTrackingObservabilityClient(RecordingObservabilityClient):
+    """Recording client that also installs ContextVars like production adapters."""
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[RecordingTraceScope]:
+        from supportops.observability.context import (
+            ActiveObservationContext,
+            ActiveTraceContext,
+            observation_context_scope,
+            trace_context_scope,
+        )
+
+        if self.fail_start_trace:
+            raise RuntimeError("trace start failed")
+
+        trace = RecordingTraceScope(attributes=attributes)
+        self.traces.append(trace)
+        client = self
+
+        class TraceManager(AbstractContextManager[RecordingTraceScope]):
+            def __init__(self) -> None:
+                self._trace_context = trace_context_scope(
+                    ActiveTraceContext(
+                        trace_seed=attributes.trace_seed,
+                        session_id=attributes.session_id,
+                    )
+                )
+                self._observation_manager: (
+                    AbstractContextManager[RecordingObservationScope] | None
+                ) = None
+
+            def __enter__(self) -> RecordingTraceScope:
+                self._trace_context.__enter__()
+
+                original_start = trace.start_observation
+
+                def start_observation(
+                    observation_attributes: ObservationAttributes,
+                ) -> AbstractContextManager[RecordingObservationScope]:
+                    if client.fail_start_observation:
+                        raise RuntimeError("observation start failed")
+
+                    observation = RecordingObservationScope(
+                        attributes=observation_attributes,
+                    )
+                    trace.observations.append(observation)
+
+                    class ObservationManager(
+                        AbstractContextManager[RecordingObservationScope],
+                    ):
+                        def __init__(self) -> None:
+                            self._observation_context = observation_context_scope(
+                                ActiveObservationContext(
+                                    name=observation_attributes.name,
+                                    observation_id=observation.observation_id,
+                                )
+                            )
+
+                        def __enter__(self) -> RecordingObservationScope:
+                            self._observation_context.__enter__()
+
+                            original_update = observation.update
+
+                            def update(update: ObservationUpdate) -> None:
+                                if client.fail_update:
+                                    raise RuntimeError("observation update failed")
+                                original_update(update)
+
+                            observation.update = update  # type: ignore[method-assign]
+                            return observation
+
+                        def __exit__(
+                            self,
+                            exc_type: type[BaseException] | None,
+                            exc: BaseException | None,
+                            traceback: TracebackType | None,
+                        ) -> Literal[False]:
+                            self._observation_context.__exit__(
+                                exc_type,
+                                exc,
+                                traceback,
+                            )
+                            if client.fail_exit:
+                                raise RuntimeError("observation exit failed")
+                            observation.closed = True
+                            return False
+
+                    return ObservationManager()
+
+                trace.start_observation = start_observation  # type: ignore[assignment]
+
+                original_update = trace.update
+
+                def update(update: ObservationUpdate) -> None:
+                    if client.fail_update:
+                        raise RuntimeError("trace update failed")
+                    original_update(update)
+
+                trace.update = update  # type: ignore[method-assign]
+                del original_start
+                return trace
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> Literal[False]:
+                self._trace_context.__exit__(exc_type, exc, traceback)
+                if client.fail_exit:
+                    raise RuntimeError("trace exit failed")
+                trace.closed = True
+                return False
+
+        return TraceManager()
+
+
+def _create_traced_processor(
+    *,
+    executor: object,
+    observability_client: RecordingObservabilityClient,
+    transition_result: AgentRunTransitionResult = AgentRunTransitionResult.APPLIED,
+    ticket: Ticket | None = None,
+    missing_ticket: bool = False,
+    execution_timeout_seconds: float = 30.0,
+) -> tuple[
+    ProcessClaimedAgentRun,
+    AsyncMock,
+    RecordingTransactionManager,
+]:
+    ticket_repository = AsyncMock()
+    if missing_ticket:
+        ticket_repository.get.return_value = None
+    elif ticket is None:
+        ticket_repository.get.return_value = create_ticket()
+    else:
+        ticket_repository.get.return_value = ticket
+
+    agent_run_repository = AsyncMock()
+    agent_run_repository.mark_succeeded.return_value = transition_result
+    agent_run_repository.mark_waiting_for_approval.return_value = transition_result
+    agent_run_repository.record_failure.return_value = transition_result
+    transaction_manager = RecordingTransactionManager()
+
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=executor,  # type: ignore[arg-type]
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=execution_timeout_seconds,
+        utc_now=lambda: _FINISHED_AT,
+        observability_client=observability_client,
+    )
+    return processor, agent_run_repository, transaction_manager
+
+
+def _assert_safe_attempt_metadata(metadata: Mapping[str, object]) -> None:
+    assert "lease_token" not in metadata
+    assert "execution_grant" not in metadata
+    assert "ticket_subject" not in metadata
+    assert "ticket_description" not in metadata
+    assert "Unable to access billing" not in str(metadata)
+    assert "password" not in str(metadata).lower()
+
+
+async def test_claimed_attempt_creates_one_agent_run_trace_and_worker_attempt() -> None:
+    observability = ContextTrackingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(transaction_manager=transaction_manager)
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+    )
+    claim = create_claim()
+
+    result = await processor.execute(claim)
+
+    assert result is AgentRunTransitionResult.APPLIED
+    assert len(observability.traces) == 1
+    trace = observability.traces[0]
+    assert trace.attributes.trace_seed == f"agent-run:{_RUN_ID}"
+    assert trace.attributes.session_id == f"ticket:{_TICKET_ID}"
+    assert trace.attributes.name == "agent-run"
+    assert trace.attributes.tags == ("supportops", "agent-run")
+    assert len(trace.observations) == 1
+
+    attempt = trace.observations[0]
+    assert attempt.attributes.name == "worker-attempt"
+    assert attempt.attributes.observation_type is ObservationType.SPAN
+    assert attempt.attributes.input_paths == frozenset()
+    assert attempt.attributes.output_paths == frozenset()
+
+    metadata = dict(attempt.attributes.metadata)
+    assert metadata["agent_run_id"] == str(_RUN_ID)
+    assert metadata["agent_run_attempt_id"] == str(claim.attempt.id)
+    assert metadata["attempt_number"] == 1
+    assert metadata["execution_request_id"] == str(claim.attempt.execution_request_id)
+    assert metadata["workspace_id"] == str(_WORKSPACE_ID)
+    assert metadata["ticket_id"] == str(_TICKET_ID)
+    assert metadata["workflow_name"] == claim.agent_run.workflow_name
+    assert metadata["workflow_version"] == claim.agent_run.workflow_version
+    assert metadata["trigger_key"] == claim.agent_run.trigger_key
+    assert metadata["correlation_id"] == str(claim.agent_run.correlation_id)
+    assert metadata["worker_id"] == "worker-a"
+    _assert_safe_attempt_metadata(metadata)
+    _assert_safe_attempt_metadata(dict(trace.attributes.metadata))
+
+    assert attempt.updates[-1].status is ObservationStatus.OK
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "succeeded"
+    assert trace.updates[-1].status is ObservationStatus.OK
+    assert trace.updates[-1].metadata["agent_run_status"] == "succeeded"
+    assert attempt.closed is True
+    assert trace.closed is True
+    assert current_trace_context() is None
+    assert current_observation_context() is None
+    assert observability.flush_calls == 0
+
+
+async def test_retryable_failure_updates_attempt_and_trace_as_error() -> None:
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(
+        transaction_manager=transaction_manager,
+        error=RetryableAgentRunExecutionError(
+            error_code="provider_unavailable",
+            error_summary="The processing provider is temporarily unavailable.",
+        ),
+    )
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim())
+
+    trace = observability.traces[0]
+    attempt = trace.observations[0]
+    assert attempt.updates[-1].status is ObservationStatus.ERROR
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "retryable_failure"
+    assert attempt.updates[-1].error_code == "provider_unavailable"
+    assert trace.updates[-1].status is ObservationStatus.ERROR
+    assert trace.updates[-1].metadata["agent_run_status"] == "retry_scheduled"
+    assert trace.updates[-1].metadata["latest_attempt_outcome"] == "retryable_failure"
+
+
+async def test_terminal_failure_updates_attempt_and_trace_as_error() -> None:
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(
+        transaction_manager=transaction_manager,
+        error=TerminalAgentRunExecutionError(
+            error_code="unsupported_workflow",
+            error_summary="The AgentRun workflow is not supported by the executor.",
+        ),
+    )
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim())
+
+    trace = observability.traces[0]
+    attempt = trace.observations[0]
+    assert attempt.updates[-1].status is ObservationStatus.ERROR
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "terminal_failure"
+    assert attempt.updates[-1].error_code == "unsupported_workflow"
+    assert trace.updates[-1].status is ObservationStatus.ERROR
+    assert trace.updates[-1].metadata["agent_run_status"] == "failed"
+
+
+async def test_timeout_maps_to_timed_out_outcome() -> None:
+    observability = RecordingObservabilityClient()
+    processor, _, _ = _create_traced_processor(
+        executor=BlockingExecutor(),
+        observability_client=observability,
+        execution_timeout_seconds=0.001,
+    )
+
+    await processor.execute(create_claim())
+
+    attempt = observability.traces[0].observations[0]
+    trace = observability.traces[0]
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "timed_out"
+    assert attempt.updates[-1].error_code == "executor_timeout"
+    assert attempt.updates[-1].status is ObservationStatus.ERROR
+    assert trace.updates[-1].metadata["agent_run_status"] == "retry_scheduled"
+    assert trace.updates[-1].metadata["latest_attempt_outcome"] == "timed_out"
+
+
+async def test_pause_maps_to_ok_awaiting_approval() -> None:
+    observability = RecordingObservabilityClient()
+    executor = PausingExecutor(
+        approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        graph_thread_id="controlled-support:thread",
+    )
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim())
+
+    attempt = observability.traces[0].observations[0]
+    trace = observability.traces[0]
+    assert attempt.updates[-1].status is ObservationStatus.OK
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "awaiting_approval"
+    assert trace.updates[-1].status is ObservationStatus.OK
+    assert trace.updates[-1].metadata["agent_run_status"] == "waiting_for_approval"
+
+
+async def test_lease_lost_finalization_maps_to_error_without_model_status() -> None:
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    executor = RecordingExecutor(transaction_manager=transaction_manager)
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+        transition_result=AgentRunTransitionResult.LEASE_LOST,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+    attempt = observability.traces[0].observations[0]
+    trace = observability.traces[0]
+    assert attempt.updates[-1].status is ObservationStatus.ERROR
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "lease_lost"
+    assert attempt.updates[-1].error_code == "lease_lost"
+    assert trace.updates[-1].status is ObservationStatus.ERROR
+    assert trace.updates[-1].metadata["latest_attempt_outcome"] == "lease_lost"
+    assert "agent_run_status" not in trace.updates[-1].metadata
+    assert "lease_lost" not in {status.value for status in AgentRunStatus}
+    assert "lease_lost" not in {outcome.value for outcome in AgentRunAttemptOutcome}
+
+
+async def test_retry_and_resume_reuse_same_agent_run_trace_seed() -> None:
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    processor, _, _ = _create_traced_processor(
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim(attempt_count=1))
+    await processor.execute(create_claim(attempt_count=2))
+
+    assert len(observability.traces) == 2
+    assert observability.traces[0].attributes.trace_seed == f"agent-run:{_RUN_ID}"
+    assert observability.traces[1].attributes.trace_seed == f"agent-run:{_RUN_ID}"
+
+
+async def test_different_agent_runs_use_different_trace_seeds() -> None:
+    observability = RecordingObservabilityClient()
+    transaction_manager = RecordingTransactionManager()
+    processor, _, _ = _create_traced_processor(
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        observability_client=observability,
+    )
+    other_run_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-111111111111")
+
+    claim = create_claim()
+    other_claim = create_claim()
+    other_claim = AgentRunClaim(
+        agent_run=replace(other_claim.agent_run, id=other_run_id),
+        attempt=replace(other_claim.attempt, agent_run_id=other_run_id),
+    )
+
+    await processor.execute(claim)
+    await processor.execute(other_claim)
+
+    assert observability.traces[0].attributes.trace_seed == f"agent-run:{_RUN_ID}"
+    assert observability.traces[1].attributes.trace_seed == f"agent-run:{other_run_id}"
+
+
+async def test_telemetry_failures_preserve_business_result() -> None:
+    observability = ContextTrackingObservabilityClient(
+        fail_start_trace=True,
+    )
+    transaction_manager = RecordingTransactionManager()
+    processor, agent_run_repository, _ = _create_traced_processor(
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        observability_client=observability,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.APPLIED
+    agent_run_repository.mark_succeeded.assert_awaited_once()
+    assert observability.traces == []
+
+
+async def test_observation_update_failure_preserves_business_result() -> None:
+    observability = ContextTrackingObservabilityClient(fail_update=True)
+    transaction_manager = RecordingTransactionManager()
+    processor, agent_run_repository, _ = _create_traced_processor(
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        observability_client=observability,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.APPLIED
+    agent_run_repository.mark_succeeded.assert_awaited_once()
+    assert observability.traces[0].closed is True
+
+
+async def test_unknown_execution_result_preserves_exception_identity() -> None:
+    observability = ContextTrackingObservabilityClient()
+    processor, _, _ = _create_traced_processor(
+        executor=UnknownResultExecutor(),
+        observability_client=observability,
+    )
+
+    with pytest.raises(RuntimeError, match="unsupported execution result") as raised:
+        await processor.execute(create_claim())
+
+    assert type(raised.value) is RuntimeError
+    assert current_trace_context() is None
+    assert current_observation_context() is None
+    assert observability.traces[0].closed is True
+    assert observability.traces[0].observations[0].closed is True
+
+
+async def test_trace_closes_after_authoritative_persistence() -> None:
+    transaction_manager = RecordingTransactionManager()
+    persistence_order: list[str] = []
+
+    agent_run_repository = AsyncMock()
+
+    async def mark_succeeded(command: object) -> AgentRunTransitionResult:
+        del command
+        persistence_order.append("persist")
+        return AgentRunTransitionResult.APPLIED
+
+    agent_run_repository.mark_succeeded.side_effect = mark_succeeded
+    ticket_repository = AsyncMock()
+    ticket_repository.get.return_value = create_ticket()
+
+    class OrderedClient(RecordingObservabilityClient):
+        def start_trace(
+            self,
+            attributes: TraceAttributes,
+        ) -> AbstractContextManager[RecordingTraceScope]:
+            manager = super().start_trace(attributes)
+            trace = self.traces[-1]
+            original_update = trace.update
+
+            def update(update: ObservationUpdate) -> None:
+                persistence_order.append("telemetry_update")
+                original_update(update)
+
+            trace.update = update  # type: ignore[method-assign]
+            return manager
+
+    client = OrderedClient()
+    processor = ProcessClaimedAgentRun(
+        ticket_repository=ticket_repository,
+        agent_run_repository=agent_run_repository,
+        transaction_manager=transaction_manager,
+        executor=RecordingExecutor(transaction_manager=transaction_manager),
+        retry_policy=AgentRunRetryPolicy(
+            base_delay_seconds=2.0,
+            maximum_delay_seconds=60.0,
+        ),
+        execution_timeout_seconds=30.0,
+        utc_now=lambda: _FINISHED_AT,
+        observability_client=client,
+    )
+
+    await processor.execute(create_claim())
+
+    assert persistence_order[0] == "persist"
+    assert "telemetry_update" in persistence_order
+    assert persistence_order.index("persist") < persistence_order.index(
+        "telemetry_update",
+    )
+    assert client.traces[0].closed is True
+    assert client.traces[0].observations[0].closed is True

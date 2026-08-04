@@ -176,6 +176,7 @@ async def run_worker(
         lease_seconds=resolved_settings.worker_lease_seconds,
         execution_timeout_seconds=(resolved_settings.worker_execution_timeout_seconds),
         approval_expiration_batch_size=(resolved_settings.approval_expiration_batch_size),
+        observability_client=observability_client,
     )
     worker_loop = RunAgentWorkerLoop(
         cycle=cycle_runner,
