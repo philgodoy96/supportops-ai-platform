@@ -6,7 +6,7 @@ The platform is designed as a portfolio-grade engineering system rather than a t
 
 ## Project status
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, controlled support inspection, and the optional application-owned AI observability foundation with default no-op mode and optional Langfuse adapter are implemented.
+The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, controlled support inspection, human-approved interrupt and resume with approval and escalation APIs, and the optional application-owned AI observability foundation with default no-op mode, optional Langfuse adapter, provider and retrieval instrumentation, and durable workflow tracing are implemented.
 
 The current platform includes:
 
@@ -120,13 +120,20 @@ The current platform includes:
 - process-scoped API embedding provider and immutable retrieval profile lifecycle;
 - application-owned AI observability abstraction with default no-op mode;
 - optional Langfuse adapter behind the application-owned boundary;
-- deterministic AgentRun and ticket trace-identity foundation;
+- deterministic AgentRun logical traces re-entered across attempts, retries, pause, decision, and resume;
+- one `worker-attempt` observation per AgentRunAttempt;
+- controlled-support and human-approved workflow observations;
+- graph-node observations for LangGraph stages;
 - LLM provider request observations at the application-owned gateway boundary;
 - separate initial and repair generation observations;
 - tool-decision provider observations for controlled and human-approved flows;
 - embedding provider observations through an application-owned wrapper;
 - semantic retrieval observations with nested query-embedding observations;
 - deterministic knowledge-indexing traces with nested stage and embedding observations;
+- actual tool-execution observations;
+- approval lifecycle events without open spans during human waiting;
+- escalation and recommendation outcome events;
+- opt-in attempt-end flush after finalized AgentRun attempts;
 - privacy-aware metadata-only default capture with redacted-content opt-in;
 - fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
 
@@ -134,7 +141,7 @@ Workspace scoping is a data ownership boundary. It is not authentication or auth
 
 Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `controlled-support-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status. The controlled workflow may execute read-only tools and persist a support recommendation without mutating the ticket or executing write-capable actions. The deterministic baseline and direct classification workflows remain registered for historical or explicitly scheduled runs.
 
-Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant. Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request. PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records.
+Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant. Slice 7 observability is implemented end to end for provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation telemetry. PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry for operational debugging and later evaluation workflows.
 
 ## Engineering goals
 
@@ -354,14 +361,18 @@ Retrieval architecture is documented in [`docs/architecture/semantic-knowledge-r
 
 ### Optional application-owned AI observability
 
-Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request.
+Slice 7 includes application-owned Langfuse integration with optional no-op mode, provider and retrieval instrumentation, and durable workflow observability. Langfuse is not required for application correctness.
 
 Implemented behavior includes:
 
 - provider-independent observability contracts for traces, observations, events, usage, and cost;
 - default no-op adapter with no credentials and no network access;
 - optional Langfuse adapter enabled only through validated configuration;
-- deterministic AgentRun and ticket trace-identity foundation;
+- one deterministic logical trace per AgentRun, seeded as `agent-run:{agent_run_id}` and re-entered across attempts, retries, pause, decision, and resume;
+- one `worker-attempt` observation per AgentRunAttempt inside that logical trace;
+- controlled-support workflow observation `workflow.controlled-support-v1`;
+- human-approved workflow observation `workflow.human-approved-support-v1`;
+- graph-node observations for LangGraph stages;
 - one generation observation per real `LLMGateway` provider request at the application-owned gateway boundary;
 - separate initial and repair generation observations;
 - tool-decision generation observations for controlled and human-approved flows without exporting tool content;
@@ -371,13 +382,34 @@ Implemented behavior includes:
 - nested query-embedding observations under retrieval;
 - one deterministic knowledge-indexing root trace per indexing command execution;
 - nested indexing stage observations and nested embedding observations under indexing traces;
+- actual tool-execution observations named `tool.execute`;
+- approval lifecycle events without keeping an observation open during human waiting;
+- escalation outcome event `ticket.escalated`;
+- recommendation lifecycle events `recommendation.generated`, `recommendation.persisted`, and `recommendation.failed`;
+- opt-in attempt-end flush after each finalized AgentRun attempt when `SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END=true`;
 - privacy-aware metadata-only default capture with redacted-content opt-in;
 - no unrestricted raw-content capture mode;
 - fail-open client lifecycle for the API, worker, and indexing CLI;
 - process-owned observability client sharing across API, worker, retrieval, embedding, and indexing;
 - privacy enforcement before data reaches the Langfuse SDK.
 
-PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records. Query-embedding usage and cost remain ephemeral observability data and are not durably persisted. Langfuse is a derived observability projection and is not a readiness dependency.
+Representative durable-workflow trace shape:
+
+```text
+agent-run
+└── worker-attempt
+    └── workflow.<workflow-version>
+        └── graph-node.<node-name>
+            ├── llm.generate
+            ├── llm.tool_decision
+            ├── tool.execute
+            └── knowledge.search
+                └── embedding.request
+```
+
+Approval waiting is represented through discrete events such as `approval.requested`, `workflow.paused`, `approval.approved`, `approval.rejected`, `approval.expired`, `workflow.resume_scheduled`, and `workflow.resumed`. No observation remains open while a human decision is pending.
+
+PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state, including AgentRun, attempts, approvals, tool calls, escalations, recommendations, LLM usage, estimated cost, and audit records. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry and cannot reconstruct authoritative business state. Query-embedding usage and cost remain ephemeral observability data and are not durably persisted. Observability failures do not change provider results, workflow results, persistence, retries, approval transitions, idempotency, HTTP behavior, worker outcomes, or process exit behavior. Telemetry delivery is best-effort: deterministic trace identity provides correlation, while retries and process failures may produce incomplete or repeated telemetry. Langfuse is not an exactly-once ledger and is not a readiness dependency.
 
 The optional Langfuse decision is recorded in [`docs/decisions/0013-use-optional-application-owned-langfuse-observability.md`](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md).
 
@@ -581,6 +613,8 @@ The repository includes:
 - knowledge-retrieval integration coverage against real PostgreSQL and Qdrant with mock embeddings;
 - AI observability settings, models, identity, privacy, no-op adapter, and Langfuse fake-client coverage;
 - gateway, embedding, retrieval, and indexing observability instrumentation coverage;
+- AgentRun trace, worker-attempt, workflow, graph-node, tool, approval, escalation, and recommendation observability coverage;
+- attempt-end flush, privacy, fail-open, ContextVar isolation, and process-client ownership coverage;
 - API, worker, and indexing observability lifecycle coverage;
 - settings validation tests;
 - lifecycle tests;
@@ -607,9 +641,8 @@ Future modules or extensions will introduce:
 - prompt regression comparison across versions;
 - scheduled evaluation and evaluation history persistence;
 - multi-profile score fusion;
-- write-capable tools;
-- approval workflows;
-- AgentRun, workflow, tool, approval, escalation, and recommendation tracing beyond the current provider, embedding, retrieval, and indexing observability.
+- Langfuse evaluation workflows, RAGAS, and production feedback ingestion;
+- evaluation dashboards and quality gates.
 
 Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
 
@@ -969,7 +1002,7 @@ SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END
 SUPPORTOPS_LANGFUSE_TIMEOUT_SECONDS
 ```
 
-The local default observability provider is `noop`. Langfuse credentials are required only when `langfuse` is selected. Default capture mode is `metadata_only`. Langfuse is not a readiness dependency.
+The local default observability provider is `noop`. Langfuse credentials are required only when `langfuse` is selected. Default capture mode is `metadata_only`. Attempt-end flush defaults to `false` and uses normal SDK batching unless explicitly enabled. Langfuse is not a readiness dependency.
 
 The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
 
@@ -1253,12 +1286,12 @@ Implemented:
 - registered read-only tools `search_knowledge` and `lookup_service_status`;
 - durable tool-call audits and recommendation persistence;
 - controlled support inspection over business records;
+- human-approved interrupt, approval decision, grant-gated escalation, and resume;
 - AgentRun outer durability with LangGraph inner orchestration.
 
 Planned:
 
-- write-capable tools;
-- approval boundaries;
+- write-capable tools beyond the current grant-gated escalation path;
 - failure recovery beyond the current post-commit/pre-checkpoint and checkpoint resume model for write-side effects.
 
 ### Observability and evaluation
@@ -1275,35 +1308,38 @@ Implemented:
 - application-owned AI observability abstraction;
 - default no-op observability mode;
 - optional Langfuse adapter;
-- deterministic AgentRun and ticket trace-identity foundation;
+- deterministic AgentRun logical traces;
+- worker-attempt observations;
+- controlled-support and human-approved workflow observations;
+- graph-node observations;
 - LLM provider request observations with separate initial and repair generations;
 - tool-decision provider observations;
 - embedding provider observations;
 - semantic retrieval observations with nested query-embedding observations;
 - knowledge-indexing traces with nested stage and embedding observations;
+- actual tool-execution observations;
+- approval lifecycle events;
+- escalation outcome events;
+- recommendation lifecycle events;
+- opt-in attempt-end flush policy;
 - privacy-aware metadata-only export with redacted-content opt-in;
 - fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
 
-Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request.
+Slice 7 observability is complete for the application-owned foundation, provider and retrieval instrumentation, and durable workflow telemetry. Slice 8 intentionally owns evaluation workflows and quality iteration.
 
 Planned:
 
 - operational cost reporting and invoice reconciliation;
-- AgentRun root traces;
-- worker-attempt observations;
-- graph-node observations;
-- tool execution observations;
-- approval lifecycle events;
-- escalation observations;
-- recommendation workflow observations;
-- attempt-end flush behavior;
 - opt-in live Langfuse smoke validation;
+- Langfuse evaluation workflows;
 - evidence-driven prompt version 2;
 - prompt regression comparison across versions;
 - scheduled evaluation;
 - evaluation history persistence;
 - retrieval evaluation;
 - generation evaluation beyond structured classification;
+- production feedback ingestion;
+- evaluation dashboards and quality gates;
 - RAGAS.
 
 ## Intentionally deferred capabilities
@@ -1330,12 +1366,13 @@ The following capabilities remain deferred to preserve architectural focus and a
 - automatic version activation;
 - reranking;
 - multi-profile score fusion;
-- write-capable tools;
-- human approval workflows;
-- AgentRun, workflow, tool, approval, escalation, and recommendation tracing beyond the current provider, embedding, retrieval, and indexing observability;
+- write-capable tools beyond the current grant-gated escalation path;
 - opt-in live Langfuse smoke validation;
 - Phoenix integration;
+- Langfuse evaluation workflows;
 - RAGAS evaluation;
+- production feedback ingestion;
+- evaluation dashboards and quality gates;
 - prompt regression comparison across versions;
 - retrieval and generation evaluation beyond structured classification;
 - OpenTelemetry;
@@ -1349,7 +1386,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, and indexing instrumentation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, reranking, retrieval evaluation, and AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain intentionally separated into later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, human-approved workflow with approval and escalation APIs, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation instrumentation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, Langfuse evaluation workflows, reranking, and retrieval evaluation remain intentionally separated into Slice 8 and later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 
