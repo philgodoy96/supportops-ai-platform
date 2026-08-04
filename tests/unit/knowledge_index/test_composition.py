@@ -1,6 +1,7 @@
 """Unit tests for knowledge indexing runtime composition."""
 
-from typing import Any, cast
+from typing import Any, Literal, cast
+from uuid import UUID
 
 import pytest
 from qdrant_client import AsyncQdrantClient
@@ -525,6 +526,79 @@ async def test_create_runtime_composes_one_observability_client(
         await runtime.close()
 
     assert observability_client.shutdown_calls == 1
+
+
+async def test_index_version_passes_same_observability_client_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = create_settings()
+    observability_client = FakeObservabilityClient()
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> Literal[False]:
+            del args
+            return False
+
+    class FakeSessionFactory:
+        def __call__(self) -> FakeSession:
+            return FakeSession()
+
+    class FakeService:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def execute(self, **kwargs: object) -> object:
+            del kwargs
+            return object()
+
+    monkeypatch.setattr(
+        composition,
+        "SqlAlchemyDocumentVersionRepository",
+        lambda session: object(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "SqlAlchemyDocumentChunkRepository",
+        lambda session: object(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "SqlAlchemyTransactionManager",
+        lambda session: object(),
+    )
+    monkeypatch.setattr(
+        composition,
+        "IndexDocumentVersion",
+        FakeService,
+    )
+
+    runtime = KnowledgeIndexRuntime(
+        settings=settings,
+        engine=cast(AsyncEngine, FakeEngine()),
+        session_factory=cast(
+            async_sessionmaker[AsyncSession],
+            FakeSessionFactory(),
+        ),
+        qdrant_client=cast(AsyncQdrantClient, FakeQdrantClient()),
+        embedding_provider=cast(EmbeddingProvider, FakeProvider()),
+        index_profile=build_knowledge_index_profile(settings),
+        chunker=cast(MarkdownTokenChunker, object()),
+        vector_store=cast(QdrantKnowledgeVectorStore, object()),
+        observability_client=cast(Any, observability_client),
+    )
+
+    await runtime.index_version(
+        workspace_id=UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4"),
+        document_id=UUID("276046a2-28ec-4cb1-8bb6-a2ff70f9064b"),
+        document_version_id=UUID("09036916-84cf-4a58-bdf4-09bc52716ec5"),
+    )
+
+    assert captured["observability_client"] is cast(Any, observability_client)
+    assert captured["embedding_provider"] is runtime.embedding_provider
 
 
 def test_create_embedding_provider_uses_supplied_observability_client() -> None:

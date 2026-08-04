@@ -1,9 +1,11 @@
 """Unit tests for explicit document-version indexing."""
 
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import TracebackType
+from typing import Literal, cast
 from uuid import UUID
 
 import pytest
@@ -16,6 +18,9 @@ from supportops.ai.embeddings.contracts import (
 from supportops.ai.embeddings.errors import (
     EmbeddingInvalidResponseError,
     EmbeddingTimeoutError,
+)
+from supportops.ai.embeddings.observability import (
+    ObservingEmbeddingProvider,
 )
 from supportops.ai.embeddings.pricing import (
     DEFAULT_EMBEDDING_PRICING_CATALOG,
@@ -49,6 +54,16 @@ from supportops.modules.knowledge_documents.domain.models import (
 from supportops.modules.knowledge_documents.domain.repositories import (
     DocumentChunkConflictError,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    TraceAttributes,
+)
 
 _WORKSPACE_ID = UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4")
 _DOCUMENT_ID = UUID("276046a2-28ec-4cb1-8bb6-a2ff70f9064b")
@@ -60,6 +75,16 @@ _CREATED_AT = datetime(
     1,
     0,
     tzinfo=UTC,
+)
+
+_FORBIDDEN_METADATA_TOKENS = (
+    "authoritative chunk",
+    "restart the connection",
+    "chunk_content",
+    "chunk_preview",
+    "embedding_vector",
+    "lease_token",
+    "execution_grant",
 )
 
 
@@ -426,6 +451,8 @@ def create_ready_version() -> DocumentVersion:
 def create_service(
     *,
     version: DocumentVersion | None = None,
+    observability_client: "RecordingObservabilityClient | None" = None,
+    embedding_provider: FakeEmbeddingProvider | None = None,
 ) -> tuple[
     IndexDocumentVersion,
     FakeVersionRepository,
@@ -438,7 +465,7 @@ def create_service(
     version_repository = FakeVersionRepository(version or create_pending_version())
     chunk_repository = FakeChunkRepository()
     chunker = FakeChunker()
-    embedding_provider = FakeEmbeddingProvider()
+    resolved_embedding_provider = embedding_provider or FakeEmbeddingProvider()
     vector_store = FakeVectorStore()
     transaction_manager = FakeTransactionManager()
 
@@ -447,13 +474,17 @@ def create_service(
         chunk_repository=chunk_repository,
         transaction_manager=transaction_manager,
         chunker=chunker,
-        embedding_provider=embedding_provider,
+        embedding_provider=resolved_embedding_provider,
         vector_store=vector_store,
         pricing_catalog=(DEFAULT_EMBEDDING_PRICING_CATALOG),
         index_profile=create_profile(),
         embedding_timeout_seconds=12,
         embedding_batch_size=2,
         clock=AdvancingClock(),
+        observability_client=cast(
+            ObservabilityClient | None,
+            observability_client,
+        ),
     )
 
     return (
@@ -461,7 +492,7 @@ def create_service(
         version_repository,
         chunk_repository,
         chunker,
-        embedding_provider,
+        resolved_embedding_provider,
         vector_store,
         transaction_manager,
     )
@@ -706,3 +737,390 @@ def test_service_rejects_invalid_runtime_limits(
             embedding_timeout_seconds=(embedding_timeout_seconds),
             embedding_batch_size=embedding_batch_size,
         )
+
+
+class RecordingObservationScope:
+    def __init__(self, *, fail_update: bool = False) -> None:
+        self.fail_update = fail_update
+        self.updates: list[ObservationUpdate] = []
+        self.observation_id = "observation-test"
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self.fail_update:
+            raise RuntimeError("synthetic observation update failure")
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[object]:
+        del attributes
+        raise AssertionError("Nested observation starts are not expected.")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Indexing stages must not emit events.")
+
+
+class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    def __init__(
+        self,
+        *,
+        scope: RecordingObservationScope,
+        fail_enter: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self.scope = scope
+        self.fail_enter = fail_enter
+        self.fail_exit = fail_exit
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> RecordingObservationScope:
+        if self.fail_enter:
+            raise RuntimeError("synthetic observation enter failure")
+        self.entered = True
+        return self.scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, exc, traceback
+        if self.fail_exit:
+            raise RuntimeError("synthetic observation exit failure")
+        self.exited = True
+        return False
+
+
+class RecordingObservabilityClient:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_enter: bool = False,
+        fail_update: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self._fail_start = fail_start
+        self._fail_enter = fail_enter
+        self._fail_update = fail_update
+        self._fail_exit = fail_exit
+        self.attributes: list[ObservationAttributes] = []
+        self.scopes: list[RecordingObservationScope] = []
+        self.managers: list[RecordingObservationManager] = []
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[object]:
+        del attributes
+        raise AssertionError("Indexing stages must not create traces.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        if self._fail_start:
+            raise RuntimeError("synthetic observation start failure")
+
+        scope = RecordingObservationScope(fail_update=self._fail_update)
+        manager = RecordingObservationManager(
+            scope=scope,
+            fail_enter=self._fail_enter,
+            fail_exit=self._fail_exit,
+        )
+        self.attributes.append(attributes)
+        self.scopes.append(scope)
+        self.managers.append(manager)
+        return manager
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Indexing stages must not emit events.")
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _stage_names(
+    observability: RecordingObservabilityClient,
+) -> list[str]:
+    return [attributes.name for attributes in observability.attributes]
+
+
+def _stage_updates(
+    observability: RecordingObservabilityClient,
+    name: str,
+) -> list[ObservationUpdate]:
+    updates: list[ObservationUpdate] = []
+    for attributes, scope in zip(
+        observability.attributes,
+        observability.scopes,
+        strict=True,
+    ):
+        if attributes.name == name:
+            updates.extend(scope.updates)
+    return updates
+
+
+def _assert_metadata_is_content_free(
+    observability: RecordingObservabilityClient,
+) -> None:
+    for attributes, scope in zip(
+        observability.attributes,
+        observability.scopes,
+        strict=True,
+    ):
+        assert attributes.input_data is None
+        payload = {
+            "metadata": dict(attributes.metadata),
+            "updates": [
+                {
+                    "metadata": dict(update.metadata),
+                    "error_code": update.error_code,
+                }
+                for update in scope.updates
+            ],
+        }
+        serialized = str(payload).lower()
+        for token in _FORBIDDEN_METADATA_TOKENS:
+            assert token not in serialized
+
+
+async def test_successful_indexing_records_stage_observations() -> None:
+    observability = RecordingObservabilityClient()
+    (
+        service,
+        _,
+        _,
+        _,
+        embedding_provider,
+        _,
+        _,
+    ) = create_service(observability_client=observability)
+
+    result = await execute(service)
+
+    assert result.version.status is DocumentVersionStatus.READY
+    assert _stage_names(observability) == [
+        "knowledge-index.load-document-version",
+        "knowledge-index.chunk-document",
+        "knowledge-index.upsert-vectors",
+        "knowledge-index.verify-index",
+        "knowledge-index.persist-outcome",
+    ]
+    assert all(
+        attributes.observation_type is ObservationType.SPAN
+        for attributes in observability.attributes
+    )
+    assert all(manager.exited for manager in observability.managers)
+
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.load-document-version",
+        )[-1].status
+        is ObservationStatus.OK
+    )
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.chunk-document",
+        )[-1].metadata["chunk_count"]
+        == 3
+    )
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.upsert-vectors",
+        )[-1].metadata["vector_count"]
+        == 3
+    )
+    verify_update = _stage_updates(
+        observability,
+        "knowledge-index.verify-index",
+    )[-1]
+    assert verify_update.metadata["expected_vector_count"] == 3
+    assert verify_update.metadata["verified_vector_count"] == 3
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.persist-outcome",
+        )[-1].metadata["persisted_status"]
+        == "ready"
+    )
+    assert len(embedding_provider.requests) == 2
+    assert "embedding.request" not in _stage_names(observability)
+    _assert_metadata_is_content_free(observability)
+
+
+async def test_embedding_calls_remain_unchanged_with_observing_provider() -> None:
+    observability = RecordingObservabilityClient()
+    inner = FakeEmbeddingProvider()
+    observing = ObservingEmbeddingProvider(
+        provider=inner,
+        observability_client=cast(ObservabilityClient, observability),
+    )
+    version_repository = FakeVersionRepository(create_pending_version())
+    chunk_repository = FakeChunkRepository()
+    chunker = FakeChunker()
+    vector_store = FakeVectorStore()
+    transaction_manager = FakeTransactionManager()
+    service = IndexDocumentVersion(
+        version_repository=version_repository,
+        chunk_repository=chunk_repository,
+        transaction_manager=transaction_manager,
+        chunker=chunker,
+        embedding_provider=observing,
+        vector_store=vector_store,
+        pricing_catalog=(DEFAULT_EMBEDDING_PRICING_CATALOG),
+        index_profile=create_profile(),
+        embedding_timeout_seconds=12,
+        embedding_batch_size=2,
+        clock=AdvancingClock(),
+        observability_client=cast(ObservabilityClient, observability),
+    )
+
+    result = await execute(service)
+
+    assert result.version.status is DocumentVersionStatus.READY
+    assert [len(request.inputs) for request in inner.requests] == [2, 1]
+    stage_names = _stage_names(observability)
+    assert stage_names.count("embedding.request") == 2
+    assert "knowledge-index.load-document-version" in stage_names
+    assert ObservationType.EMBEDDING not in {
+        attributes.observation_type
+        for attributes in observability.attributes
+        if attributes.name.startswith("knowledge-index.")
+    }
+    _assert_metadata_is_content_free(observability)
+
+
+async def test_normalized_failure_marks_stage_and_persists_outcome() -> None:
+    observability = RecordingObservabilityClient()
+    (
+        service,
+        version_repository,
+        _,
+        _,
+        embedding_provider,
+        _,
+        _,
+    ) = create_service(observability_client=observability)
+    embedding_provider.error = EmbeddingTimeoutError()
+
+    with pytest.raises(EmbeddingTimeoutError):
+        await execute(service)
+
+    assert version_repository.version is not None
+    assert version_repository.version.status is DocumentVersionStatus.FAILED
+    assert version_repository.version.last_error_code == "embedding_timeout"
+
+    names = _stage_names(observability)
+    assert "knowledge-index.persist-outcome" in names
+    persist_update = _stage_updates(
+        observability,
+        "knowledge-index.persist-outcome",
+    )[-1]
+    assert persist_update.status is ObservationStatus.OK
+    assert persist_update.metadata["persisted_status"] == "failed"
+    assert persist_update.metadata["error_code"] == "embedding_timeout"
+    _assert_metadata_is_content_free(observability)
+
+
+async def test_verification_failure_marks_verify_stage_error() -> None:
+    observability = RecordingObservabilityClient()
+    (
+        service,
+        version_repository,
+        _,
+        _,
+        _,
+        vector_store,
+        _,
+    ) = create_service(observability_client=observability)
+    vector_store.count_override = 2
+
+    with pytest.raises(KnowledgeProjectionCountMismatchError) as raised:
+        await execute(service)
+
+    assert raised.value is not None
+    assert version_repository.version is not None
+    assert version_repository.version.status is DocumentVersionStatus.FAILED
+
+    verify_update = _stage_updates(
+        observability,
+        "knowledge-index.verify-index",
+    )[-1]
+    assert verify_update.status is ObservationStatus.ERROR
+    assert verify_update.error_code == "knowledge_projection_count_mismatch"
+    _assert_metadata_is_content_free(observability)
+
+
+async def test_observability_failures_do_not_alter_persistence_or_result() -> None:
+    observability = RecordingObservabilityClient(
+        fail_start=True,
+        fail_update=True,
+        fail_exit=True,
+    )
+    (
+        service,
+        version_repository,
+        _,
+        _,
+        _,
+        _,
+        _,
+    ) = create_service(observability_client=observability)
+
+    result = await execute(service)
+
+    assert result.version.status is DocumentVersionStatus.READY
+    assert version_repository.version == result.version
+
+
+async def test_ready_version_only_records_load_stage() -> None:
+    observability = RecordingObservabilityClient()
+    (
+        service,
+        _,
+        _,
+        chunker,
+        embedding_provider,
+        vector_store,
+        _,
+    ) = create_service(
+        version=create_ready_version(),
+        observability_client=observability,
+    )
+
+    result = await execute(service)
+
+    assert result.already_ready is True
+    assert _stage_names(observability) == [
+        "knowledge-index.load-document-version",
+    ]
+    assert chunker.calls == 0
+    assert embedding_provider.requests == []
+    assert vector_store.upsert_calls == []
+    assert (
+        _stage_updates(
+            observability,
+            "knowledge-index.load-document-version",
+        )[-1].status
+        is ObservationStatus.OK
+    )
