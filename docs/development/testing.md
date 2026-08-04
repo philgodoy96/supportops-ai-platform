@@ -105,6 +105,8 @@ They validate:
 - usage and cost payload mapping;
 - fail-open Langfuse SDK behavior;
 - gateway provider, embedding, retrieval, and indexing observability instrumentation;
+- AgentRun, worker-attempt, workflow, graph-node, tool, approval, escalation, and recommendation observability instrumentation;
+- attempt-end flush, privacy, fail-open, ContextVar isolation, and process-client ownership;
 - API, worker, and indexing observability lifecycle ownership.
 
 Unit tests use mocks only at external boundaries.
@@ -347,9 +349,11 @@ Default tests use mock embeddings and make no OpenAI network calls.
 
 ## AI observability tests
 
-Slice 7 now includes provider, embedding, retrieval, and indexing
-observability coverage. AgentRun, workflow, tool, approval, escalation, and
-recommendation tracing tests remain planned for the next Slice 7 pull request.
+Slice 7 includes provider, embedding, retrieval, indexing, and durable
+workflow observability coverage. Evaluation workflows, RAGAS, and prompt
+iteration remain Slice 8 follow-up work.
+
+### Provider, embedding, retrieval, and indexing coverage
 
 Focused unit coverage:
 
@@ -368,7 +372,7 @@ uv run pytest `
 uv run pytest -m "not integration"
 ```
 
-The observability suites verify:
+These suites verify:
 
 - settings defaults and validation for provider, capture mode, credentials,
   base URL, environment, release, flush flag, and timeout;
@@ -404,12 +408,70 @@ The observability suites verify:
 - API, worker, and indexing each own one process-scoped observability client,
   including shutdown isolation and readiness independence from Langfuse.
 
-Normal tests make no external Langfuse calls. Normal CI requires no Langfuse
-credentials. Query-embedding usage and cost remain ephemeral observability data
-and are not durably persisted. PostgreSQL remains authoritative for durable LLM
-invocation and indexing usage and estimated-cost records. External Langfuse
-smoke validation remains planned. RAGAS and Langfuse evaluation remain deferred
-to Slice 8.
+### Durable workflow observability
+
+Focused local validation:
+
+```powershell
+uv run pytest tests/unit/observability
+uv run pytest tests/unit/modules/agent_runs
+uv run pytest tests/unit/agent_graph
+uv run pytest tests/unit/agent_tools
+uv run pytest tests/unit/modules/approvals
+uv run pytest tests/unit/worker
+uv run pytest tests/unit/api/test_lifespan.py
+```
+
+PR B regression coverage for provider and retrieval instrumentation:
+
+```powershell
+uv run pytest tests/unit/ai/gateway
+uv run pytest tests/unit/ai/embeddings
+uv run pytest tests/unit/knowledge_retrieval
+uv run pytest tests/unit/knowledge_index
+```
+
+Static validation:
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run pytest -m "not integration"
+```
+
+Durable workflow observability coverage verifies:
+
+- deterministic AgentRun trace identity seeded as `agent-run:{agent_run_id}`;
+- multiple AgentRunAttempts re-entering the same logical trace;
+- `worker-attempt` outcome mapping for success, retryable failure, terminal
+  failure, timeout, approval pause, and lease-lost finalization;
+- controlled workflow hierarchy under `workflow.controlled-support-v1`;
+- human-approved workflow hierarchy under `workflow.human-approved-support-v1`;
+- graph-node observations for LangGraph stages;
+- tool-execution observations named `tool.execute`;
+- approval request, pause, decision, expiration, and resume events;
+- escalation outcome event `ticket.escalated`;
+- recommendation outcome events `recommendation.generated`,
+  `recommendation.persisted`, and `recommendation.failed`;
+- attempt-end flush when enabled, with no flush when disabled;
+- privacy assertions that exclude content-bearing fields;
+- duplicate prevention for idempotent approval decisions;
+- fail-open behavior at observation and event boundaries;
+- ContextVar restoration and isolation across nested scopes;
+- process-client ownership for API, worker, and indexing composition.
+
+Normal tests:
+
+- use application-owned recording or no-op fakes;
+- do not require Langfuse credentials;
+- do not call Langfuse Cloud;
+- validate trace shape and privacy at the application contract boundary.
+
+External Langfuse smoke validation remains an opt-in follow-up. RAGAS and
+Langfuse evaluation workflows remain deferred to Slice 8. PostgreSQL remains
+authoritative for durable LLM invocation and indexing usage and estimated-cost
+records. Query-embedding usage and cost remain ephemeral observability data.
 
 ## Integration tests
 
@@ -1359,13 +1421,14 @@ Later implementation phases are expected to add tests for:
 - global AgentRun listing and status filtering;
 - retrieval quality scoring and reranking;
 - write-capable tool authorization beyond grant-gated internal escalation;
-- AgentRun, workflow, tool, approval, escalation, and recommendation
-  observability instrumentation;
 - opt-in live Langfuse smoke validation;
+- Langfuse evaluation workflows;
 - prompt version 2 regression comparison;
 - scheduled evaluation and evaluation history persistence;
 - retrieval and generation evaluation beyond structured classification;
 - RAGAS;
+- production feedback ingestion;
+- evaluation dashboards and quality gates;
 - idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
@@ -1375,5 +1438,6 @@ classification inspection, controlled support workflow coverage, human-approved
 workflow coverage, approval and escalation inspection and decision APIs,
 immutable knowledge-document versioning, explicit knowledge indexing,
 active-version semantic knowledge retrieval, optional application-owned AI
-observability with provider, embedding, retrieval, and indexing coverage, and
-offline classification evaluation are part of the current suite.
+observability with provider, embedding, retrieval, indexing, and durable
+workflow coverage, and offline classification evaluation are part of the
+current suite.

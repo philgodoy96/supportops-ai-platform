@@ -1573,12 +1573,17 @@ Example safe value:
 AI observability is optional and application-owned. The default provider is
 `noop`, which requires no credentials and performs no network access. Selecting
 `langfuse` enables the optional Langfuse adapter. Langfuse is not a readiness
-dependency. PostgreSQL remains authoritative for business, workflow, audit,
-usage, and estimated-cost records.
+dependency and is not required for application correctness.
 
-Detailed generation, embedding, retrieval, tool, approval, and workflow
-instrumentation is delivered incrementally in subsequent Slice 7 pull requests.
-The variables below configure the observability foundation only.
+PostgreSQL remains the source of truth for durable business, audit, usage, and
+estimated-cost state. LangGraph PostgreSQL checkpoints remain the source of
+truth for graph continuity and pause/resume state. Qdrant remains a replaceable
+retrieval projection. Langfuse receives optional derived telemetry for
+operational debugging and later evaluation workflows.
+
+The variables below configure the observability foundation, privacy policy, and
+opt-in attempt-end flush behavior used by provider, retrieval, indexing, and
+durable workflow instrumentation.
 
 ### `SUPPORTOPS_AI_OBSERVABILITY_PROVIDER`
 
@@ -1902,8 +1907,8 @@ metadata_only
 
 ### `SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END`
 
-Configuration flag for flushing buffered Langfuse telemetry at AgentRunAttempt
-boundaries.
+Opt-in flag that performs one best-effort flush after each finalized
+AgentRunAttempt when Langfuse or another flush-capable client is in use.
 
 Settings field:
 
@@ -1923,18 +1928,45 @@ Default:
 false
 ```
 
+Behavior:
+
+```text
+false:
+use normal SDK batching
+
+true:
+perform one best-effort flush after each finalized AgentRun attempt
+```
+
 Applies to:
 
 ```text
-future AgentRun tracing instrumentation
+worker AgentRun attempt finalization
 ```
 
-Purpose:
+Finalized attempt outcomes include:
 
-- reserves explicit attempt-end flush behavior for later Slice 7 AgentRun
-  tracing;
-- is currently configuration-ready but not used until AgentRun tracing is
-  introduced.
+```text
+success
+retryable failure
+terminal failure
+timeout
+approval pause
+lease-lost finalization
+```
+
+Flush semantics:
+
+- runs after attempt observability contexts close;
+- does not run per provider call, graph node, tool call, or event;
+- does not run during human waiting;
+- is fail-open;
+- does not alter business outcome, retry scheduling, persistence, or worker
+  exit behavior;
+- does not replace shutdown flushing.
+
+When the flag is `false`, the process relies on normal SDK batching and
+graceful shutdown flush behavior.
 
 Example safe value:
 
@@ -1992,15 +2024,20 @@ Example safe value:
 
 - default provider is `noop`;
 - Langfuse credentials are required only when `langfuse` is selected;
-- Langfuse is not required in noop mode;
+- Langfuse is not required in noop mode and is not required for application
+  correctness;
 - default capture mode is `metadata_only`;
 - `redacted_content` is an explicit opt-in;
 - unrestricted raw-content capture is not supported;
 - release is optional;
-- attempt-end flushing is configuration-ready but unused until AgentRun tracing;
+- attempt-end flushing defaults to `false` and uses normal SDK batching;
+- when attempt-end flushing is enabled, one best-effort flush runs after each
+  finalized AgentRun attempt;
 - timeout applies to SDK configuration only;
 - Langfuse is not a readiness dependency;
-- PostgreSQL remains authoritative for business and usage records.
+- PostgreSQL remains the source of truth for durable business and usage records;
+- Langfuse receives optional derived telemetry and may be incomplete after
+  retries or hard process termination.
 
 ## Docker Compose variables
 
