@@ -17,7 +17,6 @@ from supportops.ai.pricing.catalog import (
 )
 from supportops.ai.pricing.estimation import estimate_llm_cost
 from supportops.ai.prompts.ticket_classification_v1 import (
-    TICKET_CLASSIFICATION_PROMPT_VERSION,
     render_ticket_classification_prompt,
 )
 from supportops.ai.schemas.ticket_classification import (
@@ -75,6 +74,7 @@ class TicketClassificationEvaluationPredictor:
         case: TicketClassificationEvaluationCase,
         dataset_id: str,
         dataset_version: int,
+        prompt_version: int,
     ) -> TicketClassificationEvaluationPrediction:
         """Produce one successful or failed normalized prediction."""
 
@@ -88,8 +88,13 @@ class TicketClassificationEvaluationPredictor:
                 "dataset_version must be positive.",
             )
 
+        if prompt_version <= 0:
+            raise ValueError(
+                "prompt_version must be positive.",
+            )
+
         rendered_prompt = render_ticket_classification_prompt(
-            version=TICKET_CLASSIFICATION_PROMPT_VERSION,
+            version=prompt_version,
             subject=case.ticket.subject,
             description=case.ticket.description,
         )

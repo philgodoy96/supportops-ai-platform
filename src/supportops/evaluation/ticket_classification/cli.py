@@ -10,6 +10,9 @@ from typing import Protocol, TextIO
 
 from pydantic import ValidationError
 
+from supportops.ai.prompts.registry import (
+    PromptDefinitionNotFoundError,
+)
 from supportops.core.settings import LLMProviderName
 from supportops.evaluation.ticket_classification.composition import (
     TicketClassificationEvaluationLLMRuntime,
@@ -124,6 +127,7 @@ async def run_cli(
             )
     except (
         ExternalProviderPermissionRequiredError,
+        PromptDefinitionNotFoundError,
         TicketClassificationDatasetError,
         TicketClassificationPredictionError,
         TicketClassificationEvaluationError,
@@ -196,6 +200,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-external-provider",
         action="store_true",
         help=("Required explicit acknowledgement before the OpenAI provider may be initialized."),
+    )
+    run_parser.add_argument(
+        "--prompt-version",
+        type=_positive_integer,
+        default=1,
+        help=(
+            "Explicit positive ticket-classification prompt version used "
+            "only for prediction generation. Evaluation never selects a "
+            "prompt implicitly."
+        ),
     )
     run_parser.add_argument(
         "--predictions-output",
@@ -302,6 +316,7 @@ async def _execute_run_command(
         result = await run_ticket_classification_evaluation(
             dataset=dataset,
             predictor=predictor,
+            prompt_version=arguments.prompt_version,
         )
     finally:
         await runtime.close()
