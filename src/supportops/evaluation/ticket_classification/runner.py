@@ -10,8 +10,12 @@ from supportops.evaluation.ticket_classification.dataset import (
     TicketClassificationEvaluationDataset,
 )
 from supportops.evaluation.ticket_classification.evaluator import (
+    DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE,
     TicketClassificationEvaluationReport,
+    TicketClassificationReleaseGateEvaluation,
+    TicketClassificationReleaseGateProfile,
     evaluate_ticket_classification_predictions,
+    evaluate_ticket_classification_release_gates,
 )
 from supportops.evaluation.ticket_classification.predictions import (
     TicketClassificationEvaluationPrediction,
@@ -72,6 +76,49 @@ async def run_ticket_classification_evaluation(
     return TicketClassificationEvaluationRunResult(
         predictions=prediction_set,
         report=report,
+    )
+
+
+def score_ticket_classification_predictions_with_release_gates(
+    *,
+    dataset: TicketClassificationEvaluationDataset,
+    predictions: TicketClassificationPredictionSet,
+    profile: TicketClassificationReleaseGateProfile = (
+        DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE
+    ),
+) -> tuple[
+    TicketClassificationEvaluationReport,
+    TicketClassificationReleaseGateEvaluation,
+]:
+    """Score predictions deterministically, then evaluate release gates.
+
+    Scoring remains no-network. Report-generation exceptions prevent gate
+    evaluation entirely because gates consume only a completed report.
+    """
+
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+    gate_evaluation = evaluate_ticket_classification_release_gates(
+        report,
+        profile=profile,
+    )
+    return report, gate_evaluation
+
+
+def evaluate_ticket_classification_report_release_gates(
+    report: TicketClassificationEvaluationReport,
+    *,
+    profile: TicketClassificationReleaseGateProfile = (
+        DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE
+    ),
+) -> TicketClassificationReleaseGateEvaluation:
+    """Evaluate release gates for an already-scored classification report."""
+
+    return evaluate_ticket_classification_release_gates(
+        report,
+        profile=profile,
     )
 
 

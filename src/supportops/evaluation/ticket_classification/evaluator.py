@@ -1,14 +1,18 @@
 """Deterministic metrics for structured ticket classification."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from enum import StrEnum
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from supportops.ai.schemas.ticket_classification import TicketUrgency
+from supportops.evaluation.contracts.hashing import sha256_hexdigest
 from supportops.evaluation.ticket_classification.dataset import (
     TicketClassificationEvaluationDataset,
 )
@@ -237,6 +241,287 @@ class TicketClassificationEvaluationReport(
     """Complete deterministic evaluation report."""
 
     report_content_hash: str
+
+
+class TicketClassificationGateCategory(StrEnum):
+    """Release-gate category for ticket-classification reports."""
+
+    SAFETY = "safety"
+    QUALITY = "quality"
+    RELIABILITY = "reliability"
+    EFFICIENCY = "efficiency"
+
+
+class TicketClassificationGateOutcome(StrEnum):
+    """Explicit outcome for one release gate."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class TicketClassificationGateOperator(StrEnum):
+    """Supported comparison operators for absolute release gates."""
+
+    EQUAL = "equal"
+
+
+class TicketClassificationStandaloneGateStatus(StrEnum):
+    """Aggregate status for a standalone classification gate profile."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    INCOMPLETE = "incomplete"
+
+
+class TicketClassificationReleaseGateProfileError(ValueError):
+    """Raised when a release-gate profile fails validation."""
+
+
+class TicketClassificationReleaseGateDefinition(BaseModel):
+    """One immutable gate inside a classification release profile."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    gate_id: str = Field(min_length=1)
+    category: TicketClassificationGateCategory
+    blocking: bool
+    metric_name: str = Field(min_length=1)
+    operator: TicketClassificationGateOperator
+    threshold_value: Decimal | int
+
+
+class TicketClassificationReleaseGateProfile(BaseModel):
+    """Frozen profile of release gates for ticket classification."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    profile_id: str = Field(min_length=1)
+    profile_version: int = Field(ge=1)
+    gates: tuple[TicketClassificationReleaseGateDefinition, ...] = Field(
+        min_length=1,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_gate_ids(self) -> Self:
+        gate_ids = [gate.gate_id for gate in self.gates]
+        if len(gate_ids) != len(set(gate_ids)):
+            raise TicketClassificationReleaseGateProfileError(
+                "Release-gate profile contains duplicate gate IDs.",
+            )
+
+        return self
+
+
+class TicketClassificationReleaseGateResult(BaseModel):
+    """Deterministic result for one classification release gate."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    gate_id: str
+    category: TicketClassificationGateCategory
+    outcome: TicketClassificationGateOutcome
+    blocking: bool
+    actual_value: Decimal | int | None
+    operator: TicketClassificationGateOperator
+    threshold_value: Decimal | int
+    metric_name: str
+    reason: str
+
+
+class TicketClassificationReleaseGateEvaluationContent(BaseModel):
+    """Reproducible gate-evaluation content before hashing."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
+
+    profile_id: str
+    profile_version: int
+    report_content_hash: str
+    gate_results: tuple[TicketClassificationReleaseGateResult, ...]
+    blocking_failure_count: int
+    not_applicable_count: int
+    standalone_gate_status: TicketClassificationStandaloneGateStatus
+
+
+class TicketClassificationReleaseGateEvaluation(
+    TicketClassificationReleaseGateEvaluationContent,
+):
+    """Complete deterministic release-gate evaluation for one report."""
+
+    content_hash: str
+
+
+_PERFECT_RATE = Decimal("1.000000")
+_PAIRED_BASELINE_REASON = "paired baseline comparison is required for standalone report evaluation"
+
+DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE = TicketClassificationReleaseGateProfile(
+    profile_id="ticket-classification-release-gates",
+    profile_version=1,
+    gates=(
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.structured-output-validity",
+            category=TicketClassificationGateCategory.SAFETY,
+            blocking=True,
+            metric_name="structured_output_validity.rate",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.critical-urgency-recall",
+            category=TicketClassificationGateCategory.SAFETY,
+            blocking=True,
+            metric_name="critical_urgency_recall.recall",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id=("classification.high-risk-human-review-recall"),
+            category=TicketClassificationGateCategory.SAFETY,
+            blocking=True,
+            metric_name=("high_risk_human_review_recall.recall"),
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.prediction-coverage",
+            category=TicketClassificationGateCategory.RELIABILITY,
+            blocking=True,
+            metric_name="prediction_artifact_coverage.rate",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id=("classification.deterministic-evaluator-failures"),
+            category=TicketClassificationGateCategory.RELIABILITY,
+            blocking=True,
+            metric_name=("deterministic_evaluator_failure_count"),
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=0,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id=("classification.structured-label-non-regression"),
+            category=TicketClassificationGateCategory.QUALITY,
+            blocking=True,
+            metric_name=("structured_label_exact_match.non_regression"),
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id=("classification.category-accuracy-non-regression"),
+            category=TicketClassificationGateCategory.QUALITY,
+            blocking=True,
+            metric_name="category_accuracy.non_regression",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.target-metric-improvement",
+            category=TicketClassificationGateCategory.QUALITY,
+            blocking=True,
+            metric_name="target_metric.improvement",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=_PERFECT_RATE,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.mean-token-increase",
+            category=TicketClassificationGateCategory.EFFICIENCY,
+            blocking=True,
+            metric_name="mean_total_tokens.increase",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=0,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.mean-cost-increase",
+            category=TicketClassificationGateCategory.EFFICIENCY,
+            blocking=True,
+            metric_name="mean_estimated_cost_usd.increase",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=0,
+        ),
+        TicketClassificationReleaseGateDefinition(
+            gate_id="classification.mean-latency-increase",
+            category=TicketClassificationGateCategory.EFFICIENCY,
+            blocking=True,
+            metric_name="mean_latency_ms.increase",
+            operator=TicketClassificationGateOperator.EQUAL,
+            threshold_value=0,
+        ),
+    ),
+)
+
+
+def evaluate_ticket_classification_release_gates(
+    report: TicketClassificationEvaluationReport,
+    *,
+    profile: TicketClassificationReleaseGateProfile = (
+        DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE
+    ),
+) -> TicketClassificationReleaseGateEvaluation:
+    """Evaluate one classification report against a frozen release-gate profile.
+
+    Gate evaluation runs only after a valid report exists. Exceptions raised
+    while generating that report prevent gate evaluation entirely and are not
+    represented as a failure count inside the report.
+    """
+
+    if not isinstance(
+        profile,
+        TicketClassificationReleaseGateProfile,
+    ):
+        raise TicketClassificationReleaseGateProfileError(
+            "profile must be a TicketClassificationReleaseGateProfile.",
+        )
+
+    gate_results = tuple(
+        _evaluate_release_gate(
+            report=report,
+            gate=gate,
+        )
+        for gate in profile.gates
+    )
+
+    blocking_failure_count = sum(
+        1
+        for result in gate_results
+        if result.blocking and result.outcome is TicketClassificationGateOutcome.FAILED
+    )
+    not_applicable_count = sum(
+        1
+        for result in gate_results
+        if result.outcome is TicketClassificationGateOutcome.NOT_APPLICABLE
+    )
+    standalone_gate_status = _aggregate_standalone_gate_status(
+        gate_results,
+    )
+
+    content = TicketClassificationReleaseGateEvaluationContent(
+        profile_id=profile.profile_id,
+        profile_version=profile.profile_version,
+        report_content_hash=report.report_content_hash,
+        gate_results=gate_results,
+        blocking_failure_count=blocking_failure_count,
+        not_applicable_count=not_applicable_count,
+        standalone_gate_status=standalone_gate_status,
+    )
+
+    return TicketClassificationReleaseGateEvaluation(
+        **content.model_dump(),
+        content_hash=_compute_gate_evaluation_content_hash(
+            content,
+        ),
+    )
 
 
 def evaluate_ticket_classification_predictions(
@@ -992,3 +1277,175 @@ def _compute_report_content_hash(
     return hashlib.sha256(
         canonical_content.encode("utf-8"),
     ).hexdigest()
+
+
+_PAIRED_COMPARISON_GATE_IDS: frozenset[str] = frozenset(
+    {
+        "classification.structured-label-non-regression",
+        "classification.category-accuracy-non-regression",
+        "classification.target-metric-improvement",
+        "classification.mean-token-increase",
+        "classification.mean-cost-increase",
+        "classification.mean-latency-increase",
+    },
+)
+
+
+def _evaluate_release_gate(
+    *,
+    report: TicketClassificationEvaluationReport,
+    gate: TicketClassificationReleaseGateDefinition,
+) -> TicketClassificationReleaseGateResult:
+    if gate.gate_id in _PAIRED_COMPARISON_GATE_IDS:
+        return _not_applicable_gate_result(
+            gate=gate,
+            reason=_PAIRED_BASELINE_REASON,
+        )
+
+    if gate.gate_id == "classification.structured-output-validity":
+        return _compare_absolute_gate(
+            gate=gate,
+            actual_value=report.structured_output_validity.rate,
+        )
+
+    if gate.gate_id == "classification.critical-urgency-recall":
+        return _evaluate_recall_gate(
+            gate=gate,
+            expected_positive_count=(report.critical_urgency_recall.expected_positive_count),
+            actual_value=report.critical_urgency_recall.recall,
+            zero_denominator_reason=("critical_urgency_recall.expected_positive_count is zero"),
+        )
+
+    if gate.gate_id == ("classification.high-risk-human-review-recall"):
+        return _evaluate_recall_gate(
+            gate=gate,
+            expected_positive_count=(report.high_risk_human_review_recall.expected_positive_count),
+            actual_value=report.high_risk_human_review_recall.recall,
+            zero_denominator_reason=(
+                "high_risk_human_review_recall.expected_positive_count is zero"
+            ),
+        )
+
+    if gate.gate_id == "classification.prediction-coverage":
+        return _compare_absolute_gate(
+            gate=gate,
+            actual_value=_prediction_artifact_coverage_rate(
+                report,
+            ),
+        )
+
+    if gate.gate_id == ("classification.deterministic-evaluator-failures"):
+        return _compare_absolute_gate(
+            gate=gate,
+            actual_value=0,
+            passed_reason=("deterministic evaluator failure count is zero for a valid report"),
+        )
+
+    raise TicketClassificationReleaseGateProfileError(
+        f"Unknown release gate ID: {gate.gate_id}.",
+    )
+
+
+def _evaluate_recall_gate(
+    *,
+    gate: TicketClassificationReleaseGateDefinition,
+    expected_positive_count: int,
+    actual_value: Decimal,
+    zero_denominator_reason: str,
+) -> TicketClassificationReleaseGateResult:
+    if expected_positive_count == 0:
+        return _not_applicable_gate_result(
+            gate=gate,
+            reason=zero_denominator_reason,
+        )
+
+    return _compare_absolute_gate(
+        gate=gate,
+        actual_value=actual_value,
+    )
+
+
+def _prediction_artifact_coverage_rate(
+    report: TicketClassificationEvaluationReport,
+) -> Decimal:
+    covered_count = sum(
+        1 for case in report.cases if case.prediction_status in {"succeeded", "failed"}
+    )
+
+    return _rate(
+        covered_count,
+        report.case_count,
+    )
+
+
+def _compare_absolute_gate(
+    *,
+    gate: TicketClassificationReleaseGateDefinition,
+    actual_value: Decimal | int,
+    passed_reason: str | None = None,
+) -> TicketClassificationReleaseGateResult:
+    if gate.operator is not TicketClassificationGateOperator.EQUAL:
+        raise TicketClassificationReleaseGateProfileError(
+            f"Unknown release-gate operator: {gate.operator!r}.",
+        )
+
+    passed = actual_value == gate.threshold_value
+    if passed:
+        reason = passed_reason or (f"{gate.metric_name} equals {gate.threshold_value}")
+        outcome = TicketClassificationGateOutcome.PASSED
+    else:
+        reason = f"{gate.metric_name} {actual_value} does not equal {gate.threshold_value}"
+        outcome = TicketClassificationGateOutcome.FAILED
+
+    return TicketClassificationReleaseGateResult(
+        gate_id=gate.gate_id,
+        category=gate.category,
+        outcome=outcome,
+        blocking=gate.blocking,
+        actual_value=actual_value,
+        operator=gate.operator,
+        threshold_value=gate.threshold_value,
+        metric_name=gate.metric_name,
+        reason=reason,
+    )
+
+
+def _not_applicable_gate_result(
+    *,
+    gate: TicketClassificationReleaseGateDefinition,
+    reason: str,
+) -> TicketClassificationReleaseGateResult:
+    return TicketClassificationReleaseGateResult(
+        gate_id=gate.gate_id,
+        category=gate.category,
+        outcome=TicketClassificationGateOutcome.NOT_APPLICABLE,
+        blocking=gate.blocking,
+        actual_value=None,
+        operator=gate.operator,
+        threshold_value=gate.threshold_value,
+        metric_name=gate.metric_name,
+        reason=reason,
+    )
+
+
+def _aggregate_standalone_gate_status(
+    gate_results: tuple[TicketClassificationReleaseGateResult, ...],
+) -> TicketClassificationStandaloneGateStatus:
+    blocking_results = tuple(result for result in gate_results if result.blocking)
+
+    if any(result.outcome is TicketClassificationGateOutcome.FAILED for result in blocking_results):
+        return TicketClassificationStandaloneGateStatus.FAILED
+
+    if any(
+        result.outcome is TicketClassificationGateOutcome.NOT_APPLICABLE
+        for result in blocking_results
+    ):
+        return TicketClassificationStandaloneGateStatus.INCOMPLETE
+
+    return TicketClassificationStandaloneGateStatus.PASSED
+
+
+def _compute_gate_evaluation_content_hash(
+    content: TicketClassificationReleaseGateEvaluationContent,
+) -> str:
+    return sha256_hexdigest(content)

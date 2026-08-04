@@ -5,15 +5,26 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from supportops.evaluation.ticket_classification.dataset import (
     TicketClassificationEvaluationDataset,
     load_ticket_classification_dataset,
 )
 from supportops.evaluation.ticket_classification.evaluator import (
+    DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE,
     InconsistentTicketClassificationPredictionProvenanceError,
+    TicketClassificationGateCategory,
+    TicketClassificationGateOperator,
+    TicketClassificationGateOutcome,
+    TicketClassificationReleaseGateDefinition,
+    TicketClassificationReleaseGateEvaluation,
+    TicketClassificationReleaseGateProfile,
+    TicketClassificationReleaseGateResult,
+    TicketClassificationStandaloneGateStatus,
     UnknownTicketClassificationPredictionError,
     evaluate_ticket_classification_predictions,
+    evaluate_ticket_classification_release_gates,
 )
 from supportops.evaluation.ticket_classification.predictions import (
     TicketClassificationPredictionSet,
@@ -1075,3 +1086,621 @@ def test_new_metric_fields_affect_report_hash(
         valid_report.known_estimated_total_cost_usd,
         Decimal,
     )
+
+
+def _gate_by_id(
+    evaluation: TicketClassificationReleaseGateEvaluation,
+    gate_id: str,
+) -> TicketClassificationReleaseGateResult:
+    for result in evaluation.gate_results:
+        if result.gate_id == gate_id:
+            return result
+
+    raise AssertionError(f"Missing gate result: {gate_id}")
+
+
+def _absolute_safety_reliability_profile() -> TicketClassificationReleaseGateProfile:
+    return TicketClassificationReleaseGateProfile(
+        profile_id="ticket-classification-release-gates-applicable",
+        profile_version=1,
+        gates=(
+            TicketClassificationReleaseGateDefinition(
+                gate_id="classification.structured-output-validity",
+                category=TicketClassificationGateCategory.SAFETY,
+                blocking=True,
+                metric_name="structured_output_validity.rate",
+                operator=TicketClassificationGateOperator.EQUAL,
+                threshold_value=Decimal("1.000000"),
+            ),
+            TicketClassificationReleaseGateDefinition(
+                gate_id="classification.critical-urgency-recall",
+                category=TicketClassificationGateCategory.SAFETY,
+                blocking=True,
+                metric_name="critical_urgency_recall.recall",
+                operator=TicketClassificationGateOperator.EQUAL,
+                threshold_value=Decimal("1.000000"),
+            ),
+            TicketClassificationReleaseGateDefinition(
+                gate_id=("classification.high-risk-human-review-recall"),
+                category=TicketClassificationGateCategory.SAFETY,
+                blocking=True,
+                metric_name=("high_risk_human_review_recall.recall"),
+                operator=TicketClassificationGateOperator.EQUAL,
+                threshold_value=Decimal("1.000000"),
+            ),
+            TicketClassificationReleaseGateDefinition(
+                gate_id="classification.prediction-coverage",
+                category=TicketClassificationGateCategory.RELIABILITY,
+                blocking=True,
+                metric_name="prediction_artifact_coverage.rate",
+                operator=TicketClassificationGateOperator.EQUAL,
+                threshold_value=Decimal("1.000000"),
+            ),
+            TicketClassificationReleaseGateDefinition(
+                gate_id=("classification.deterministic-evaluator-failures"),
+                category=TicketClassificationGateCategory.RELIABILITY,
+                blocking=True,
+                metric_name=("deterministic_evaluator_failure_count"),
+                operator=TicketClassificationGateOperator.EQUAL,
+                threshold_value=0,
+            ),
+        ),
+    )
+
+
+def test_default_release_gate_profile_identity() -> None:
+    profile = DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE
+
+    assert profile.profile_id == ("ticket-classification-release-gates")
+    assert profile.profile_version == 1
+    assert [gate.gate_id for gate in profile.gates] == [
+        "classification.structured-output-validity",
+        "classification.critical-urgency-recall",
+        "classification.high-risk-human-review-recall",
+        "classification.prediction-coverage",
+        "classification.deterministic-evaluator-failures",
+        "classification.structured-label-non-regression",
+        "classification.category-accuracy-non-regression",
+        "classification.target-metric-improvement",
+        "classification.mean-token-increase",
+        "classification.mean-cost-increase",
+        "classification.mean-latency-increase",
+    ]
+
+
+def test_release_gate_profile_rejects_duplicate_gate_ids() -> None:
+    gate = TicketClassificationReleaseGateDefinition(
+        gate_id="classification.structured-output-validity",
+        category=TicketClassificationGateCategory.SAFETY,
+        blocking=True,
+        metric_name="structured_output_validity.rate",
+        operator=TicketClassificationGateOperator.EQUAL,
+        threshold_value=Decimal("1.000000"),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="duplicate gate IDs",
+    ):
+        TicketClassificationReleaseGateProfile(
+            profile_id="ticket-classification-release-gates",
+            profile_version=1,
+            gates=(gate, gate),
+        )
+
+
+def test_release_gate_profile_rejects_unknown_operator() -> None:
+    with pytest.raises(ValidationError):
+        TicketClassificationReleaseGateDefinition.model_validate(
+            {
+                "gate_id": "classification.structured-output-validity",
+                "category": "safety",
+                "blocking": True,
+                "metric_name": "structured_output_validity.rate",
+                "operator": "gte",
+                "threshold_value": "1.000000",
+            },
+        )
+
+
+def test_release_gate_profile_is_immutable() -> None:
+    profile = DEFAULT_TICKET_CLASSIFICATION_RELEASE_GATE_PROFILE
+
+    with pytest.raises(ValidationError):
+        profile.profile_id = "mutated"  # type: ignore[misc]
+
+
+def test_perfect_safety_and_reliability_are_incomplete_standalone(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+                tags=("privacy", "evaluation"),
+            ),
+            _dataset_case(
+                case_id="case-002",
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+            ),
+            _success_prediction(
+                case_id="case-002",
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+
+    assert evaluation.profile_id == ("ticket-classification-release-gates")
+    assert evaluation.profile_version == 1
+    assert evaluation.report_content_hash == (report.report_content_hash)
+    assert evaluation.blocking_failure_count == 0
+    assert evaluation.not_applicable_count == 6
+    assert evaluation.standalone_gate_status is (
+        TicketClassificationStandaloneGateStatus.INCOMPLETE
+    )
+    assert (
+        _gate_by_id(
+            evaluation,
+            "classification.structured-output-validity",
+        ).outcome
+        is TicketClassificationGateOutcome.PASSED
+    )
+    assert (
+        _gate_by_id(
+            evaluation,
+            "classification.critical-urgency-recall",
+        ).outcome
+        is TicketClassificationGateOutcome.PASSED
+    )
+    assert (
+        _gate_by_id(
+            evaluation,
+            "classification.high-risk-human-review-recall",
+        ).outcome
+        is TicketClassificationGateOutcome.PASSED
+    )
+    assert (
+        _gate_by_id(
+            evaluation,
+            "classification.prediction-coverage",
+        ).outcome
+        is TicketClassificationGateOutcome.PASSED
+    )
+    assert (
+        _gate_by_id(
+            evaluation,
+            "classification.deterministic-evaluator-failures",
+        ).outcome
+        is TicketClassificationGateOutcome.PASSED
+    )
+
+
+def test_invalid_structured_output_fails_validity_gate(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(case_id="case-001"),
+            _dataset_case(case_id="case-002"),
+        ),
+        predictions=(
+            _success_prediction(case_id="case-001"),
+            _failure_prediction(case_id="case-002"),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+
+    validity = _gate_by_id(
+        evaluation,
+        "classification.structured-output-validity",
+    )
+    assert validity.outcome is TicketClassificationGateOutcome.FAILED
+    assert validity.actual_value == Decimal("0.500000")
+    assert evaluation.standalone_gate_status is (TicketClassificationStandaloneGateStatus.FAILED)
+    assert evaluation.blocking_failure_count >= 1
+
+
+def test_missed_critical_urgency_fails_recall_gate(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="high",
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    critical = _gate_by_id(
+        evaluation,
+        "classification.critical-urgency-recall",
+    )
+
+    assert critical.outcome is TicketClassificationGateOutcome.FAILED
+    assert critical.actual_value == Decimal("0.000000")
+    assert evaluation.standalone_gate_status is (TicketClassificationStandaloneGateStatus.FAILED)
+
+
+def test_zero_critical_denominator_is_not_applicable(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="normal",
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="normal",
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    critical = _gate_by_id(
+        evaluation,
+        "classification.critical-urgency-recall",
+    )
+
+    assert critical.outcome is (TicketClassificationGateOutcome.NOT_APPLICABLE)
+    assert critical.actual_value is None
+    assert "expected_positive_count is zero" in critical.reason
+
+
+def test_missed_high_risk_review_fails_recall_gate(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                requires_human_review=True,
+                tags=("privacy",),
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                requires_human_review=False,
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    high_risk = _gate_by_id(
+        evaluation,
+        "classification.high-risk-human-review-recall",
+    )
+
+    assert high_risk.outcome is TicketClassificationGateOutcome.FAILED
+    assert high_risk.actual_value == Decimal("0.000000")
+
+
+def test_zero_high_risk_denominator_is_not_applicable(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                requires_human_review=False,
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                requires_human_review=False,
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    high_risk = _gate_by_id(
+        evaluation,
+        "classification.high-risk-human-review-recall",
+    )
+
+    assert high_risk.outcome is (TicketClassificationGateOutcome.NOT_APPLICABLE)
+    assert high_risk.actual_value is None
+    assert "expected_positive_count is zero" in high_risk.reason
+
+
+def test_failed_prediction_still_counts_as_coverage(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(case_id="case-001"),
+            _dataset_case(case_id="case-002"),
+        ),
+        predictions=(
+            _success_prediction(case_id="case-001"),
+            _failure_prediction(case_id="case-002"),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    coverage = _gate_by_id(
+        evaluation,
+        "classification.prediction-coverage",
+    )
+
+    assert coverage.outcome is TicketClassificationGateOutcome.PASSED
+    assert coverage.actual_value == Decimal("1.000000")
+
+
+def test_missing_prediction_fails_coverage_gate(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(case_id="case-001"),
+            _dataset_case(case_id="case-002"),
+        ),
+        predictions=(_success_prediction(case_id="case-001"),),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    coverage = _gate_by_id(
+        evaluation,
+        "classification.prediction-coverage",
+    )
+
+    assert coverage.outcome is TicketClassificationGateOutcome.FAILED
+    assert coverage.actual_value == Decimal("0.500000")
+
+
+def test_quality_and_efficiency_gates_are_not_applicable_standalone(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+                tags=("privacy",),
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+    )
+    paired_gate_ids = (
+        "classification.structured-label-non-regression",
+        "classification.category-accuracy-non-regression",
+        "classification.target-metric-improvement",
+        "classification.mean-token-increase",
+        "classification.mean-cost-increase",
+        "classification.mean-latency-increase",
+    )
+
+    for gate_id in paired_gate_ids:
+        result = _gate_by_id(evaluation, gate_id)
+        assert result.outcome is (TicketClassificationGateOutcome.NOT_APPLICABLE)
+        assert result.blocking is True
+        assert "paired baseline" in result.reason
+
+
+def test_applicable_custom_profile_can_pass(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+                tags=("privacy",),
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+            ),
+        ),
+    )
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    evaluation = evaluate_ticket_classification_release_gates(
+        report,
+        profile=_absolute_safety_reliability_profile(),
+    )
+
+    assert evaluation.blocking_failure_count == 0
+    assert evaluation.not_applicable_count == 0
+    assert evaluation.standalone_gate_status is (TicketClassificationStandaloneGateStatus.PASSED)
+    assert all(
+        result.outcome is TicketClassificationGateOutcome.PASSED
+        for result in evaluation.gate_results
+    )
+
+
+def test_gate_evaluation_hash_is_deterministic_and_sensitive(
+    tmp_path: Path,
+) -> None:
+    perfect_dir = tmp_path / "perfect"
+    failed_dir = tmp_path / "failed"
+    perfect_dir.mkdir()
+    failed_dir.mkdir()
+
+    perfect_dataset, perfect_predictions = _load_artifacts(
+        perfect_dir,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+                tags=("privacy",),
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+            ),
+        ),
+    )
+    failed_dataset, failed_predictions = _load_artifacts(
+        failed_dir,
+        dataset_cases=(
+            _dataset_case(
+                case_id="case-001",
+                urgency="critical",
+                requires_human_review=True,
+                tags=("privacy",),
+            ),
+        ),
+        predictions=(
+            _success_prediction(
+                case_id="case-001",
+                urgency="high",
+                requires_human_review=True,
+            ),
+        ),
+    )
+
+    perfect_report = evaluate_ticket_classification_predictions(
+        dataset=perfect_dataset,
+        predictions=perfect_predictions,
+    )
+    failed_report = evaluate_ticket_classification_predictions(
+        dataset=failed_dataset,
+        predictions=failed_predictions,
+    )
+
+    first = evaluate_ticket_classification_release_gates(
+        perfect_report,
+    )
+    second = evaluate_ticket_classification_release_gates(
+        perfect_report,
+    )
+    changed = evaluate_ticket_classification_release_gates(
+        failed_report,
+    )
+
+    assert first == second
+    assert first.content_hash == second.content_hash
+    assert first.content_hash != changed.content_hash
+    assert first.report_content_hash != (changed.report_content_hash)
+    assert len(first.content_hash) == 64
+
+
+def test_report_hash_unchanged_when_gates_not_invoked(
+    tmp_path: Path,
+) -> None:
+    dataset, predictions = _load_artifacts(
+        tmp_path,
+        dataset_cases=(_dataset_case(case_id="case-001"),),
+        predictions=(_success_prediction(case_id="case-001"),),
+    )
+
+    report = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+    report_again = evaluate_ticket_classification_predictions(
+        dataset=dataset,
+        predictions=predictions,
+    )
+
+    assert report.report_content_hash == (report_again.report_content_hash)
+    evaluate_ticket_classification_release_gates(report)
+    assert report.report_content_hash == (report_again.report_content_hash)
