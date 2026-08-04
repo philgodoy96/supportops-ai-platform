@@ -1263,6 +1263,7 @@ def create_session_scoped_executor_registry(
         decision_executor=decision_executor,
         tool_executor=tool_executor,
         recommendation_executor=recommendation_executor,
+        observability_client=(controlled_runtime.observability_client),
     )
     graph = compile_controlled_support_graph(
         nodes=nodes,
@@ -1270,6 +1271,7 @@ def create_session_scoped_executor_registry(
     )
     controlled_executor = ControlledSupportWorkflowExecutor(
         graph=graph,
+        observability_client=(controlled_runtime.observability_client),
     )
 
     sensitive_tool_registry = SensitiveToolRegistry(
