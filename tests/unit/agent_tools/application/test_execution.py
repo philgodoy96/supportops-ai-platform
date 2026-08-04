@@ -831,6 +831,35 @@ async def test_exports_no_tool_arguments_or_outputs() -> None:
     attributes = observability.attributes[0]
     update = observability.scopes[0].updates[0]
     exported = repr(attributes) + repr(update)
+    forbidden = {
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "graph_state",
+        "checkpoint_payload",
+        "prompt_content",
+        "model_output",
+        "classification_text",
+        "tool_arguments",
+        "tool_output",
+        "proposed_input",
+        "approval_comment",
+        "approver_identity",
+        "escalation_reason",
+        "recommendation_text",
+        "decision_summary",
+        "citation_text",
+        "evidence_content",
+        "document_content",
+        "chunk_content",
+        "embedding_vectors",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "traceback",
+        "user_id",
+    }
 
     assert "account access reset" not in exported
     assert "chunk-1" not in exported
@@ -838,3 +867,5 @@ async def test_exports_no_tool_arguments_or_outputs() -> None:
     assert "arguments" not in attributes.metadata
     assert attributes.input_data is None
     assert update.output_data is None
+    assert forbidden.isdisjoint(attributes.metadata)
+    assert forbidden.isdisjoint(update.metadata)

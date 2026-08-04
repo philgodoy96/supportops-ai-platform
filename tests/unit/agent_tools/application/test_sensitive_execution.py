@@ -1296,6 +1296,40 @@ async def test_sensitive_observation_omits_approval_and_escalation_content() -> 
     assert "approval_comment" not in exported
     assert "escalation_reason" not in exported
     assert "engineering_support" not in exported
+    forbidden = {
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "graph_state",
+        "checkpoint_payload",
+        "prompt_content",
+        "model_output",
+        "classification_text",
+        "tool_arguments",
+        "tool_output",
+        "proposed_input",
+        "approval_comment",
+        "approver_identity",
+        "escalation_reason",
+        "recommendation_text",
+        "decision_summary",
+        "citation_text",
+        "evidence_content",
+        "document_content",
+        "chunk_content",
+        "embedding_vectors",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "traceback",
+        "user_id",
+    }
+    assert forbidden.isdisjoint(observability.attributes[0].metadata)
+    assert forbidden.isdisjoint(observability.scopes[0].updates[0].metadata)
+    for event in _escalation_events(observability):
+        assert forbidden.isdisjoint(event.metadata)
+        assert "reason" not in event.metadata
 
 
 @pytest.mark.asyncio

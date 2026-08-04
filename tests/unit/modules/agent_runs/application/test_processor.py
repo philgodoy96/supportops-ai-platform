@@ -864,6 +864,12 @@ class RecordingObservationScope:
 
 
 @dataclass
+class RecordingTraceEvent:
+    identity: object
+    event: EventObservation
+
+
+@dataclass
 class RecordingTraceScope:
     attributes: TraceAttributes
     updates: list[ObservationUpdate] = field(default_factory=list)
@@ -934,6 +940,7 @@ class RecordingObservabilityClient:
         self.flush_calls = 0
         self.shutdown_calls = 0
         self.lifecycle_events: list[str] = []
+        self.trace_events: list[RecordingTraceEvent] = []
         self.flush_observation_context: object | None = object()
         self.flush_trace_context: object | None = object()
         self.fail_start_trace = fail_start_trace
@@ -941,6 +948,7 @@ class RecordingObservabilityClient:
         self.fail_update = fail_update
         self.fail_exit = fail_exit
         self.flush_error = flush_error
+        self.fail_record_trace_event = False
 
     def start_trace(
         self,
@@ -984,7 +992,9 @@ class RecordingObservabilityClient:
         del event
 
     def record_trace_event(self, *, identity: object, event: EventObservation) -> None:
-        del identity, event
+        if self.fail_record_trace_event:
+            raise RuntimeError("record_trace_event failed")
+        self.trace_events.append(RecordingTraceEvent(identity=identity, event=event))
 
     def flush(self) -> None:
         self.flush_calls += 1
@@ -1164,13 +1174,55 @@ def _create_traced_processor(
     return processor, agent_run_repository, transaction_manager
 
 
+_FORBIDDEN_TELEMETRY_KEYS = frozenset(
+    {
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "graph_state",
+        "checkpoint_payload",
+        "prompt_content",
+        "model_output",
+        "classification_text",
+        "tool_arguments",
+        "tool_output",
+        "proposed_input",
+        "approval_comment",
+        "approver_identity",
+        "escalation_reason",
+        "recommendation_text",
+        "decision_summary",
+        "citation_text",
+        "evidence_content",
+        "document_content",
+        "chunk_content",
+        "embedding_vectors",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "traceback",
+        "user_id",
+    }
+)
+
+
 def _assert_safe_attempt_metadata(metadata: Mapping[str, object]) -> None:
-    assert "lease_token" not in metadata
-    assert "execution_grant" not in metadata
-    assert "ticket_subject" not in metadata
-    assert "ticket_description" not in metadata
-    assert "Unable to access billing" not in str(metadata)
-    assert "password" not in str(metadata).lower()
+    assert _FORBIDDEN_TELEMETRY_KEYS.isdisjoint(metadata)
+    exported = str(metadata)
+    assert "Unable to access billing" not in exported
+    assert "The billing page returns an access error." not in exported
+    assert "password" not in exported.lower()
+    assert "traceback" not in exported.lower()
+
+
+def _assert_safe_captured_payload(payload: object) -> None:
+    exported = repr(payload)
+    for key in _FORBIDDEN_TELEMETRY_KEYS:
+        assert f"'{key}'" not in exported
+        assert f'"{key}"' not in exported
+    assert "Unable to access billing" not in exported
+    assert "The billing page returns an access error." not in exported
 
 
 async def test_claimed_attempt_creates_one_agent_run_trace_and_worker_attempt() -> None:
@@ -1199,6 +1251,9 @@ async def test_claimed_attempt_creates_one_agent_run_trace_and_worker_attempt() 
     assert attempt.attributes.observation_type is ObservationType.SPAN
     assert attempt.attributes.input_paths == frozenset()
     assert attempt.attributes.output_paths == frozenset()
+    assert trace.trace_id is None
+    assert "trace_id" not in trace.attributes.metadata
+    assert "langfuse_trace_id" not in trace.attributes.metadata
 
     metadata = dict(attempt.attributes.metadata)
     assert metadata["agent_run_id"] == str(_RUN_ID)
@@ -1300,8 +1355,9 @@ async def test_timeout_maps_to_timed_out_outcome() -> None:
 
 async def test_pause_maps_to_ok_awaiting_approval() -> None:
     observability = RecordingObservabilityClient()
+    approval_request_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
     executor = PausingExecutor(
-        approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        approval_request_id=approval_request_id,
         graph_thread_id="controlled-support:thread",
     )
     processor, _, _ = _create_traced_processor(
@@ -1317,6 +1373,20 @@ async def test_pause_maps_to_ok_awaiting_approval() -> None:
     assert attempt.updates[-1].metadata["attempt_outcome"] == "awaiting_approval"
     assert trace.updates[-1].status is ObservationStatus.OK
     assert trace.updates[-1].metadata["agent_run_status"] == "waiting_for_approval"
+    assert [item.event.name for item in observability.trace_events] == [
+        "workflow.paused",
+    ]
+    paused = observability.trace_events[0]
+    assert paused.identity.trace_seed == f"agent-run:{_RUN_ID}"  # type: ignore[attr-defined]
+    assert paused.event.metadata["approval_request_id"] == str(approval_request_id)
+    assert paused.event.metadata["agent_run_status"] == "waiting_for_approval"
+    assert paused.event.metadata["attempt_outcome"] == "awaiting_approval"
+    _assert_safe_attempt_metadata(dict(paused.event.metadata))
+    _assert_safe_captured_payload(observability.trace_events)
+    assert attempt.closed is True
+    assert trace.closed is True
+    assert current_trace_context() is None
+    assert current_observation_context() is None
 
 
 async def test_lease_lost_finalization_maps_to_error_without_model_status() -> None:
@@ -1783,3 +1853,143 @@ async def test_flush_is_not_invoked_during_executor_work() -> None:
 
     assert executor.flush_calls_during_execute == 0
     assert observability.flush_calls == 1
+
+
+async def test_lease_lost_pause_emits_no_workflow_paused_event() -> None:
+    observability = RecordingObservabilityClient()
+    executor = PausingExecutor(
+        approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        graph_thread_id="controlled-support:thread",
+    )
+    processor, _, _ = _create_traced_processor(
+        executor=executor,
+        observability_client=observability,
+        transition_result=AgentRunTransitionResult.LEASE_LOST,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.LEASE_LOST
+    assert observability.trace_events == []
+    attempt = observability.traces[0].observations[0]
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "lease_lost"
+    assert attempt.closed is True
+    assert observability.traces[0].closed is True
+
+
+async def test_workflow_paused_event_failure_preserves_pause_result() -> None:
+    observability = RecordingObservabilityClient()
+    observability.fail_record_trace_event = True
+    approval_request_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    processor, agent_run_repository, _ = _create_traced_processor(
+        executor=PausingExecutor(
+            approval_request_id=approval_request_id,
+            graph_thread_id="controlled-support:thread",
+        ),
+        observability_client=observability,
+    )
+
+    result = await processor.execute(create_claim())
+
+    assert result is AgentRunTransitionResult.APPLIED
+    agent_run_repository.mark_waiting_for_approval.assert_awaited_once()
+    assert observability.trace_events == []
+    attempt = observability.traces[0].observations[0]
+    assert attempt.updates[-1].metadata["attempt_outcome"] == "awaiting_approval"
+
+
+async def test_attempt_outcomes_do_not_invent_cancelled_or_paused_domain_status() -> None:
+    observability = RecordingObservabilityClient()
+    processor, _, _ = _create_traced_processor(
+        executor=PausingExecutor(
+            approval_request_id=UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+            graph_thread_id="controlled-support:thread",
+        ),
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim())
+
+    attempt_outcome = (
+        observability.traces[0].observations[0].updates[-1].metadata["attempt_outcome"]
+    )
+    agent_run_status = observability.traces[0].updates[-1].metadata["agent_run_status"]
+    assert attempt_outcome == "awaiting_approval"
+    assert agent_run_status == "waiting_for_approval"
+    assert "cancelled" not in {status.value for status in AgentRunStatus}
+    assert "paused" not in {status.value for status in AgentRunStatus}
+    assert attempt_outcome not in {"cancelled", "paused"}
+    assert agent_run_status not in {"cancelled", "paused"}
+    assert "cancelled" not in {outcome.value for outcome in AgentRunAttemptOutcome}
+    assert "paused" not in {outcome.value for outcome in AgentRunAttemptOutcome}
+
+
+async def test_captured_agent_run_telemetry_omits_content_and_secrets() -> None:
+    observability = RecordingObservabilityClient()
+    processor, _, _ = _create_traced_processor(
+        executor=RecordingExecutor(transaction_manager=RecordingTransactionManager()),
+        observability_client=observability,
+    )
+
+    await processor.execute(create_claim())
+
+    trace = observability.traces[0]
+    attempt = trace.observations[0]
+    _assert_safe_attempt_metadata(dict(trace.attributes.metadata))
+    _assert_safe_attempt_metadata(dict(attempt.attributes.metadata))
+    for update in [*trace.updates, *attempt.updates]:
+        _assert_safe_attempt_metadata(dict(update.metadata))
+    _assert_safe_captured_payload(observability.traces)
+
+
+async def test_concurrent_attempts_isolate_active_trace_context() -> None:
+    other_run_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-111111111111")
+    seen: dict[str, str | None] = {}
+    barrier = asyncio.Barrier(2)
+
+    class ContextCapturingExecutor:
+        def __init__(self, label: str) -> None:
+            self._label = label
+
+        async def execute(
+            self,
+            context: AgentRunExecutionContext,
+        ) -> CompletedExecution:
+            del context
+            await barrier.wait()
+            active = current_trace_context()
+            seen[self._label] = None if active is None else active.trace_seed
+            await barrier.wait()
+            return CompletedExecution()
+
+    first_client = ContextTrackingObservabilityClient()
+    second_client = ContextTrackingObservabilityClient()
+    first_processor, _, _ = _create_traced_processor(
+        executor=ContextCapturingExecutor("first"),
+        observability_client=first_client,
+    )
+    second_processor, _, _ = _create_traced_processor(
+        executor=ContextCapturingExecutor("second"),
+        observability_client=second_client,
+    )
+
+    first_claim = create_claim()
+    second_claim = create_claim()
+    second_claim = AgentRunClaim(
+        agent_run=replace(second_claim.agent_run, id=other_run_id),
+        attempt=replace(second_claim.attempt, agent_run_id=other_run_id),
+    )
+
+    results = await asyncio.gather(
+        first_processor.execute(first_claim),
+        second_processor.execute(second_claim),
+    )
+
+    assert results[0] is AgentRunTransitionResult.APPLIED
+    assert results[1] is AgentRunTransitionResult.APPLIED
+    assert seen["first"] == f"agent-run:{_RUN_ID}"
+    assert seen["second"] == f"agent-run:{other_run_id}"
+    assert current_trace_context() is None
+    assert current_observation_context() is None
+    assert first_client.traces[0].closed is True
+    assert second_client.traces[0].closed is True

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace, TracebackType
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -61,6 +61,7 @@ from supportops.modules.support_recommendations.domain.models import (
 from supportops.modules.tickets.domain.models import Ticket
 from supportops.observability.context import (
     ActiveObservationContext,
+    current_observation_context,
     observation_context_scope,
 )
 from supportops.observability.models import (
@@ -1445,3 +1446,462 @@ async def test_fail_workflow_preserves_typed_exception() -> None:
     assert scope.attributes.name == "graph-node.fail_workflow"
     assert scope.updates[0].status is ObservationStatus.ERROR
     assert scope.updates[0].error_code == "human_approved_decision_limit_exceeded"
+
+
+_FORBIDDEN_METADATA_KEYS = frozenset(
+    {
+        "graph_state",
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "classification_text",
+        "classification_summary",
+        "tool_arguments",
+        "tool_output",
+        "recommendation_text",
+        "response_text",
+        "evidence_content",
+        "checkpoint_payload",
+        "decision_summary",
+        "prompt_content",
+        "model_output",
+        "proposed_input",
+        "approval_comment",
+        "approver_identity",
+        "escalation_reason",
+        "citation_text",
+        "document_content",
+        "chunk_content",
+        "embedding_vectors",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "traceback",
+        "user_id",
+        "request_reason",
+    }
+)
+_HUMAN_APPROVED_NODE_NAMES = (
+    "graph-node.load_run_context",
+    "graph-node.ensure_classification",
+    "graph-node.decide_next_action",
+    "graph-node.execute_read_only_tool",
+    "graph-node.prepare_sensitive_action",
+    "graph-node.await_human_approval",
+    "graph-node.handle_approval_decision",
+    "graph-node.execute_sensitive_tool",
+    "graph-node.draft_grounded_recommendation",
+    "graph-node.validate_recommendation",
+    "graph-node.persist_recommendation",
+    "graph-node.fail_workflow",
+)
+
+
+def _assert_safe_metadata(metadata: Mapping[str, object]) -> None:
+    assert _FORBIDDEN_METADATA_KEYS.isdisjoint(metadata)
+    exported = repr(metadata)
+    assert "Operational review required." not in exported
+    assert "Grounded recommendation after approval decision." not in exported
+
+
+def _runtime() -> Any:
+    return SimpleNamespace(context=_execution_context())
+
+
+@pytest.mark.asyncio
+async def test_each_human_approved_node_creates_one_span_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langgraph.errors import GraphInterrupt
+
+    observability = _RecordingObservabilityClient(install_context=True)
+    nodes = _nodes(
+        approval_request=_tool_call_and_pending()[1],
+        sensitive_execution_executor=AsyncMock(),
+    )
+    object.__setattr__(nodes, "observability_client", cast(Any, observability))
+    runtime = _runtime()
+    initial = create_initial_human_approved_support_state(
+        workspace_id=_WORKSPACE_ID,
+        ticket_id=_TICKET_ID,
+        agent_run_id=_AGENT_RUN_ID,
+    )
+    classified = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **initial,
+            "run_context_loaded": True,
+            "classification_id": str(_CLASSIFICATION_ID),
+        },
+    )
+    decided = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **classified,
+            "decision_kind": "sensitive_tool",
+            "proposed_tool_name": "escalate_ticket",
+        },
+    )
+    prepared = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **decided,
+            "classification_category": "product_bug",
+            "classification_intent": "report_problem",
+            "classification_urgency": "high",
+            "classification_sentiment": "negative",
+            "classification_requires_human_review": True,
+            "classification_summary": "Operational review required.",
+            "approval_request_id": str(_APPROVAL_REQUEST_ID),
+            "approval_status": "pending",
+            "agent_tool_call_id": str(_AGENT_TOOL_CALL_ID),
+            "proposed_tool_provider_call_id": "call-1",
+            "proposed_tool_version": 1,
+            "proposed_tool_input": {
+                "target_queue": "support_operations",
+                "reason": "Operational review required.",
+            },
+            "proposed_tool_fingerprint": "a" * 64,
+            "approval_request_reason": "Operational review required.",
+            "approval_expires_at": (_NOW + timedelta(days=1)).isoformat(),
+            "decision_invocation_id": str(_DECISION_INVOCATION_ID),
+            "graph_step_count": 5,
+            "decision_turn_count": 1,
+            "tool_call_count": 1,
+        },
+    )
+    handled = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **prepared,
+            "approval_status": "approved",
+        },
+    )
+    executed = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **handled,
+            "sensitive_execution_output": {
+                "escalation_id": str(uuid4()),
+                "ticket_id": str(_TICKET_ID),
+                "target_queue": "support_operations",
+                "status": "escalated",
+            },
+        },
+    )
+    drafted = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **executed,
+            "recommendation_id": str(_RECOMMENDATION_ID),
+            "recommendation_stage": "drafted",
+        },
+    )
+    validated = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **drafted,
+            "recommendation_stage": "validated",
+        },
+    )
+    persisted = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **validated,
+            "recommendation_stage": "persisted",
+        },
+    )
+
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_load_run_context",
+        new=AsyncMock(return_value=classified),
+    ):
+        await nodes.load_run_context(initial, runtime)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_ensure_classification",
+        new=AsyncMock(return_value=classified),
+    ):
+        await nodes.ensure_classification(classified, runtime)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_decide_next_action",
+        new=AsyncMock(return_value=decided),
+    ):
+        await nodes.decide_next_action(classified, runtime)
+    with pytest.raises(TerminalAgentRunExecutionError):
+        await nodes.execute_read_only_tool(classified)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_prepare_sensitive_action",
+        new=AsyncMock(return_value=prepared),
+    ):
+        await nodes.prepare_sensitive_action(decided, runtime)
+
+    def _raise_interrupt(payload: object) -> object:
+        del payload
+        raise GraphInterrupt()
+
+    monkeypatch.setattr(
+        "supportops.agent_graph.application.human_approved_nodes.interrupt_for_approval",
+        _raise_interrupt,
+    )
+    with pytest.raises(GraphInterrupt):
+        await nodes.await_human_approval(
+            cast(HumanApprovedSupportGraphState, _pending_checkpoint()),
+        )
+
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_handle_approval_decision",
+        new=AsyncMock(return_value=handled),
+    ):
+        await nodes.handle_approval_decision(prepared, runtime)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_execute_sensitive_tool",
+        new=AsyncMock(return_value=executed),
+    ):
+        await nodes.execute_sensitive_tool(handled, runtime)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_draft_grounded_recommendation",
+        new=AsyncMock(return_value=drafted),
+    ):
+        await nodes.draft_grounded_recommendation(executed, runtime)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_validate_recommendation",
+        new=AsyncMock(return_value=validated),
+    ):
+        await nodes.validate_recommendation(drafted)
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_persist_recommendation",
+        new=AsyncMock(return_value=persisted),
+    ):
+        await nodes.persist_recommendation(validated)
+    with pytest.raises(TerminalAgentRunExecutionError):
+        await nodes.fail_workflow(
+            cast(
+                HumanApprovedSupportGraphState,
+                {
+                    **initial,
+                    "run_context_loaded": True,
+                    "current_error_code": "human_approved_decision_limit_exceeded",
+                    "graph_step_count": 2,
+                },
+            ),
+        )
+
+    names = [scope.attributes.name for scope in _node_scopes(observability)]
+    assert names == list(_HUMAN_APPROVED_NODE_NAMES)
+    assert all(
+        scope.attributes.observation_type is ObservationType.SPAN
+        for scope in _node_scopes(observability)
+    )
+    assert all(scope.closed for scope in _node_scopes(observability))
+    assert observability.active_stack == []
+    assert current_observation_context() is None
+    for scope in _node_scopes(observability):
+        _assert_safe_metadata(dict(scope.attributes.metadata))
+        for update in scope.updates:
+            _assert_safe_metadata(dict(update.metadata))
+
+
+@pytest.mark.asyncio
+async def test_provider_and_tool_observations_nest_under_active_human_approved_node() -> None:
+    observability = _RecordingObservabilityClient(install_context=True)
+    nodes = _nodes(
+        approval_request=_tool_call_and_pending()[1],
+        sensitive_execution_executor=AsyncMock(),
+    )
+    object.__setattr__(nodes, "observability_client", cast(Any, observability))
+    parents: list[str | None] = []
+
+    async def decide_with_nested(
+        *args: object,
+        **kwargs: object,
+    ) -> HumanApprovedSupportGraphState:
+        del args, kwargs
+        active = current_observation_context()
+        assert active is not None
+        assert active.name == "graph-node.decide_next_action"
+        with observability.start_observation(
+            ObservationAttributes(
+                name="llm.generate",
+                observation_type=ObservationType.GENERATION,
+            )
+        ):
+            parents.append(active.name)
+        with observability.start_observation(
+            ObservationAttributes(
+                name="tool.execute",
+                observation_type=ObservationType.TOOL,
+            )
+        ):
+            parents.append(active.name)
+        return cast(
+            HumanApprovedSupportGraphState,
+            {
+                **create_initial_human_approved_support_state(
+                    workspace_id=_WORKSPACE_ID,
+                    ticket_id=_TICKET_ID,
+                    agent_run_id=_AGENT_RUN_ID,
+                ),
+                "run_context_loaded": True,
+                "classification_id": str(_CLASSIFICATION_ID),
+                "decision_kind": "sensitive_tool",
+                "proposed_tool_name": "escalate_ticket",
+            },
+        )
+
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_decide_next_action",
+        new=AsyncMock(side_effect=decide_with_nested),
+    ):
+        await nodes.decide_next_action(
+            cast(
+                HumanApprovedSupportGraphState,
+                {
+                    **create_initial_human_approved_support_state(
+                        workspace_id=_WORKSPACE_ID,
+                        ticket_id=_TICKET_ID,
+                        agent_run_id=_AGENT_RUN_ID,
+                    ),
+                    "run_context_loaded": True,
+                    "classification_id": str(_CLASSIFICATION_ID),
+                },
+            ),
+            _runtime(),
+        )
+
+    names = [scope.attributes.name for scope in observability.scopes]
+    assert names.count("graph-node.decide_next_action") == 1
+    assert names.count("llm.generate") == 1
+    assert names.count("tool.execute") == 1
+    assert parents == [
+        "graph-node.decide_next_action",
+        "graph-node.decide_next_action",
+    ]
+    assert current_observation_context() is None
+    assert observability.active_stack == []
+
+
+@pytest.mark.asyncio
+async def test_pause_leaves_no_open_observation_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langgraph.errors import GraphInterrupt
+
+    observability = _RecordingObservabilityClient(install_context=True)
+    nodes = _nodes(
+        approval_request=_tool_call_and_pending()[1],
+        sensitive_execution_executor=AsyncMock(),
+    )
+    object.__setattr__(nodes, "observability_client", cast(Any, observability))
+
+    def _raise_interrupt(payload: object) -> object:
+        del payload
+        raise GraphInterrupt()
+
+    monkeypatch.setattr(
+        "supportops.agent_graph.application.human_approved_nodes.interrupt_for_approval",
+        _raise_interrupt,
+    )
+
+    with pytest.raises(GraphInterrupt):
+        await nodes.await_human_approval(
+            cast(HumanApprovedSupportGraphState, _pending_checkpoint()),
+        )
+
+    assert observability.active_stack == []
+    assert current_observation_context() is None
+    assert all(scope.closed for scope in observability.scopes)
+
+
+@pytest.mark.asyncio
+async def test_human_approved_node_observability_failures_fail_open() -> None:
+    observability = _RecordingObservabilityClient(
+        start_error=RuntimeError("start failed"),
+        update_error=RuntimeError("update failed"),
+        exit_error=RuntimeError("exit failed"),
+        install_context=True,
+    )
+    nodes = _nodes(
+        approval_request=_tool_call_and_pending()[1],
+        sensitive_execution_executor=AsyncMock(),
+    )
+    object.__setattr__(nodes, "observability_client", cast(Any, observability))
+    result_state = cast(
+        HumanApprovedSupportGraphState,
+        {
+            **create_initial_human_approved_support_state(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_AGENT_RUN_ID,
+            ),
+            "run_context_loaded": True,
+            "classification_id": str(_CLASSIFICATION_ID),
+        },
+    )
+
+    with patch.object(
+        HumanApprovedSupportWorkflowNodes,
+        "_ensure_classification",
+        new=AsyncMock(return_value=result_state),
+    ):
+        result = await nodes.ensure_classification(
+            create_initial_human_approved_support_state(
+                workspace_id=_WORKSPACE_ID,
+                ticket_id=_TICKET_ID,
+                agent_run_id=_AGENT_RUN_ID,
+            ),
+            _runtime(),
+        )
+
+    assert result["classification_id"] == str(_CLASSIFICATION_ID)
+    assert current_observation_context() is None
+
+
+@pytest.mark.asyncio
+async def test_resumed_invocation_reuses_agent_run_trace_identity() -> None:
+    observability = _RecordingObservabilityClient()
+    completed_state = _completed_graph_state()
+    graph = SimpleNamespace(
+        aget_state=AsyncMock(
+            return_value=_StubCheckpointSnapshot(
+                _pending_checkpoint(),
+                interrupts=(SimpleNamespace(value={"x": 1}),),
+            )
+        ),
+        ainvoke=AsyncMock(return_value=completed_state),
+    )
+    plan = ResumeGraphExecution(
+        approval_request_id=_APPROVAL_REQUEST_ID,
+        agent_tool_call_id=_AGENT_TOOL_CALL_ID,
+        decision_status=ApprovalResumeDecisionStatus.APPROVED,
+    )
+    executor = HumanApprovedSupportWorkflowExecutor(
+        graph=cast(Any, graph),
+        resume_planner=cast(Any, _Planner(plan)),
+        observability_client=cast(Any, observability),
+    )
+
+    await executor.execute(_execution_context())
+
+    assert observability.trace_events[0].identity.trace_seed == (  # type: ignore[attr-defined]
+        f"agent-run:{_AGENT_RUN_ID}"
+    )
+    assert observability.trace_events[0].identity.session_id == (  # type: ignore[attr-defined]
+        f"ticket:{_TICKET_ID}"
+    )
+    workflows = _workflow_scopes(observability)
+    assert len(workflows) == 1
+    assert workflows[0].attributes.metadata["invocation_mode"] == "resume"
+    _assert_safe_metadata(dict(workflows[0].attributes.metadata))
+    for update in workflows[0].updates:
+        _assert_safe_metadata(dict(update.metadata))

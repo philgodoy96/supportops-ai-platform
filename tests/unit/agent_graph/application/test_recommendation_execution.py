@@ -648,6 +648,39 @@ async def test_applied_recommendation_emits_generated_and_persisted_events() -> 
     exported = repr(events)
     assert "Follow the documented account recovery procedure." not in exported
     assert "The evidence supports a direct response." not in exported
+    forbidden = {
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "graph_state",
+        "checkpoint_payload",
+        "prompt_content",
+        "model_output",
+        "classification_text",
+        "tool_arguments",
+        "tool_output",
+        "proposed_input",
+        "approval_comment",
+        "approver_identity",
+        "escalation_reason",
+        "recommendation_text",
+        "decision_summary",
+        "citation_text",
+        "evidence_content",
+        "document_content",
+        "chunk_content",
+        "embedding_vectors",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "traceback",
+        "user_id",
+        "response_text",
+    }
+    for event in events:
+        assert forbidden.isdisjoint(event.metadata)
+        assert "grounding_status" not in event.metadata
 
 
 async def test_existing_recommendation_recovery_emits_no_lifecycle_events() -> None:
