@@ -121,14 +121,20 @@ The current platform includes:
 - application-owned AI observability abstraction with default no-op mode;
 - optional Langfuse adapter behind the application-owned boundary;
 - deterministic AgentRun and ticket trace-identity foundation;
-- metadata-only default capture with redacted-content opt-in;
-- fail-open observability client lifecycle for API, worker, and indexing CLI.
+- LLM provider request observations at the application-owned gateway boundary;
+- separate initial and repair generation observations;
+- tool-decision provider observations for controlled and human-approved flows;
+- embedding provider observations through an application-owned wrapper;
+- semantic retrieval observations with nested query-embedding observations;
+- deterministic knowledge-indexing traces with nested stage and embedding observations;
+- privacy-aware metadata-only default capture with redacted-content opt-in;
+- fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
 
 Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
 
 Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `controlled-support-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status. The controlled workflow may execute read-only tools and persist a support recommendation without mutating the ticket or executing write-capable actions. The deterministic baseline and direct classification workflows remain registered for historical or explicitly scheduled runs.
 
-Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant. Slice 7 introduces the application-owned AI observability foundation. Detailed generation, embedding, retrieval, tool, approval, and workflow instrumentation is delivered incrementally in subsequent Slice 7 pull requests. PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records.
+Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline and does not write to PostgreSQL or Qdrant. Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request. PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records.
 
 ## Engineering goals
 
@@ -348,20 +354,30 @@ Retrieval architecture is documented in [`docs/architecture/semantic-knowledge-r
 
 ### Optional application-owned AI observability
 
-Slice 7 introduces the application-owned AI observability foundation. Detailed generation, embedding, retrieval, tool, approval, and workflow instrumentation is delivered incrementally in subsequent Slice 7 pull requests.
+Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request.
 
-Implemented foundation behavior includes:
+Implemented behavior includes:
 
 - provider-independent observability contracts for traces, observations, events, usage, and cost;
 - default no-op adapter with no credentials and no network access;
 - optional Langfuse adapter enabled only through validated configuration;
 - deterministic AgentRun and ticket trace-identity foundation;
-- metadata-only default capture with redacted-content opt-in;
+- one generation observation per real `LLMGateway` provider request at the application-owned gateway boundary;
+- separate initial and repair generation observations;
+- tool-decision generation observations for controlled and human-approved flows without exporting tool content;
+- one embedding observation per real embedding provider call through an application-owned wrapper;
+- providers remain free of Langfuse imports;
+- semantic retrieval observations that export counts and technical metadata, not query or evidence content;
+- nested query-embedding observations under retrieval;
+- one deterministic knowledge-indexing root trace per indexing command execution;
+- nested indexing stage observations and nested embedding observations under indexing traces;
+- privacy-aware metadata-only default capture with redacted-content opt-in;
 - no unrestricted raw-content capture mode;
 - fail-open client lifecycle for the API, worker, and indexing CLI;
+- process-owned observability client sharing across API, worker, retrieval, embedding, and indexing;
 - privacy enforcement before data reaches the Langfuse SDK.
 
-PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records. Langfuse is a derived observability projection and is not a readiness dependency.
+PostgreSQL remains authoritative for business, workflow, audit, usage, and estimated-cost records. Query-embedding usage and cost remain ephemeral observability data and are not durably persisted. Langfuse is a derived observability projection and is not a readiness dependency.
 
 The optional Langfuse decision is recorded in [`docs/decisions/0013-use-optional-application-owned-langfuse-observability.md`](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md).
 
@@ -564,6 +580,7 @@ The repository includes:
 - knowledge-retrieval contracts, provenance validation, ranking, schemas, route, and lifespan coverage;
 - knowledge-retrieval integration coverage against real PostgreSQL and Qdrant with mock embeddings;
 - AI observability settings, models, identity, privacy, no-op adapter, and Langfuse fake-client coverage;
+- gateway, embedding, retrieval, and indexing observability instrumentation coverage;
 - API, worker, and indexing observability lifecycle coverage;
 - settings validation tests;
 - lifecycle tests;
@@ -592,7 +609,7 @@ Future modules or extensions will introduce:
 - multi-profile score fusion;
 - write-capable tools;
 - approval workflows;
-- detailed AI workflow instrumentation beyond the current observability foundation.
+- AgentRun, workflow, tool, approval, escalation, and recommendation tracing beyond the current provider, embedding, retrieval, and indexing observability.
 
 Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
 
@@ -1259,15 +1276,27 @@ Implemented:
 - default no-op observability mode;
 - optional Langfuse adapter;
 - deterministic AgentRun and ticket trace-identity foundation;
-- metadata-only default capture with redacted-content opt-in;
-- fail-open observability client lifecycle for API, worker, and indexing CLI.
+- LLM provider request observations with separate initial and repair generations;
+- tool-decision provider observations;
+- embedding provider observations;
+- semantic retrieval observations with nested query-embedding observations;
+- knowledge-indexing traces with nested stage and embedding observations;
+- privacy-aware metadata-only export with redacted-content opt-in;
+- fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
 
-Slice 7 introduces the application-owned AI observability foundation. Detailed generation, embedding, retrieval, tool, approval, and workflow instrumentation is delivered incrementally in subsequent Slice 7 pull requests.
+Slice 7 now includes provider, embedding, retrieval, and indexing observability. AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain planned for the next Slice 7 pull request.
 
 Planned:
 
 - operational cost reporting and invoice reconciliation;
-- detailed runtime AI workflow tracing instrumentation;
+- AgentRun root traces;
+- worker-attempt observations;
+- graph-node observations;
+- tool execution observations;
+- approval lifecycle events;
+- escalation observations;
+- recommendation workflow observations;
+- attempt-end flush behavior;
 - opt-in live Langfuse smoke validation;
 - evidence-driven prompt version 2;
 - prompt regression comparison across versions;
@@ -1303,7 +1332,7 @@ The following capabilities remain deferred to preserve architectural focus and a
 - multi-profile score fusion;
 - write-capable tools;
 - human approval workflows;
-- detailed runtime AI workflow tracing beyond the current observability foundation;
+- AgentRun, workflow, tool, approval, escalation, and recommendation tracing beyond the current provider, embedding, retrieval, and indexing observability;
 - opt-in live Langfuse smoke validation;
 - Phoenix integration;
 - RAGAS evaluation;
@@ -1320,7 +1349,7 @@ Workspace scoping establishes data ownership. It is not authentication or author
 
 Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
 
-The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, reranking, retrieval evaluation, and detailed runtime AI workflow instrumentation remain intentionally separated into later delivery boundaries.
+The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, classification inspection, controlled support inspection, offline evaluation, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, and indexing instrumentation are implemented. Evidence-driven prompt version 2, prompt regression comparison, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, RAGAS, reranking, retrieval evaluation, and AgentRun, workflow, tool, approval, escalation, and recommendation tracing remain intentionally separated into later delivery boundaries.
 
 The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
 

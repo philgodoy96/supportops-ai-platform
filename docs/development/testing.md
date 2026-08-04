@@ -104,6 +104,7 @@ They validate:
 - Langfuse adapter behavior with an injected fake client;
 - usage and cost payload mapping;
 - fail-open Langfuse SDK behavior;
+- gateway provider, embedding, retrieval, and indexing observability instrumentation;
 - API, worker, and indexing observability lifecycle ownership.
 
 Unit tests use mocks only at external boundaries.
@@ -346,22 +347,25 @@ Default tests use mock embeddings and make no OpenAI network calls.
 
 ## AI observability tests
 
-Slice 7 introduces the application-owned AI observability foundation. The
-current suite covers settings validation, contracts, identity, privacy,
-adapters, and process lifecycle ownership. Detailed generation, embedding,
-retrieval, tool, approval, and workflow instrumentation tests arrive in
-subsequent Slice 7 pull requests.
+Slice 7 now includes provider, embedding, retrieval, and indexing
+observability coverage. AgentRun, workflow, tool, approval, escalation, and
+recommendation tracing tests remain planned for the next Slice 7 pull request.
 
 Focused unit coverage:
 
 ```powershell
-uv run pytest tests/unit/observability
-uv run pytest tests/unit/core/test_settings.py -k langfuse
+uv run pytest tests/unit/ai/gateway
+uv run pytest tests/unit/ai/embeddings
+uv run pytest tests/unit/knowledge_retrieval
+uv run pytest tests/unit/knowledge_index
 uv run pytest tests/unit/api/test_lifespan.py
 uv run pytest tests/unit/worker/test_composition.py tests/unit/worker/test_main.py
+uv run pytest tests/unit/observability
+uv run pytest tests/unit/core/test_settings.py -k langfuse
 uv run pytest `
   tests/unit/knowledge_index/test_composition.py `
   tests/unit/knowledge_index/test_cli.py
+uv run pytest -m "not integration"
 ```
 
 The observability suites verify:
@@ -378,13 +382,34 @@ The observability suites verify:
 - Langfuse adapter behavior against an injected fake client;
 - usage and cost payload mapping, including known and unknown pricing;
 - fail-open SDK construction and export behavior;
-- API lifespan, worker composition, and indexing CLI observability lifecycle,
+- one provider request produces one provider observation at the
+  application-owned gateway boundary;
+- initial and repair requests produce separate generation observations;
+- tool-decision modes remain distinguishable without exporting tool content;
+- one embedding call produces one embedding observation through an
+  application-owned wrapper;
+- query and indexing embedding operations are distinguishable;
+- semantic retrieval owns one `RETRIEVER` observation that exports counts and
+  technical metadata, not query or evidence content;
+- query embedding nests under retrieval;
+- one indexing command owns one deterministic root trace;
+- embedding observations nest under indexing traces;
+- prompt, query, document, chunk, evidence, tool, and vector content remain
+  absent from default metadata-only export;
+- known mock zero cost remains explicit zero;
+- unknown pricing remains unknown;
+- missing usage does not fabricate cost;
+- telemetry failures do not alter business results, exceptions, persistence, or
+  exit codes;
+- API, worker, and indexing each own one process-scoped observability client,
   including shutdown isolation and readiness independence from Langfuse.
 
 Normal tests make no external Langfuse calls. Normal CI requires no Langfuse
-credentials. Live Langfuse smoke testing is not delivered by this foundation.
-External smoke validation will be opt-in in a later Slice 7 pull request. RAGAS
-and Langfuse evaluation remain deferred to Slice 8.
+credentials. Query-embedding usage and cost remain ephemeral observability data
+and are not durably persisted. PostgreSQL remains authoritative for durable LLM
+invocation and indexing usage and estimated-cost records. External Langfuse
+smoke validation remains planned. RAGAS and Langfuse evaluation remain deferred
+to Slice 8.
 
 ## Integration tests
 
@@ -1334,7 +1359,7 @@ Later implementation phases are expected to add tests for:
 - global AgentRun listing and status filtering;
 - retrieval quality scoring and reranking;
 - write-capable tool authorization beyond grant-gated internal escalation;
-- detailed generation, embedding, retrieval, tool, approval, and workflow
+- AgentRun, workflow, tool, approval, escalation, and recommendation
   observability instrumentation;
 - opt-in live Langfuse smoke validation;
 - prompt version 2 regression comparison;
@@ -1350,5 +1375,5 @@ classification inspection, controlled support workflow coverage, human-approved
 workflow coverage, approval and escalation inspection and decision APIs,
 immutable knowledge-document versioning, explicit knowledge indexing,
 active-version semantic knowledge retrieval, optional application-owned AI
-observability foundation coverage, and offline classification evaluation are
-part of the current suite.
+observability with provider, embedding, retrieval, and indexing coverage, and
+offline classification evaluation are part of the current suite.
