@@ -1,9 +1,14 @@
 """Explicit, retry-safe document-version indexing orchestration."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
+from typing import Final
 from uuid import UUID
 
 from supportops.ai.embeddings.contracts import (
@@ -57,8 +62,42 @@ from supportops.modules.knowledge_documents.domain.repositories import (
     DocumentChunkRepository,
     DocumentVersionRepository,
 )
+from supportops.observability.contracts import (
+    ObservabilityClient,
+    ObservationScope,
+)
+from supportops.observability.models import (
+    JsonValue,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+)
+from supportops.observability.noop import NoOpObservabilityClient
 
 DEFAULT_EMBEDDING_BATCH_SIZE = 64
+
+_UNEXPECTED_FAILURE_CODE: Final = "knowledge_index_unexpected_failure"
+
+_STAGE_LOAD: Final = "knowledge-index.load-document-version"
+_STAGE_CHUNK: Final = "knowledge-index.chunk-document"
+_STAGE_UPSERT: Final = "knowledge-index.upsert-vectors"
+_STAGE_VERIFY: Final = "knowledge-index.verify-index"
+_STAGE_PERSIST: Final = "knowledge-index.persist-outcome"
+
+_STAGE_METADATA_KEYS: Final = frozenset(
+    {
+        "chunk_count",
+        "batch_count",
+        "vector_count",
+        "expected_vector_count",
+        "verified_vector_count",
+        "persisted_status",
+        "latency_ms",
+        "error_code",
+    }
+)
+_STAGE_METADATA_PATHS: Final = frozenset((key,) for key in _STAGE_METADATA_KEYS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +123,7 @@ class IndexDocumentVersion:
         embedding_timeout_seconds: float,
         embedding_batch_size: int = (DEFAULT_EMBEDDING_BATCH_SIZE),
         clock: Callable[[], datetime] | None = None,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         if embedding_timeout_seconds <= 0:
             raise ValueError("embedding_timeout_seconds must be positive.")
@@ -109,6 +149,9 @@ class IndexDocumentVersion:
         self._embedding_timeout_seconds = embedding_timeout_seconds
         self._embedding_batch_size = embedding_batch_size
         self._clock = clock or _utc_now
+        self._observability_client = (
+            observability_client if observability_client is not None else NoOpObservabilityClient()
+        )
 
     async def execute(
         self,
@@ -119,11 +162,23 @@ class IndexDocumentVersion:
     ) -> IndexDocumentVersionResult:
         """Index one version without implicitly activating it."""
 
-        version = await self._prepare_version(
-            workspace_id=workspace_id,
-            document_id=document_id,
-            document_version_id=document_version_id,
+        load_stage = _SafeIndexingStage(
+            client=self._observability_client,
+            name=_STAGE_LOAD,
         )
+        load_stage.start()
+        try:
+            version = await self._prepare_version(
+                workspace_id=workspace_id,
+                document_id=document_id,
+                document_version_id=document_version_id,
+            )
+            load_stage.complete(_ok_stage_update(load_stage))
+        except Exception as error:
+            load_stage.complete(_error_stage_update(error))
+            raise
+        finally:
+            load_stage.close()
 
         if version.status is DocumentVersionStatus.READY:
             return IndexDocumentVersionResult(
@@ -132,7 +187,26 @@ class IndexDocumentVersion:
             )
 
         try:
-            chunks = self._generate_chunks(version)
+            chunk_stage = _SafeIndexingStage(
+                client=self._observability_client,
+                name=_STAGE_CHUNK,
+            )
+            chunk_stage.start()
+            try:
+                chunks = self._generate_chunks(version)
+                chunk_stage.complete(
+                    _ok_stage_update(
+                        chunk_stage,
+                        metadata={
+                            "chunk_count": len(chunks),
+                        },
+                    )
+                )
+            except Exception as error:
+                chunk_stage.complete(_error_stage_update(error))
+                raise
+            finally:
+                chunk_stage.close()
 
             await self._persist_chunks(
                 version=version,
@@ -165,34 +239,95 @@ class IndexDocumentVersion:
                 )
             )
 
-            await self._vector_store.upsert_version_points(
-                profile=collection_profile,
-                projection=projection,
-                points=points,
+            upsert_stage = _SafeIndexingStage(
+                client=self._observability_client,
+                name=_STAGE_UPSERT,
             )
+            upsert_stage.start()
+            try:
+                await self._vector_store.upsert_version_points(
+                    profile=collection_profile,
+                    projection=projection,
+                    points=points,
+                )
+                upsert_stage.complete(
+                    _ok_stage_update(
+                        upsert_stage,
+                        metadata={
+                            "vector_count": len(points),
+                            "chunk_count": len(chunks),
+                        },
+                    )
+                )
+            except Exception as error:
+                upsert_stage.complete(_error_stage_update(error))
+                raise
+            finally:
+                upsert_stage.close()
 
-            projected_count = await self._vector_store.count_version_points(
-                profile=collection_profile,
-                projection=projection,
+            verify_stage = _SafeIndexingStage(
+                client=self._observability_client,
+                name=_STAGE_VERIFY,
             )
-            if projected_count != len(chunks):
-                raise (KnowledgeProjectionCountMismatchError())
+            verify_stage.start()
+            try:
+                projected_count = await self._vector_store.count_version_points(
+                    profile=collection_profile,
+                    projection=projection,
+                )
+                if projected_count != len(chunks):
+                    raise (KnowledgeProjectionCountMismatchError())
 
-            ready_version = await self._mark_ready(
-                workspace_id=workspace_id,
-                document_id=document_id,
-                document_version_id=document_version_id,
-                chunk_count=len(chunks),
-                embedding_input_tokens=(embedding_outcome.input_tokens),
-                embedding_estimated_cost_usd=(cost_estimate.estimated_cost_usd),
-                pricing_catalog_version=(cost_estimate.pricing_catalog_version),
+                verify_stage.complete(
+                    _ok_stage_update(
+                        verify_stage,
+                        metadata={
+                            "expected_vector_count": len(chunks),
+                            "verified_vector_count": projected_count,
+                        },
+                    )
+                )
+            except Exception as error:
+                verify_stage.complete(_error_stage_update(error))
+                raise
+            finally:
+                verify_stage.close()
+
+            persist_stage = _SafeIndexingStage(
+                client=self._observability_client,
+                name=_STAGE_PERSIST,
             )
+            persist_stage.start()
+            try:
+                ready_version = await self._mark_ready(
+                    workspace_id=workspace_id,
+                    document_id=document_id,
+                    document_version_id=document_version_id,
+                    chunk_count=len(chunks),
+                    embedding_input_tokens=(embedding_outcome.input_tokens),
+                    embedding_estimated_cost_usd=(cost_estimate.estimated_cost_usd),
+                    pricing_catalog_version=(cost_estimate.pricing_catalog_version),
+                )
+                persist_stage.complete(
+                    _ok_stage_update(
+                        persist_stage,
+                        metadata={
+                            "persisted_status": (DocumentVersionStatus.READY.value),
+                            "chunk_count": len(chunks),
+                        },
+                    )
+                )
+            except Exception as error:
+                persist_stage.complete(_error_stage_update(error))
+                raise
+            finally:
+                persist_stage.close()
         except (
             EmbeddingError,
             KnowledgeIndexingError,
             KnowledgeVectorStoreError,
         ) as error:
-            await self._record_failure_without_masking(
+            await self._observe_failure_persistence(
                 workspace_id=workspace_id,
                 document_id=document_id,
                 document_version_id=document_version_id,
@@ -204,6 +339,38 @@ class IndexDocumentVersion:
             version=ready_version,
             already_ready=False,
         )
+
+    async def _observe_failure_persistence(
+        self,
+        *,
+        workspace_id: UUID,
+        document_id: UUID,
+        document_version_id: UUID,
+        error: Exception,
+    ) -> None:
+        persist_stage = _SafeIndexingStage(
+            client=self._observability_client,
+            name=_STAGE_PERSIST,
+        )
+        persist_stage.start()
+        try:
+            await self._record_failure_without_masking(
+                workspace_id=workspace_id,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                error=error,
+            )
+            persist_stage.complete(
+                _ok_stage_update(
+                    persist_stage,
+                    metadata={
+                        "persisted_status": (DocumentVersionStatus.FAILED.value),
+                        "error_code": _failure_error_code(error),
+                    },
+                )
+            )
+        finally:
+            persist_stage.close()
 
     async def _prepare_version(
         self,
@@ -454,6 +621,118 @@ class IndexDocumentVersion:
             vector_name=(self._index_profile.knowledge_vector_name),
             dimensions=(self._index_profile.embedding_dimensions),
         )
+
+
+class _SafeIndexingStage:
+    """Isolate stage-observation failures from indexing behavior."""
+
+    def __init__(
+        self,
+        *,
+        client: ObservabilityClient,
+        name: str,
+    ) -> None:
+        self._client = client
+        self._name = name
+        self._started_at = perf_counter()
+        self._manager: AbstractContextManager[ObservationScope] | None = None
+        self._scope: ObservationScope | None = None
+        self._completed = False
+
+    def start(self) -> None:
+        self._started_at = perf_counter()
+        try:
+            self._manager = self._client.start_observation(
+                ObservationAttributes(
+                    name=self._name,
+                    observation_type=ObservationType.SPAN,
+                    metadata={},
+                    metadata_paths=_STAGE_METADATA_PATHS,
+                    input_data=None,
+                    input_paths=frozenset(),
+                    output_paths=frozenset(),
+                )
+            )
+            self._scope = self._manager.__enter__()
+        except Exception:
+            self._manager = None
+            self._scope = None
+
+    def elapsed_milliseconds(self) -> int:
+        return max(
+            0,
+            round((perf_counter() - self._started_at) * 1000),
+        )
+
+    def complete(self, update: ObservationUpdate | None) -> None:
+        if self._scope is None or update is None or self._completed:
+            return
+
+        try:
+            self._scope.update(update)
+            self._completed = True
+        except Exception:
+            return
+
+    def close(self) -> None:
+        if self._manager is None:
+            return
+
+        try:
+            self._manager.__exit__(None, None, None)
+        except Exception:
+            return
+        finally:
+            self._manager = None
+            self._scope = None
+
+
+def _ok_stage_update(
+    stage: _SafeIndexingStage,
+    *,
+    metadata: dict[str, JsonValue] | None = None,
+) -> ObservationUpdate | None:
+    try:
+        payload: dict[str, JsonValue] = {
+            "latency_ms": stage.elapsed_milliseconds(),
+        }
+        if metadata is not None:
+            payload.update(metadata)
+
+        return ObservationUpdate(
+            status=ObservationStatus.OK,
+            metadata=payload,
+        )
+    except Exception:
+        return None
+
+
+def _error_stage_update(error: BaseException) -> ObservationUpdate | None:
+    try:
+        error_code = _observation_error_code(error)
+        return ObservationUpdate(
+            status=ObservationStatus.ERROR,
+            metadata={
+                "error_code": error_code,
+            },
+            error_code=error_code,
+        )
+    except Exception:
+        return None
+
+
+def _observation_error_code(error: BaseException) -> str:
+    if isinstance(
+        error,
+        (
+            EmbeddingError,
+            KnowledgeIndexingError,
+            KnowledgeVectorStoreError,
+        ),
+    ):
+        return _failure_error_code(error)
+
+    return _UNEXPECTED_FAILURE_CODE
 
 
 def _version_projection(

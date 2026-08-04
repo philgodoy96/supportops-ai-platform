@@ -1,10 +1,14 @@
 """Unit tests for the operator-controlled knowledge indexing CLI."""
 
+from __future__ import annotations
+
 import json
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
+from types import TracebackType
+from typing import Literal, cast
 from uuid import UUID
 
 from supportops.ai.embeddings.errors import (
@@ -15,6 +19,7 @@ from supportops.core.settings import (
     Settings,
 )
 from supportops.knowledge_index.cli import (
+    KnowledgeIndexCommandRuntime,
     run_cli,
 )
 from supportops.knowledge_index.composition import (
@@ -27,6 +32,18 @@ from supportops.modules.knowledge_documents.domain.models import (
     DocumentMediaType,
     DocumentVersion,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.identity import (
+    knowledge_index_trace_identity,
+)
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationUpdate,
+    TraceAttributes,
+)
 
 _WORKSPACE_ID = UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4")
 _DOCUMENT_ID = UUID("276046a2-28ec-4cb1-8bb6-a2ff70f9064b")
@@ -38,6 +55,17 @@ _INDEXED_AT = datetime(
     2,
     0,
     tzinfo=UTC,
+)
+
+_FORBIDDEN_METADATA_TOKENS = (
+    "content",
+    "chunk_content",
+    "chunk_preview",
+    "embedding_vector",
+    "lease_token",
+    "execution_grant",
+    "input_data",
+    "output_data",
 )
 
 
@@ -101,6 +129,150 @@ def create_ready_result(
     )
 
 
+class RecordingTraceScope:
+    def __init__(
+        self,
+        *,
+        attributes: TraceAttributes,
+        fail_update: bool = False,
+    ) -> None:
+        self.attributes = attributes
+        self.fail_update = fail_update
+        self.updates: list[ObservationUpdate] = []
+
+    @property
+    def trace_seed(self) -> str:
+        return self.attributes.trace_seed
+
+    @property
+    def trace_id(self) -> str | None:
+        return "trace-test"
+
+    @property
+    def session_id(self) -> str | None:
+        return self.attributes.session_id
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self.fail_update:
+            raise RuntimeError("synthetic trace update failure")
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[object]:
+        del attributes
+        raise AssertionError("CLI tests must not start nested observations.")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("CLI tests must not record events.")
+
+
+class RecordingTraceManager(AbstractContextManager[RecordingTraceScope]):
+    def __init__(
+        self,
+        *,
+        scope: RecordingTraceScope,
+        fail_enter: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self.scope = scope
+        self.fail_enter = fail_enter
+        self.fail_exit = fail_exit
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> RecordingTraceScope:
+        if self.fail_enter:
+            raise RuntimeError("synthetic trace enter failure")
+        self.entered = True
+        return self.scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, exc, traceback
+        if self.fail_exit:
+            raise RuntimeError("synthetic trace exit failure")
+        self.exited = True
+        return False
+
+
+class RecordingObservabilityClient:
+    """Record one process-owned observability client for CLI tests."""
+
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_enter: bool = False,
+        fail_update: bool = False,
+        fail_exit: bool = False,
+        shutdown_error: Exception | None = None,
+    ) -> None:
+        self._fail_start = fail_start
+        self._fail_enter = fail_enter
+        self._fail_update = fail_update
+        self._fail_exit = fail_exit
+        self.shutdown_error = shutdown_error
+        self.shutdown_calls = 0
+        self.trace_attributes: list[TraceAttributes] = []
+        self.trace_scopes: list[RecordingTraceScope] = []
+        self.trace_managers: list[RecordingTraceManager] = []
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[RecordingTraceScope]:
+        if self._fail_start:
+            raise RuntimeError("synthetic trace start failure")
+
+        scope = RecordingTraceScope(
+            attributes=attributes,
+            fail_update=self._fail_update,
+        )
+        manager = RecordingTraceManager(
+            scope=scope,
+            fail_enter=self._fail_enter,
+            fail_exit=self._fail_exit,
+        )
+        self.trace_attributes.append(attributes)
+        self.trace_scopes.append(scope)
+        self.trace_managers.append(manager)
+        return manager
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[object]:
+        del attributes
+        raise AssertionError("CLI must not start observations directly.")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("CLI must not record events.")
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
 class FakeObservabilityClient:
     """Record observability shutdown for CLI lifecycle tests."""
 
@@ -121,9 +293,18 @@ class FakeRuntime:
         self,
         *,
         settings: Settings,
+        observability_client: (
+            FakeObservabilityClient | RecordingObservabilityClient | None
+        ) = None,
     ) -> None:
         self.index_profile = build_knowledge_index_profile(settings)
-        self.observability_client = FakeObservabilityClient()
+        self.observability_recorder: FakeObservabilityClient | RecordingObservabilityClient = (
+            observability_client or FakeObservabilityClient()
+        )
+        self.observability_client = cast(
+            ObservabilityClient,
+            self.observability_recorder,
+        )
         self.ensure_calls = 0
         self.index_calls: list[tuple[UUID, UUID, UUID]] = []
         self.closed = 0
@@ -158,7 +339,7 @@ class FakeRuntime:
     async def close(self) -> None:
         self.closed += 1
         with suppress(Exception):
-            self.observability_client.shutdown()
+            self.observability_recorder.shutdown()
         if self.close_error is not None:
             raise self.close_error
 
@@ -177,9 +358,27 @@ class FakeRuntimeFactory:
         self,
         *,
         settings: Settings,
-    ) -> FakeRuntime:
+    ) -> KnowledgeIndexCommandRuntime:
         self.calls.append(settings)
         return self.runtime
+
+
+def _index_argv() -> list[str]:
+    return [
+        "index-version",
+        "--workspace-id",
+        str(_WORKSPACE_ID),
+        "--document-id",
+        str(_DOCUMENT_ID),
+        "--document-version-id",
+        str(_VERSION_ID),
+    ]
+
+
+def _assert_content_free_metadata(metadata: object) -> None:
+    payload = json.dumps(metadata, default=str).lower()
+    for token in _FORBIDDEN_METADATA_TOKENS:
+        assert token not in payload
 
 
 async def test_ensure_collection_writes_stable_json_summary() -> None:
@@ -223,15 +422,7 @@ async def test_index_version_passes_scoped_ids_and_writes_summary() -> None:
     stderr = StringIO()
 
     exit_code = await run_cli(
-        [
-            "index-version",
-            "--workspace-id",
-            str(_WORKSPACE_ID),
-            "--document-id",
-            str(_DOCUMENT_ID),
-            "--document-version-id",
-            str(_VERSION_ID),
-        ],
+        _index_argv(),
         stdout=stdout,
         stderr=stderr,
         settings_factory=lambda: settings,
@@ -344,15 +535,7 @@ async def test_owned_operational_error_returns_runtime_failure() -> None:
     stderr = StringIO()
 
     exit_code = await run_cli(
-        [
-            "index-version",
-            "--workspace-id",
-            str(_WORKSPACE_ID),
-            "--document-id",
-            str(_DOCUMENT_ID),
-            "--document-version-id",
-            str(_VERSION_ID),
-        ],
+        _index_argv(),
         stdout=stdout,
         stderr=stderr,
         settings_factory=lambda: settings,
@@ -409,7 +592,7 @@ async def test_close_failure_changes_success_to_runtime_failure() -> None:
     assert exit_code == 1
     assert runtime.ensure_calls == 1
     assert runtime.closed == 1
-    assert runtime.observability_client.shutdown_calls == 1
+    assert runtime.observability_recorder.shutdown_calls == 1
     assert json.loads(stdout.getvalue())["status"] == "compatible"
     assert stderr.getvalue() == (
         "indexing_runtime_error: Knowledge indexing resources could not be closed safely.\n"
@@ -432,7 +615,7 @@ async def test_observability_shutdown_on_success() -> None:
     assert exit_code == 0
     assert len(factory.calls) == 1
     assert runtime.closed == 1
-    assert runtime.observability_client.shutdown_calls == 1
+    assert runtime.observability_recorder.shutdown_calls == 1
 
 
 async def test_observability_shutdown_on_indexing_failure() -> None:
@@ -442,15 +625,7 @@ async def test_observability_shutdown_on_indexing_failure() -> None:
     factory = FakeRuntimeFactory(runtime)
 
     exit_code = await run_cli(
-        [
-            "index-version",
-            "--workspace-id",
-            str(_WORKSPACE_ID),
-            "--document-id",
-            str(_DOCUMENT_ID),
-            "--document-version-id",
-            str(_VERSION_ID),
-        ],
+        _index_argv(),
         stdout=StringIO(),
         stderr=StringIO(),
         settings_factory=lambda: settings,
@@ -459,13 +634,13 @@ async def test_observability_shutdown_on_indexing_failure() -> None:
 
     assert exit_code == 1
     assert runtime.closed == 1
-    assert runtime.observability_client.shutdown_calls == 1
+    assert runtime.observability_recorder.shutdown_calls == 1
 
 
 async def test_observability_shutdown_failure_preserves_successful_exit_code() -> None:
     settings = create_settings()
     runtime = FakeRuntime(settings=settings)
-    runtime.observability_client.shutdown_error = RuntimeError(
+    runtime.observability_recorder.shutdown_error = RuntimeError(
         "observability shutdown failed",
     )
     factory = FakeRuntimeFactory(runtime)
@@ -481,7 +656,7 @@ async def test_observability_shutdown_failure_preserves_successful_exit_code() -
 
     assert exit_code == 0
     assert runtime.closed == 1
-    assert runtime.observability_client.shutdown_calls == 1
+    assert runtime.observability_recorder.shutdown_calls == 1
     assert stderr.getvalue() == ""
 
 
@@ -489,22 +664,14 @@ async def test_observability_shutdown_failure_preserves_indexing_failure() -> No
     settings = create_settings()
     runtime = FakeRuntime(settings=settings)
     runtime.index_error = EmbeddingTimeoutError()
-    runtime.observability_client.shutdown_error = RuntimeError(
+    runtime.observability_recorder.shutdown_error = RuntimeError(
         "observability shutdown failed",
     )
     factory = FakeRuntimeFactory(runtime)
     stderr = StringIO()
 
     exit_code = await run_cli(
-        [
-            "index-version",
-            "--workspace-id",
-            str(_WORKSPACE_ID),
-            "--document-id",
-            str(_DOCUMENT_ID),
-            "--document-version-id",
-            str(_VERSION_ID),
-        ],
+        _index_argv(),
         stdout=StringIO(),
         stderr=stderr,
         settings_factory=lambda: settings,
@@ -513,7 +680,208 @@ async def test_observability_shutdown_failure_preserves_indexing_failure() -> No
 
     assert exit_code == 1
     assert runtime.closed == 1
-    assert runtime.observability_client.shutdown_calls == 1
+    assert runtime.observability_recorder.shutdown_calls == 1
     assert stderr.getvalue() == (
         "indexing_runtime_error: The embedding provider request exceeded its configured timeout.\n"
     )
+
+
+async def test_index_version_creates_one_deterministic_trace_before_shutdown() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient()
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert len(observability.trace_attributes) == 1
+    assert len(factory.calls) == 1
+
+    attributes = observability.trace_attributes[0]
+    execution_id = attributes.metadata["execution_id"]
+    assert isinstance(execution_id, str)
+    identity = knowledge_index_trace_identity(execution_id=execution_id)
+
+    assert attributes.name == "knowledge-index"
+    assert attributes.trace_seed == identity.trace_seed
+    assert attributes.tags == identity.tags
+    assert attributes.session_id is None
+    assert attributes.metadata["workspace_id"] == str(_WORKSPACE_ID)
+    assert attributes.metadata["document_id"] == str(_DOCUMENT_ID)
+    assert attributes.metadata["document_version_id"] == str(_VERSION_ID)
+    assert "correlation_id" not in attributes.metadata
+    _assert_content_free_metadata(attributes.metadata)
+
+    manager = observability.trace_managers[0]
+    scope = observability.trace_scopes[0]
+    assert manager.entered is True
+    assert manager.exited is True
+    assert scope.updates[-1].status is ObservationStatus.OK
+    assert manager.exited is True
+    assert observability.shutdown_calls == 1
+    assert runtime.closed == 1
+
+
+async def test_index_version_failure_closes_trace_before_shutdown() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient()
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    runtime.index_error = EmbeddingTimeoutError()
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 1
+    assert len(observability.trace_attributes) == 1
+    scope = observability.trace_scopes[0]
+    assert scope.updates[-1].status is ObservationStatus.ERROR
+    assert scope.updates[-1].error_code == "embedding_timeout"
+    assert observability.trace_managers[0].exited is True
+    assert observability.shutdown_calls == 1
+
+
+async def test_trace_start_failure_preserves_success_exit_code() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient(fail_start=True)
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert runtime.index_calls == [
+        (
+            _WORKSPACE_ID,
+            _DOCUMENT_ID,
+            _VERSION_ID,
+        )
+    ]
+    assert observability.shutdown_calls == 1
+
+
+async def test_trace_update_failure_preserves_success_exit_code() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient(fail_update=True)
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert observability.trace_managers[0].exited is True
+    assert observability.shutdown_calls == 1
+
+
+async def test_trace_exit_failure_preserves_success_exit_code() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient(fail_exit=True)
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    factory = FakeRuntimeFactory(runtime)
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=StringIO(),
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert observability.shutdown_calls == 1
+
+
+async def test_shutdown_failure_preserves_success_after_traced_index() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient(
+        shutdown_error=RuntimeError("observability shutdown failed"),
+    )
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    factory = FakeRuntimeFactory(runtime)
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 0
+    assert observability.trace_managers[0].exited is True
+    assert observability.shutdown_calls == 1
+    assert stderr.getvalue() == ""
+
+
+async def test_original_failure_exit_code_remains_authoritative_with_trace() -> None:
+    settings = create_settings()
+    observability = RecordingObservabilityClient(
+        fail_update=True,
+        fail_exit=True,
+        shutdown_error=RuntimeError("shutdown failed"),
+    )
+    runtime = FakeRuntime(
+        settings=settings,
+        observability_client=observability,
+    )
+    runtime.index_error = EmbeddingTimeoutError()
+    factory = FakeRuntimeFactory(runtime)
+    stderr = StringIO()
+
+    exit_code = await run_cli(
+        _index_argv(),
+        stdout=StringIO(),
+        stderr=stderr,
+        settings_factory=lambda: settings,
+        runtime_factory=factory,
+    )
+
+    assert exit_code == 1
+    assert stderr.getvalue() == (
+        "indexing_runtime_error: The embedding provider request exceeded its configured timeout.\n"
+    )
+    assert len(factory.calls) == 1
+    assert observability.shutdown_calls == 1

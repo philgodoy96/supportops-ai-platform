@@ -133,6 +133,7 @@ class KnowledgeIndexRuntime:
                 pricing_catalog=(DEFAULT_EMBEDDING_PRICING_CATALOG),
                 index_profile=self.index_profile,
                 embedding_timeout_seconds=(self.settings.embedding_request_timeout_seconds),
+                observability_client=self.observability_client,
             )
 
             return await service.execute(
