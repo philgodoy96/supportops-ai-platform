@@ -53,6 +53,7 @@ def get_search_knowledge(
         vector_searcher=vector_searcher,
         index_profile=(state.knowledge_index_profile),
         embedding_timeout_seconds=(state.settings.embedding_request_timeout_seconds),
+        observability_client=state.observability_client,
     )
 
 

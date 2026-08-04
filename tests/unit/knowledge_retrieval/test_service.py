@@ -1,9 +1,12 @@
 """Unit tests for active authoritative semantic retrieval."""
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from types import TracebackType
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -16,6 +19,13 @@ from supportops.ai.embeddings.contracts import (
 )
 from supportops.ai.embeddings.errors import (
     EmbeddingInvalidResponseError,
+    EmbeddingTimeoutError,
+)
+from supportops.ai.embeddings.observability import (
+    ObservingEmbeddingProvider,
+)
+from supportops.knowledge_index.vector_store.contracts import (
+    KnowledgeVectorStoreUnavailableError,
 )
 from supportops.knowledge_retrieval.contracts import (
     ActiveKnowledgeVersion,
@@ -31,6 +41,16 @@ from supportops.modules.knowledge_documents.domain.models import (
     DocumentChunk,
     DocumentMediaType,
     KnowledgeIndexProfile,
+)
+from supportops.observability.contracts import TraceScope
+from supportops.observability.models import (
+    EventObservation,
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    TraceAttributes,
 )
 
 _WORKSPACE_ID = UUID("032c8c87-57cc-4d14-bfbd-04968b4e8cd4")
@@ -140,8 +160,11 @@ class FakeActiveVersionResolver:
     def __init__(
         self,
         versions: Sequence[ActiveKnowledgeVersion] = (),
+        *,
+        error: Exception | None = None,
     ) -> None:
         self.versions = tuple(versions)
+        self.error = error
         self.calls: list[tuple[UUID, tuple[UUID, ...]]] = []
 
     async def resolve(
@@ -156,6 +179,8 @@ class FakeActiveVersionResolver:
                 document_ids,
             )
         )
+        if self.error is not None:
+            raise self.error
         return self.versions
 
 
@@ -204,12 +229,16 @@ class FakeEmbeddingProvider:
                 0.0,
             ),
         )
+        self.error: Exception | None = None
 
     async def embed(
         self,
         request: EmbeddingRequest,
     ) -> EmbeddingProviderResponse:
         self.requests.append(request)
+
+        if self.error is not None:
+            raise self.error
 
         return EmbeddingProviderResponse(
             embeddings=self.embeddings,
@@ -233,8 +262,11 @@ class FakeVectorSearcher:
     def __init__(
         self,
         candidates: Sequence[KnowledgeVectorCandidate] = (),
+        *,
+        error: Exception | None = None,
     ) -> None:
         self.candidates = tuple(candidates)
+        self.error = error
         self.requests: list[KnowledgeVectorSearchRequest] = []
 
     async def search(
@@ -242,7 +274,141 @@ class FakeVectorSearcher:
         request: KnowledgeVectorSearchRequest,
     ) -> Sequence[KnowledgeVectorCandidate]:
         self.requests.append(request)
+        if self.error is not None:
+            raise self.error
         return self.candidates
+
+
+class RecordingObservationScope:
+    def __init__(
+        self,
+        *,
+        fail_update: bool = False,
+    ) -> None:
+        self._fail_update = fail_update
+        self.updates: list[ObservationUpdate] = []
+
+    @property
+    def observation_id(self) -> str | None:
+        return "retrieval-observation-1"
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self._fail_update:
+            raise RuntimeError("synthetic update failure")
+
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager["RecordingObservationScope"]:
+        del attributes
+        raise AssertionError("Nested observations are not expected on the scope.")
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Events are not expected.")
+
+
+class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    def __init__(
+        self,
+        *,
+        scope: RecordingObservationScope,
+        fail_enter: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self._scope = scope
+        self._fail_enter = fail_enter
+        self._fail_exit = fail_exit
+        self.exit_calls = 0
+
+    def __enter__(self) -> RecordingObservationScope:
+        if self._fail_enter:
+            raise RuntimeError("synthetic enter failure")
+
+        return self._scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type
+        del exc
+        del traceback
+
+        self.exit_calls += 1
+
+        if self._fail_exit:
+            raise RuntimeError("synthetic exit failure")
+
+        return False
+
+
+class RecordingObservabilityClient:
+    def __init__(
+        self,
+        *,
+        fail_start: bool = False,
+        fail_enter: bool = False,
+        fail_update: bool = False,
+        fail_exit: bool = False,
+    ) -> None:
+        self._fail_start = fail_start
+        self._fail_enter = fail_enter
+        self._fail_update = fail_update
+        self._fail_exit = fail_exit
+
+        self.attributes: list[ObservationAttributes] = []
+        self.scopes: list[RecordingObservationScope] = []
+        self.managers: list[RecordingObservationManager] = []
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[TraceScope]:
+        del attributes
+        raise AssertionError("Retrieval tracing must not create roots.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        if self._fail_start:
+            raise RuntimeError("synthetic start failure")
+
+        scope = RecordingObservationScope(fail_update=self._fail_update)
+        manager = RecordingObservationManager(
+            scope=scope,
+            fail_enter=self._fail_enter,
+            fail_exit=self._fail_exit,
+        )
+
+        self.attributes.append(attributes)
+        self.scopes.append(scope)
+        self.managers.append(manager)
+
+        return manager
+
+    def record_event(self, event: EventObservation) -> None:
+        del event
+        raise AssertionError("Retrieval tracing must not emit events.")
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        return None
 
 
 def create_service(
@@ -251,38 +417,54 @@ def create_service(
     chunks: Sequence[DocumentChunk] = (),
     candidates: Sequence[KnowledgeVectorCandidate] = (),
     profile: KnowledgeIndexProfile | None = None,
+    observability_client: RecordingObservabilityClient | None = None,
+    embedding_provider: FakeEmbeddingProvider | ObservingEmbeddingProvider | None = None,
+    vector_searcher: FakeVectorSearcher | None = None,
+    resolver: FakeActiveVersionResolver | None = None,
 ) -> tuple[
     SearchKnowledge,
     FakeActiveVersionResolver,
     FakeChunkHydrator,
-    FakeEmbeddingProvider,
+    FakeEmbeddingProvider | ObservingEmbeddingProvider,
     FakeVectorSearcher,
 ]:
     """Compose the service around test doubles."""
 
-    resolver = FakeActiveVersionResolver(versions)
+    resolved_resolver = resolver or FakeActiveVersionResolver(versions)
     hydrator = FakeChunkHydrator(chunks)
-    embedding_provider = FakeEmbeddingProvider()
-    vector_searcher = FakeVectorSearcher(candidates)
+    resolved_embedding_provider = embedding_provider or FakeEmbeddingProvider()
+    resolved_vector_searcher = vector_searcher or FakeVectorSearcher(candidates)
     resolved_profile = profile or create_profile()
 
     service = SearchKnowledge(
-        active_version_resolver=resolver,
+        active_version_resolver=resolved_resolver,
         chunk_hydrator=hydrator,
-        embedding_provider=(embedding_provider),
-        vector_searcher=vector_searcher,
+        embedding_provider=(resolved_embedding_provider),
+        vector_searcher=resolved_vector_searcher,
         index_profile=resolved_profile,
         embedding_timeout_seconds=12,
         candidate_multiplier=4,
+        observability_client=observability_client,
     )
 
     return (
         service,
-        resolver,
+        resolved_resolver,
         hydrator,
-        embedding_provider,
-        vector_searcher,
+        resolved_embedding_provider,
+        resolved_vector_searcher,
     )
+
+
+def _successful_search_fixture() -> tuple[
+    ActiveKnowledgeVersion,
+    DocumentChunk,
+    KnowledgeVectorCandidate,
+]:
+    active = create_active_version()
+    chunk = create_chunk(chunk_id=UUID(int=401))
+    candidate = create_candidate(chunk, score=0.91)
+    return active, chunk, candidate
 
 
 async def test_empty_active_scope_returns_without_external_work() -> None:
@@ -311,6 +493,7 @@ async def test_empty_active_scope_returns_without_external_work() -> None:
             (_DOCUMENT_A_ID,),
         )
     ]
+    assert isinstance(embedding_provider, FakeEmbeddingProvider)
     assert embedding_provider.requests == []
     assert vector_searcher.requests == []
     assert hydrator.calls == []
@@ -337,6 +520,7 @@ async def test_incompatible_active_profile_is_safely_omitted(
 
     assert result.searched_version_count == 0
     assert result.evidence == ()
+    assert isinstance(embedding_provider, FakeEmbeddingProvider)
     assert embedding_provider.requests == []
     assert vector_searcher.requests == []
     assert hydrator.calls == []
@@ -411,6 +595,7 @@ async def test_embeds_query_searches_active_targets_and_hydrates() -> None:
         )
     ]
 
+    assert isinstance(embedding_provider, FakeEmbeddingProvider)
     assert len(embedding_provider.requests) == 1
     embedding_request = embedding_provider.requests[0]
     assert embedding_request.operation is (EmbeddingOperation.KNOWLEDGE_QUERY)
@@ -648,6 +833,7 @@ async def test_rejects_invalid_query_embedding_response(
         embedding_provider,
         vector_searcher,
     ) = create_service(versions=(active,))
+    assert isinstance(embedding_provider, FakeEmbeddingProvider)
     embedding_provider.response_provider = response_provider
     embedding_provider.response_model = response_model
     embedding_provider.response_dimensions = response_dimensions
@@ -710,3 +896,274 @@ def test_service_rejects_provider_profile_mismatch() -> None:
             index_profile=create_profile(),
             embedding_timeout_seconds=12,
         )
+
+
+async def test_successful_search_creates_one_retriever_observation() -> None:
+    active, chunk, candidate = _successful_search_fixture()
+    observability = RecordingObservabilityClient()
+    (
+        service,
+        _,
+        _,
+        embedding_provider,
+        _,
+    ) = create_service(
+        versions=(active,),
+        chunks=(chunk,),
+        candidates=(candidate,),
+        observability_client=observability,
+    )
+
+    request = KnowledgeSearchRequest(
+        workspace_id=_WORKSPACE_ID,
+        query="recover the database",
+        top_k=3,
+        document_ids=(_DOCUMENT_A_ID,),
+    )
+    result = await service.execute(request)
+
+    assert len(result.evidence) == 1
+    assert len(observability.attributes) == 1
+    assert len(observability.scopes) == 1
+    assert observability.managers[0].exit_calls == 1
+
+    attributes = observability.attributes[0]
+    assert attributes.name == "knowledge.search"
+    assert attributes.observation_type is ObservationType.RETRIEVER
+    assert attributes.input_data is None
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+    assert attributes.metadata == {
+        "workspace_id": str(_WORKSPACE_ID),
+        "top_k": 3,
+        "requested_document_count": 1,
+        "embedding_provider": "mock",
+        "embedding_model": "mock-hashing-embedding-v1",
+        "embedding_dimensions": 3,
+    }
+    assert "recover the database" not in str(attributes.metadata)
+    assert request.query not in str(attributes)
+
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.OK
+    assert update.output_data is None
+    assert update.metadata["searched_version_count"] == 1
+    assert update.metadata["candidate_count"] == 1
+    assert update.metadata["hydrated_candidate_count"] == 1
+    assert update.metadata["evidence_count"] == 1
+    assert update.metadata["filtered_candidate_count"] == 0
+    assert update.metadata["status"] == ObservationStatus.OK.value
+    assert isinstance(update.metadata["latency_ms"], int)
+    assert chunk.content not in str(update.metadata)
+    assert str(chunk.id) not in str(update)
+    assert isinstance(embedding_provider, FakeEmbeddingProvider)
+    assert len(embedding_provider.requests) == 1
+
+
+async def test_empty_evidence_remains_ok() -> None:
+    active = create_active_version()
+    observability = RecordingObservabilityClient()
+    (service, _, _, _, _) = create_service(
+        versions=(active,),
+        candidates=(),
+        observability_client=observability,
+    )
+
+    result = await service.execute(
+        KnowledgeSearchRequest(
+            workspace_id=_WORKSPACE_ID,
+            query="recover the database",
+        )
+    )
+
+    assert result.evidence == ()
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.OK
+    assert update.metadata["evidence_count"] == 0
+    assert update.metadata["candidate_count"] == 0
+    assert update.metadata["status"] == ObservationStatus.OK.value
+
+
+async def test_normalized_embedding_failure_marks_error_and_preserves_exception() -> None:
+    active = create_active_version()
+    observability = RecordingObservabilityClient()
+    embedding_provider = FakeEmbeddingProvider()
+    embedding_provider.error = EmbeddingTimeoutError(
+        provider_request_id="timeout-1",
+    )
+    (service, _, _, _, _) = create_service(
+        versions=(active,),
+        embedding_provider=embedding_provider,
+        observability_client=observability,
+    )
+
+    with pytest.raises(EmbeddingTimeoutError) as captured:
+        await service.execute(
+            KnowledgeSearchRequest(
+                workspace_id=_WORKSPACE_ID,
+                query="recover the database",
+            )
+        )
+
+    assert captured.value is embedding_provider.error
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == "embedding_timeout"
+    assert update.metadata["error_code"] == "embedding_timeout"
+
+
+async def test_normalized_vector_store_failure_marks_error() -> None:
+    active = create_active_version()
+    observability = RecordingObservabilityClient()
+    error = KnowledgeVectorStoreUnavailableError(
+        "The knowledge vector store is unavailable.",
+    )
+    (service, _, _, _, _) = create_service(
+        versions=(active,),
+        vector_searcher=FakeVectorSearcher(error=error),
+        observability_client=observability,
+    )
+
+    with pytest.raises(KnowledgeVectorStoreUnavailableError) as captured:
+        await service.execute(
+            KnowledgeSearchRequest(
+                workspace_id=_WORKSPACE_ID,
+                query="recover the database",
+            )
+        )
+
+    assert captured.value is error
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == "knowledge_retrieval_unavailable"
+
+
+async def test_unexpected_failure_uses_safe_normalized_code() -> None:
+    observability = RecordingObservabilityClient()
+    unexpected = RuntimeError("raw repository failure details")
+    (service, _, _, _, _) = create_service(
+        resolver=FakeActiveVersionResolver(error=unexpected),
+        observability_client=observability,
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        await service.execute(
+            KnowledgeSearchRequest(
+                workspace_id=_WORKSPACE_ID,
+                query="recover the database",
+            )
+        )
+
+    assert captured.value is unexpected
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == "knowledge_retrieval_unexpected_failure"
+    assert "raw repository failure details" not in str(update.metadata)
+    assert "raw repository failure details" not in str(update)
+
+
+@pytest.mark.parametrize(
+    "client_kwargs",
+    [
+        {"fail_start": True},
+        {"fail_update": True},
+        {"fail_exit": True},
+    ],
+)
+async def test_observability_failures_do_not_alter_successful_retrieval(
+    client_kwargs: dict[str, bool],
+) -> None:
+    active, chunk, candidate = _successful_search_fixture()
+    observability = RecordingObservabilityClient(**client_kwargs)
+    (service, _, _, _, _) = create_service(
+        versions=(active,),
+        chunks=(chunk,),
+        candidates=(candidate,),
+        observability_client=observability,
+    )
+
+    result = await service.execute(
+        KnowledgeSearchRequest(
+            workspace_id=_WORKSPACE_ID,
+            query="recover the database",
+        )
+    )
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].content == chunk.content
+
+
+async def test_result_ordering_and_workspace_filtering_unchanged() -> None:
+    active = create_active_version()
+    low_chunk = create_chunk(
+        chunk_id=UUID(int=501),
+        ordinal=0,
+        content="Low score.",
+    )
+    high_chunk = create_chunk(
+        chunk_id=UUID(int=502),
+        ordinal=1,
+        content="High score.",
+    )
+    observability = RecordingObservabilityClient()
+    (service, resolver, _, _, _) = create_service(
+        versions=(active,),
+        chunks=(low_chunk, high_chunk),
+        candidates=(
+            create_candidate(low_chunk, score=0.40),
+            create_candidate(high_chunk, score=0.95),
+        ),
+        observability_client=observability,
+    )
+
+    result = await service.execute(
+        KnowledgeSearchRequest(
+            workspace_id=_WORKSPACE_ID,
+            query="recovery",
+            top_k=2,
+            document_ids=(_DOCUMENT_A_ID,),
+        )
+    )
+
+    assert resolver.calls == [(_WORKSPACE_ID, (_DOCUMENT_A_ID,))]
+    assert tuple(item.score for item in result.evidence) == (0.95, 0.40)
+    assert all(item.citation.workspace_id == _WORKSPACE_ID for item in result.evidence)
+    exported = str(observability.attributes) + str(observability.scopes[0].updates)
+    assert "High score." not in exported
+    assert "Low score." not in exported
+    assert str(high_chunk.id) not in exported
+    assert str(low_chunk.id) not in exported
+
+
+async def test_observing_embedding_provider_nests_without_duplicate_manual_span() -> None:
+    active, chunk, candidate = _successful_search_fixture()
+    observability = RecordingObservabilityClient()
+    inner_provider = FakeEmbeddingProvider()
+    observing_provider = ObservingEmbeddingProvider(
+        provider=inner_provider,
+        observability_client=observability,
+    )
+    (service, _, _, _, _) = create_service(
+        versions=(active,),
+        chunks=(chunk,),
+        candidates=(candidate,),
+        embedding_provider=observing_provider,
+        observability_client=observability,
+    )
+
+    await service.execute(
+        KnowledgeSearchRequest(
+            workspace_id=_WORKSPACE_ID,
+            query="recover the database",
+        )
+    )
+
+    assert len(inner_provider.requests) == 1
+    names = [attributes.name for attributes in observability.attributes]
+    types = [attributes.observation_type for attributes in observability.attributes]
+    assert names.count("knowledge.search") == 1
+    assert names.count("embedding.request") == 1
+    assert types.count(ObservationType.RETRIEVER) == 1
+    assert types.count(ObservationType.EMBEDDING) == 1
+    assert names[0] == "knowledge.search"
+    assert names[1] == "embedding.request"

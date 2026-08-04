@@ -36,6 +36,7 @@ from supportops.ai.providers.mock import (
 )
 from supportops.ai.providers.openai import OpenAILLMProvider
 from supportops.core.settings import Settings
+from supportops.knowledge_retrieval.service import SearchKnowledge
 from supportops.modules.agent_runs.application.deterministic_executor import (
     DeterministicTicketProcessingExecutor,
 )
@@ -290,11 +291,17 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
     qdrant_client = FakeQdrantClient()
     observability_client = FakeObservabilityClient()
     created_clients: list[object] = []
+    search_clients: list[object] = []
     embedding_clients: list[object] = []
 
     class CapturingGateway(LLMToolDecisionGateway):
         def __init__(self, **kwargs: Any) -> None:
             created_clients.append(kwargs.get("observability_client"))
+            super().__init__(**kwargs)
+
+    class CapturingSearchKnowledge(SearchKnowledge):
+        def __init__(self, **kwargs: Any) -> None:
+            search_clients.append(kwargs.get("observability_client"))
             super().__init__(**kwargs)
 
     async def checkpoint_runtime_factory(
@@ -343,9 +350,15 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
     )
 
     try:
-        with patch(
-            "supportops.worker.composition.LLMToolDecisionGateway",
-            CapturingGateway,
+        with (
+            patch(
+                "supportops.worker.composition.LLMToolDecisionGateway",
+                CapturingGateway,
+            ),
+            patch(
+                "supportops.worker.composition.SearchKnowledge",
+                CapturingSearchKnowledge,
+            ),
         ):
             create_session_scoped_executor_registry(
                 session=session,
@@ -360,6 +373,7 @@ async def test_session_factory_shares_observability_with_tool_decision_gateway()
 
         assert len(created_clients) == 1
         assert created_clients[0] is cast(Any, observability_client)
+        assert search_clients == [observability_client]
         assert embedding_clients == [observability_client]
         assert llm_runtime.gateway._observability_client is cast(
             Any,
