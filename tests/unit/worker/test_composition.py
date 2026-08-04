@@ -129,6 +129,20 @@ class FakeQdrantClient:
             raise self.close_error
 
 
+class FakeObservabilityClient:
+    """Process-scoped observability stand-in for composition tests."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.shutdown_calls = 0
+        self.shutdown_error: Exception | None = None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
 def _mock_index_profile() -> KnowledgeIndexProfile:
     """Return one retrieval profile compatible with FakeEmbeddingProvider."""
 
@@ -253,6 +267,7 @@ async def test_creates_process_scoped_controlled_support_runtime() -> None:
     checkpoint_runtime = FakeCheckpointRuntime()
     embedding_provider = FakeEmbeddingProvider()
     qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
     captured_database_urls: list[SecretStr] = []
     index_profile = object()
 
@@ -281,6 +296,10 @@ async def test_creates_process_scoped_controlled_support_runtime() -> None:
             Any,
             lambda configured_settings: index_profile,
         ),
+        observability_client_factory=cast(
+            Any,
+            lambda configured_settings: observability_client,
+        ),
     )
 
     try:
@@ -290,6 +309,7 @@ async def test_creates_process_scoped_controlled_support_runtime() -> None:
         assert cast(Any, runtime.embedding_provider) is embedding_provider
         assert cast(Any, runtime.qdrant_client) is qdrant_client
         assert cast(Any, runtime.index_profile) is index_profile
+        assert runtime.observability_client is cast(Any, observability_client)
         assert runtime.vector_store is not None
         assert runtime.vector_searcher is not None
         assert checkpoint_runtime.setup_calls == 1
@@ -304,12 +324,14 @@ async def test_creates_process_scoped_controlled_support_runtime() -> None:
     assert checkpoint_runtime.close_calls == 1
     assert embedding_provider.close_calls == 1
     assert qdrant_client.close_calls == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def test_controlled_runtime_partial_construction_cleans_up() -> None:
     settings = _create_settings()
     checkpoint_runtime = FakeCheckpointRuntime()
     embedding_provider = FakeEmbeddingProvider()
+    observability_client = FakeObservabilityClient()
 
     async def checkpoint_runtime_factory(
         *,
@@ -341,11 +363,16 @@ async def test_controlled_runtime_partial_construction_cleans_up() -> None:
                 Any,
                 lambda configured_settings: object(),
             ),
+            observability_client_factory=cast(
+                Any,
+                lambda configured_settings: observability_client,
+            ),
         )
 
     assert checkpoint_runtime.setup_calls == 1
     assert checkpoint_runtime.close_calls == 1
     assert embedding_provider.close_calls == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def test_controlled_runtime_close_is_idempotent() -> None:
@@ -353,6 +380,7 @@ async def test_controlled_runtime_close_is_idempotent() -> None:
     checkpoint_runtime = FakeCheckpointRuntime()
     embedding_provider = FakeEmbeddingProvider()
     qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
 
     async def checkpoint_runtime_factory(
         *,
@@ -379,6 +407,10 @@ async def test_controlled_runtime_close_is_idempotent() -> None:
             Any,
             lambda configured_settings: object(),
         ),
+        observability_client_factory=cast(
+            Any,
+            lambda configured_settings: observability_client,
+        ),
     )
 
     await runtime.close()
@@ -386,6 +418,7 @@ async def test_controlled_runtime_close_is_idempotent() -> None:
 
     assert checkpoint_runtime.close_calls == 1
     assert embedding_provider.close_calls == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() -> None:
@@ -395,6 +428,7 @@ async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() 
     embedding_provider = FakeEmbeddingProvider()
     embedding_provider.close_error = RuntimeError("embedding close failed")
     qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
 
     async def checkpoint_runtime_factory(
         *,
@@ -421,6 +455,10 @@ async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() 
             Any,
             lambda configured_settings: object(),
         ),
+        observability_client_factory=cast(
+            Any,
+            lambda configured_settings: observability_client,
+        ),
     )
 
     with pytest.raises(RuntimeError, match="checkpoint close failed") as captured:
@@ -429,10 +467,58 @@ async def test_controlled_runtime_close_attempts_all_resources_when_one_fails() 
     assert checkpoint_runtime.close_calls == 1
     assert embedding_provider.close_calls == 1
     assert qdrant_client.close_calls == 1
+    assert observability_client.shutdown_calls == 1
     assert any(
         "additional controlled-support runtime resource failed to close" in note
         for note in getattr(captured.value, "__notes__", ())
     )
+
+
+async def test_controlled_runtime_observability_shutdown_failure_is_isolated() -> None:
+    settings = _create_settings()
+    checkpoint_runtime = FakeCheckpointRuntime()
+    embedding_provider = FakeEmbeddingProvider()
+    qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
+    observability_client.shutdown_error = RuntimeError("shutdown failed")
+
+    async def checkpoint_runtime_factory(
+        *,
+        database_url: SecretStr,
+    ) -> FakeCheckpointRuntime:
+        del database_url
+        return checkpoint_runtime
+
+    runtime = await create_worker_controlled_support_runtime(
+        settings=settings,
+        checkpoint_runtime_factory=cast(
+            Any,
+            checkpoint_runtime_factory,
+        ),
+        embedding_provider_factory=cast(
+            Any,
+            lambda configured_settings: embedding_provider,
+        ),
+        qdrant_client_factory=cast(
+            Any,
+            lambda configured_settings: qdrant_client,
+        ),
+        index_profile_factory=cast(
+            Any,
+            lambda configured_settings: object(),
+        ),
+        observability_client_factory=cast(
+            Any,
+            lambda configured_settings: observability_client,
+        ),
+    )
+
+    await runtime.close()
+
+    assert checkpoint_runtime.close_calls == 1
+    assert embedding_provider.close_calls == 1
+    assert qdrant_client.close_calls == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def _build_registry_with_stubs() -> tuple[Any, Any, AsyncSession]:

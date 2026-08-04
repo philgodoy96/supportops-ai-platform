@@ -1,6 +1,6 @@
 """Typed resources owned by the FastAPI application process."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -10,6 +10,8 @@ from supportops.core.settings import Settings
 from supportops.modules.knowledge_documents.domain.models import (
     KnowledgeIndexProfile,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.noop import NoOpObservabilityClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,3 +24,6 @@ class ApplicationState:
     postgresql_engine: AsyncEngine
     postgresql_session_factory: async_sessionmaker[AsyncSession]
     qdrant_client: AsyncQdrantClient
+    observability_client: ObservabilityClient = field(
+        default_factory=NoOpObservabilityClient,
+    )

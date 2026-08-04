@@ -28,6 +28,8 @@ from supportops.knowledge_index.composition import (
 from supportops.modules.knowledge_documents.domain.models import (
     KnowledgeIndexProfile,
 )
+from supportops.observability.composition import create_observability_client
+from supportops.observability.contracts import ObservabilityClient
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,14 @@ async def application_lifespan(
         log_level=settings.log_level,
     )
 
+    observability_client: ObservabilityClient | None = None
     knowledge_index_profile: KnowledgeIndexProfile | None = None
     embedding_provider: EmbeddingProvider | None = None
     postgresql_engine: AsyncEngine | None = None
     qdrant_client: AsyncQdrantClient | None = None
 
     try:
+        observability_client = create_observability_client(settings)
         knowledge_index_profile = build_knowledge_index_profile(settings)
         embedding_provider = create_embedding_provider(settings)
         postgresql_engine = create_postgresql_engine(settings)
@@ -66,6 +70,7 @@ async def application_lifespan(
             postgresql_engine=postgresql_engine,
             postgresql_session_factory=postgresql_session_factory,
             qdrant_client=qdrant_client,
+            observability_client=observability_client,
         )
 
         logger.info(
@@ -73,6 +78,9 @@ async def application_lifespan(
             extra={
                 "application_name": settings.application_name,
                 "application_version": settings.application_version,
+                "observability_provider": (settings.ai_observability_provider.value),
+                "observability_enabled": observability_client.enabled,
+                "observability_capture_mode": (settings.langfuse_capture_mode.value),
             },
         )
 
@@ -111,6 +119,18 @@ async def application_lifespan(
                 logger.exception(
                     "postgresql_engine_disposal_failed",
                     extra={"dependency": "postgresql"},
+                )
+
+        if observability_client is not None:
+            try:
+                observability_client.shutdown()
+            except Exception:
+                logger.exception(
+                    "observability_client_shutdown_failed",
+                    extra={
+                        "dependency": "observability",
+                        "observability_provider": (settings.ai_observability_provider.value),
+                    },
                 )
 
         logger.info("application_stopped")
