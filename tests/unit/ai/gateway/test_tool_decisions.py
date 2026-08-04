@@ -1,7 +1,11 @@
 """Unit tests for provider-independent LLM tool decisions."""
 
-from collections.abc import Callable
-from typing import Annotated, Literal, cast
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from decimal import Decimal
+from types import TracebackType
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 import pytest
@@ -18,6 +22,9 @@ from supportops.agent_tools.domain.contracts import (
     ToolFailurePolicy,
     ToolSafetyLevel,
 )
+from supportops.agent_tools.tools.escalate_ticket import (
+    create_escalate_ticket_definition,
+)
 from supportops.ai.gateway.contracts import (
     LLMOperation,
     LLMTokenUsage,
@@ -33,6 +40,7 @@ from supportops.ai.gateway.results import (
 from supportops.ai.gateway.tool_decisions import (
     COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME,
     LLMExecutableToolCallDecision,
+    LLMHumanApprovedToolDecisionRequest,
     LLMProviderFunctionCallResponse,
     LLMProviderToolDecisionRequest,
     LLMTerminalControlDecision,
@@ -41,8 +49,26 @@ from supportops.ai.gateway.tool_decisions import (
     LLMToolDecisionProvider,
     LLMToolDecisionRequest,
 )
+from supportops.ai.pricing.catalog import PRICING_CATALOG_VERSION
+from supportops.ai.schemas.human_approved_support_decision import (
+    COMPLETE_HUMAN_APPROVED_SUPPORT_ANALYSIS_CONTROL,
+    COMPLETE_HUMAN_APPROVED_SUPPORT_ANALYSIS_CONTROL_NAME,
+)
+from supportops.observability.contracts import TraceScope
+from supportops.observability.models import (
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    PricingStatus,
+    TraceAttributes,
+)
 
 DOCUMENT_ID = UUID("11111111-1111-4111-8111-111111111111")
+_MOCK_PROVIDER = "mock"
+_MOCK_MODEL = "mock-ticket-classifier-v1"
+_DEFAULT_USAGE = object()
 
 
 class SearchKnowledgeInput(StrictToolSchema):
@@ -97,14 +123,17 @@ class StubToolDecisionProvider:
     def __init__(
         self,
         outcome: (LLMProviderFunctionCallResponse | Exception),
+        *,
+        provider_name: str = "stub",
     ) -> None:
         self._outcome = outcome
+        self._provider_name = provider_name
         self.requests: list[LLMProviderToolDecisionRequest] = []
         self.close_calls = 0
 
     @property
     def provider_name(self) -> str:
-        return "stub"
+        return self._provider_name
 
     async def decide(
         self,
@@ -183,8 +212,19 @@ def create_tool_call_response(
     arguments_json: str = ('{"top_k":5,"document_ids":null}'),
     provider: str = "stub",
     model: str = "stub-support-model-v1",
+    usage: LLMTokenUsage | object | None = _DEFAULT_USAGE,
 ) -> LLMProviderFunctionCallResponse:
     """Create one successful synthetic function call."""
+
+    resolved_usage: LLMTokenUsage | None
+    if usage is _DEFAULT_USAGE:
+        resolved_usage = LLMTokenUsage(
+            input_tokens=30,
+            output_tokens=10,
+            total_tokens=40,
+        )
+    else:
+        resolved_usage = cast(LLMTokenUsage | None, usage)
 
     return LLMProviderFunctionCallResponse(
         provider_tool_call_id="tool-call-1",
@@ -193,11 +233,7 @@ def create_tool_call_response(
         provider=provider,
         model=model,
         provider_request_id="provider-request-1",
-        usage=LLMTokenUsage(
-            input_tokens=30,
-            output_tokens=10,
-            total_tokens=40,
-        ),
+        usage=resolved_usage,
         finish_reason="completed",
     )
 
@@ -598,3 +634,535 @@ async def test_gateway_rejects_model_provenance_mismatch() -> None:
         match="model does not match",
     ):
         await gateway.decide(create_request())
+
+
+@dataclass
+class RecordingObservationScope:
+    """Observation scope that records updates."""
+
+    attributes: ObservationAttributes
+    updates: list[ObservationUpdate] = field(default_factory=list)
+    update_error: Exception | None = None
+    observation_id: str | None = "observation-1"
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self.update_error is not None:
+            raise self.update_error
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager["RecordingObservationScope"]:
+        del attributes
+        raise AssertionError("Nested observations are not expected.")
+
+    def record_event(self, event: object) -> None:
+        del event
+
+
+class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    """Context manager for one recorded observation."""
+
+    def __init__(
+        self,
+        *,
+        scope: RecordingObservationScope,
+        exit_error: Exception | None = None,
+    ) -> None:
+        self._scope = scope
+        self._exit_error = exit_error
+        self.exit_args: (
+            tuple[
+                type[BaseException] | None,
+                BaseException | None,
+                TracebackType | None,
+            ]
+            | None
+        ) = None
+
+    def __enter__(self) -> RecordingObservationScope:
+        return self._scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        self.exit_args = (exc_type, exc, traceback)
+        if self._exit_error is not None:
+            raise self._exit_error
+        return False
+
+
+class RecordingObservabilityClient:
+    """Observability double satisfying ObservabilityClient for gateway tests."""
+
+    def __init__(self) -> None:
+        self.started_attributes: list[ObservationAttributes] = []
+        self.scopes: list[RecordingObservationScope] = []
+        self.managers: list[RecordingObservationManager] = []
+        self.start_error: Exception | None = None
+        self.update_error: Exception | None = None
+        self.exit_error: Exception | None = None
+        self.enabled = True
+        self.shutdown_calls = 0
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[TraceScope]:
+        del attributes
+        raise AssertionError("Gateway must not start traces.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        if self.start_error is not None:
+            raise self.start_error
+
+        self.started_attributes.append(attributes)
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            update_error=self.update_error,
+        )
+        manager = RecordingObservationManager(
+            scope=scope,
+            exit_error=self.exit_error,
+        )
+        self.scopes.append(scope)
+        self.managers.append(manager)
+        return manager
+
+    def record_event(self, event: object) -> None:
+        del event
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def _observability_metadata() -> dict[str, str]:
+    return {
+        "supportops_workspace_id": "workspace-1",
+        "supportops_agent_run_id": "agent-run-1",
+        "supportops_agent_run_attempt_id": "attempt-1",
+        "supportops_correlation_id": "correlation-1",
+        "supportops_prompt_id": "controlled-support-decision",
+        "supportops_prompt_version": "1",
+        "supportops_prompt_content_hash": "hash-1",
+        "supportops_schema_version": "controlled-support-decision-v1",
+        "llm_invocation_id": "should-not-export",
+        "execution_request_id": "should-not-export",
+    }
+
+
+def _observability_request(
+    *,
+    model: str = "stub-support-model-v1",
+) -> LLMToolDecisionRequest:
+    return LLMToolDecisionRequest(
+        operation=LLMOperation.SUPPORT_ACTION_DECISION,
+        model=model,
+        instructions=("Select one approved function for the controlled support workflow."),
+        input=('{"ticket":{"subject":"Reset access"},"classification":{"category":"how_to"}}'),
+        tools=(create_search_definition(),),
+        terminal_control=create_terminal_control(),
+        timeout_seconds=20,
+        metadata=_observability_metadata(),
+    )
+
+
+def _human_approved_observability_request(
+    *,
+    model: str = "stub-support-model-v1",
+) -> LLMHumanApprovedToolDecisionRequest:
+    return LLMHumanApprovedToolDecisionRequest(
+        operation=LLMOperation.SUPPORT_ACTION_DECISION,
+        model=model,
+        instructions=("Select one approved sensitive or terminal function."),
+        input=('{"ticket":{"subject":"Escalate billing"},"classification":{"category":"billing"}}'),
+        sensitive_tools=(create_escalate_ticket_definition(),),
+        terminal_control=(COMPLETE_HUMAN_APPROVED_SUPPORT_ANALYSIS_CONTROL),
+        timeout_seconds=20,
+        prompt_id="human-approved-support-decision",
+        prompt_version=1,
+        metadata=_observability_metadata(),
+    )
+
+
+def _assert_observation_is_content_free(
+    attributes: ObservationAttributes,
+    updates: Iterable[ObservationUpdate],
+) -> None:
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+    assert attributes.input_data is None
+
+    serialized = repr(attributes.metadata)
+    for update in updates:
+        serialized += repr(update.metadata)
+        serialized += repr(update.output_data)
+        serialized += repr(update.status_message)
+
+    assert "Reset access" not in serialized
+    assert "Select one approved function" not in serialized
+    assert "Escalate billing" not in serialized
+    assert "Needs billing review" not in serialized
+    assert "llm_invocation_id" not in attributes.metadata
+    assert "execution_request_id" not in attributes.metadata
+    assert "should-not-export" not in serialized
+    assert "arguments_json" not in serialized
+    assert "document_ids" not in serialized
+    assert "search_knowledge" not in attributes.metadata
+    assert "escalate_ticket" not in attributes.metadata
+
+
+async def test_successful_controlled_decision_creates_one_generation() -> None:
+    usage = LLMTokenUsage(
+        input_tokens=120,
+        cached_input_tokens=20,
+        output_tokens=30,
+        reasoning_tokens=10,
+        total_tokens=150,
+    )
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(
+            provider=_MOCK_PROVIDER,
+            model=_MOCK_MODEL,
+            usage=usage,
+        ),
+        provider_name=_MOCK_PROVIDER,
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(1.0, 1.05),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide(_observability_request(model=_MOCK_MODEL))
+
+    assert len(result.invocations) == 1
+    assert len(observability.scopes) == 1
+
+    attributes = observability.started_attributes[0]
+    update = observability.scopes[0].updates[0]
+
+    assert attributes.name == "llm.tool_decision"
+    assert attributes.observation_type is ObservationType.GENERATION
+    assert attributes.provider == _MOCK_PROVIDER
+    assert attributes.model == _MOCK_MODEL
+    assert attributes.metadata["operation"] == (LLMOperation.SUPPORT_ACTION_DECISION.value)
+    assert attributes.metadata["decision_mode"] == "controlled"
+    assert attributes.metadata["invocation_sequence"] == 1
+    assert attributes.metadata["is_repair"] is False
+    assert attributes.metadata["tool_count"] == 1
+    assert attributes.metadata["sensitive_tool_count"] == 0
+    assert attributes.metadata["prompt_id"] == "controlled-support-decision"
+    assert attributes.metadata["prompt_version"] == "1"
+    assert attributes.metadata["prompt_hash"] == "hash-1"
+    assert attributes.metadata["schema_version"] == ("controlled-support-decision-v1")
+    assert attributes.metadata["agent_run_id"] == "agent-run-1"
+    assert attributes.metadata["workspace_id"] == "workspace-1"
+    assert attributes.metadata["correlation_id"] == "correlation-1"
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+
+    assert update.status is ObservationStatus.OK
+    assert update.error_code is None
+    assert update.usage is not None
+    assert update.usage.input_tokens == 100
+    assert update.usage.cached_input_tokens == 20
+    assert update.usage.output_tokens == 20
+    assert update.usage.reasoning_tokens == 10
+    assert update.usage.total_tokens is None
+    assert update.cost is not None
+    assert update.cost.pricing_status is PricingStatus.KNOWN
+    assert update.cost.input_cost == Decimal("0")
+    assert update.cost.cached_input_cost == Decimal("0")
+    assert update.cost.output_cost == Decimal("0")
+    assert update.cost.total_cost is None
+    assert update.metadata["provider_request_id"] == "provider-request-1"
+    assert update.metadata["latency_ms"] == 50
+    assert update.metadata["pricing_found"] is True
+    assert update.metadata["pricing_catalog_version"] == (PRICING_CATALOG_VERSION)
+    assert update.metadata["decision_kind"] == "executable_tool_call"
+    assert update.metadata["selected_tool_safety"] == (ToolSafetyLevel.READ_ONLY.value)
+    assert "search_knowledge" not in update.metadata
+    _assert_observation_is_content_free(attributes, observability.scopes[0].updates)
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_successful_human_approved_decision_creates_one_generation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(
+            function_name="escalate_ticket",
+            arguments_json=(
+                '{"target_queue":"billing_operations","reason":"Needs billing review."}'
+            ),
+            provider=_MOCK_PROVIDER,
+            model=_MOCK_MODEL,
+        ),
+        provider_name=_MOCK_PROVIDER,
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(1.0, 1.04),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide_human_approved(
+        _human_approved_observability_request(model=_MOCK_MODEL),
+    )
+
+    assert isinstance(result.decision, LLMExecutableToolCallDecision)
+    assert len(observability.scopes) == 1
+
+    attributes = observability.started_attributes[0]
+    update = observability.scopes[0].updates[0]
+
+    assert attributes.name == "llm.tool_decision"
+    assert attributes.observation_type is ObservationType.GENERATION
+    assert attributes.metadata["decision_mode"] == "human_approved"
+    assert attributes.metadata["invocation_sequence"] == 1
+    assert attributes.metadata["is_repair"] is False
+    assert attributes.metadata["tool_count"] == 1
+    assert attributes.metadata["sensitive_tool_count"] == 1
+    assert attributes.metadata["prompt_id"] == ("human-approved-support-decision")
+    assert attributes.metadata["prompt_version"] == 1
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+    assert update.status is ObservationStatus.OK
+    assert update.metadata["decision_kind"] == "executable_tool_call"
+    assert update.metadata["selected_tool_safety"] == (ToolSafetyLevel.SENSITIVE_WRITE.value)
+    assert "escalate_ticket" not in attributes.metadata
+    assert "escalate_ticket" not in update.metadata
+    _assert_observation_is_content_free(attributes, observability.scopes[0].updates)
+
+
+async def test_unknown_pricing_omits_cost_values() -> None:
+    usage = LLMTokenUsage(
+        input_tokens=10,
+        cached_input_tokens=0,
+        output_tokens=5,
+        total_tokens=15,
+    )
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(usage=usage),
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        observability_client=cast(Any, observability),
+    )
+
+    await gateway.decide(_observability_request())
+
+    update = observability.scopes[0].updates[0]
+
+    assert update.usage is not None
+    assert update.cost is not None
+    assert update.cost.pricing_status is PricingStatus.UNKNOWN
+    assert update.cost.input_cost is None
+    assert update.cost.cached_input_cost is None
+    assert update.cost.output_cost is None
+    assert update.cost.total_cost is None
+    assert update.metadata["pricing_found"] is False
+    assert update.metadata["pricing_catalog_version"] == (PRICING_CATALOG_VERSION)
+
+
+async def test_missing_usage_omits_usage_and_cost() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(usage=None),
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        observability_client=cast(Any, observability),
+    )
+
+    await gateway.decide(_observability_request())
+
+    update = observability.scopes[0].updates[0]
+
+    assert update.usage is None
+    assert update.cost is None
+    assert "pricing_found" not in update.metadata
+    assert "pricing_catalog_version" not in update.metadata
+
+
+async def test_validation_failure_creates_one_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(create_tool_call_response(arguments_json="{malformed-json"))
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.005),
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.decide(_observability_request())
+
+    assert len(observability.scopes) == 1
+    assert observability.started_attributes[0].metadata["is_repair"] is False
+    assert observability.started_attributes[0].metadata["invocation_sequence"] == 1
+    assert observability.scopes[0].updates[0].status is ObservationStatus.ERROR
+    assert observability.scopes[0].updates[0].error_code == (
+        LLMErrorCode.TOOL_DECISION_VALIDATION_FAILED.value
+    )
+    assert captured.value.error_code is (LLMErrorCode.TOOL_DECISION_VALIDATION_FAILED)
+    assert len(captured.value.invocations) == 1
+    serialized = repr(observability.scopes[0].updates[0])
+    assert "malformed" not in serialized
+
+
+async def test_non_repairable_provider_failure_creates_one_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(LLMTimeoutError(provider_request_id="provider-request-1"))
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.05),
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.decide(_observability_request())
+
+    assert len(observability.scopes) == 1
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == LLMErrorCode.TIMEOUT.value
+    assert update.metadata["provider_request_id"] == "provider-request-1"
+    assert captured.value.error_code is LLMErrorCode.TIMEOUT
+    assert len(captured.value.invocations) == 1
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_observability_start_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.start_error = RuntimeError("start failed")
+    provider = StubToolDecisionProvider(create_tool_call_response())
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.025),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide(create_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert isinstance(result.decision, LLMExecutableToolCallDecision)
+    assert len(observability.scopes) == 0
+
+
+async def test_observability_update_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.update_error = RuntimeError("update failed")
+    provider = StubToolDecisionProvider(create_tool_call_response())
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.025),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide(create_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert observability.scopes[0].updates == []
+
+
+async def test_observability_exit_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.exit_error = RuntimeError("exit failed")
+    provider = StubToolDecisionProvider(create_tool_call_response())
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.025),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide(create_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert len(observability.scopes[0].updates) == 1
+
+
+async def test_business_exception_is_preserved_exactly() -> None:
+    observability = RecordingObservabilityClient()
+    provider_error = LLMTimeoutError(provider_request_id="provider-request-1")
+    provider = StubToolDecisionProvider(provider_error)
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.05),
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.decide(create_request())
+
+    assert captured.value.error is provider_error
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_provenance_mismatch_records_unhandled_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(create_tool_call_response(provider="unexpected-provider"))
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(10.0, 10.005),
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(RuntimeError, match="provenance does not match"):
+        await gateway.decide(create_request())
+
+    assert len(observability.scopes) == 1
+    assert observability.scopes[0].updates[0].status is ObservationStatus.ERROR
+    assert observability.scopes[0].updates[0].error_code == ("unhandled_business_error")
+
+
+async def test_terminal_control_decision_omits_tool_safety() -> None:
+    observability = RecordingObservabilityClient()
+    provider = StubToolDecisionProvider(
+        create_tool_call_response(
+            function_name=(COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME),
+            arguments_json=(
+                "{"
+                '"recommended_action":"respond",'
+                '"evidence_sufficient":true,'
+                '"requires_human_review":false,'
+                '"decision_summary":'
+                '"Relevant evidence is available."'
+                "}"
+            ),
+            provider=_MOCK_PROVIDER,
+            model=_MOCK_MODEL,
+        ),
+        provider_name=_MOCK_PROVIDER,
+    )
+    gateway = LLMToolDecisionGateway(
+        provider=provider,
+        clock=create_clock(1.0, 1.01),
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.decide(_observability_request(model=_MOCK_MODEL))
+
+    assert isinstance(result.decision, LLMTerminalControlDecision)
+    update = observability.scopes[0].updates[0]
+    assert update.metadata["decision_kind"] == "terminal_control"
+    assert "selected_tool_safety" not in update.metadata
+    assert COMPLETE_SUPPORT_ANALYSIS_CONTROL_NAME not in update.metadata
+    assert COMPLETE_HUMAN_APPROVED_SUPPORT_ANALYSIS_CONTROL_NAME not in (
+        repr(observability.started_attributes[0].metadata)
+    )
