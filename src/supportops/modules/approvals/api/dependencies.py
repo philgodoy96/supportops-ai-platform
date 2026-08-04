@@ -2,13 +2,14 @@
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from supportops.agent_tools.infrastructure.repository import (
     SqlAlchemyAgentToolCallExecutionRepository,
 )
-from supportops.api.dependencies import get_postgresql_session
+from supportops.api.dependencies import get_application_state, get_postgresql_session
+from supportops.api.state import ApplicationState
 from supportops.infrastructure.postgresql.transaction import (
     SqlAlchemyTransactionManager,
 )
@@ -52,6 +53,7 @@ def get_approval_request(
 
 
 def get_decide_approval_request(
+    request: Request,
     session: Annotated[
         AsyncSession,
         Depends(get_postgresql_session),
@@ -59,9 +61,11 @@ def get_decide_approval_request(
 ) -> DecideApprovalRequest:
     """Build one session-scoped approval decision command service."""
 
+    state: ApplicationState = get_application_state(request)
     return DecideApprovalRequest(
         transaction_manager=SqlAlchemyTransactionManager(session),
         approval_request_repository=(SqlAlchemyApprovalRequestRepository(session)),
         agent_run_repository=SqlAlchemyAgentRunRepository(session),
         agent_tool_call_repository=(SqlAlchemyAgentToolCallExecutionRepository(session)),
+        observability_client=state.observability_client,
     )

@@ -1,10 +1,13 @@
 """Application-owned nodes for the human-approved support graph."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractContextManager, suppress
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import Never, Protocol
 from uuid import UUID
 
+from langgraph.errors import GraphInterrupt
 from langgraph.runtime import Runtime
 from pydantic import JsonValue, ValidationError
 
@@ -55,6 +58,7 @@ from supportops.ai.schemas.human_approved_support_decision import (
 from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
     AgentRunExecutionContext,
+    RetryableAgentRunExecutionError,
     TerminalAgentRunExecutionError,
 )
 from supportops.modules.approvals.domain.repositories import (
@@ -68,6 +72,70 @@ from supportops.modules.ticket_classifications.domain.models import (
 )
 from supportops.modules.ticket_classifications.domain.repositories import (
     TicketClassificationRepository,
+)
+from supportops.observability.contracts import (
+    ObservabilityClient,
+    ObservationScope,
+)
+from supportops.observability.models import (
+    FieldPaths,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+)
+from supportops.observability.noop import NoOpObservabilityClient
+
+_LOAD_RUN_CONTEXT_NODE = "load_run_context"
+_ENSURE_CLASSIFICATION_NODE = "ensure_classification"
+_DECIDE_NEXT_ACTION_NODE = "decide_next_action"
+_EXECUTE_READ_ONLY_TOOL_NODE = "execute_read_only_tool"
+_PREPARE_SENSITIVE_ACTION_NODE = "prepare_sensitive_action"
+_AWAIT_HUMAN_APPROVAL_NODE = "await_human_approval"
+_HANDLE_APPROVAL_DECISION_NODE = "handle_approval_decision"
+_EXECUTE_SENSITIVE_TOOL_NODE = "execute_sensitive_tool"
+_DRAFT_GROUNDED_RECOMMENDATION_NODE = "draft_grounded_recommendation"
+_VALIDATE_RECOMMENDATION_NODE = "validate_recommendation"
+_PERSIST_RECOMMENDATION_NODE = "persist_recommendation"
+_FAIL_WORKFLOW_NODE = "fail_workflow"
+
+_LOAD_RUN_CONTEXT_OBSERVATION_NAME = "graph-node.load_run_context"
+_ENSURE_CLASSIFICATION_OBSERVATION_NAME = "graph-node.ensure_classification"
+_DECIDE_NEXT_ACTION_OBSERVATION_NAME = "graph-node.decide_next_action"
+_EXECUTE_READ_ONLY_TOOL_OBSERVATION_NAME = "graph-node.execute_read_only_tool"
+_PREPARE_SENSITIVE_ACTION_OBSERVATION_NAME = "graph-node.prepare_sensitive_action"
+_AWAIT_HUMAN_APPROVAL_OBSERVATION_NAME = "graph-node.await_human_approval"
+_HANDLE_APPROVAL_DECISION_OBSERVATION_NAME = "graph-node.handle_approval_decision"
+_EXECUTE_SENSITIVE_TOOL_OBSERVATION_NAME = "graph-node.execute_sensitive_tool"
+_DRAFT_GROUNDED_RECOMMENDATION_OBSERVATION_NAME = "graph-node.draft_grounded_recommendation"
+_VALIDATE_RECOMMENDATION_OBSERVATION_NAME = "graph-node.validate_recommendation"
+_PERSIST_RECOMMENDATION_OBSERVATION_NAME = "graph-node.persist_recommendation"
+_FAIL_WORKFLOW_OBSERVATION_NAME = "graph-node.fail_workflow"
+
+_UNEXPECTED_NODE_ERROR_CODE = "human_approved_support_node_unexpected_failure"
+
+_NODE_METADATA_PATHS: FieldPaths = frozenset(
+    {
+        ("node_name",),
+        ("agent_run_id",),
+        ("agent_run_attempt_id",),
+        ("execution_request_id",),
+        ("workspace_id",),
+        ("ticket_id",),
+        ("workflow_name",),
+        ("workflow_version",),
+        ("correlation_id",),
+        ("approval_request_id",),
+        ("decision_kind",),
+        ("requires_approval",),
+        ("approval_status",),
+        ("tool_name",),
+        ("evidence_count",),
+        ("recommendation_created",),
+        ("node_outcome",),
+        ("error_code",),
+        ("latency_ms",),
+    }
 )
 
 
@@ -110,6 +178,9 @@ class HumanApprovedSupportWorkflowNodes:
     sensitive_tool_execution: SensitiveToolExecutionNode
     approval_request_repository: ApprovalRequestRepository
     recommendation_executor: HumanApprovedRecommendationExecutor
+    observability_client: ObservabilityClient = field(
+        default_factory=NoOpObservabilityClient,
+    )
 
     async def load_run_context(
         self,
@@ -118,6 +189,360 @@ class HumanApprovedSupportWorkflowNodes:
     ) -> HumanApprovedSupportGraphState:
         """Validate graph ownership before any application work."""
 
+        return await self._observe_node(
+            node_name=_LOAD_RUN_CONTEXT_NODE,
+            observation_name=_LOAD_RUN_CONTEXT_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._load_run_context(
+                state=state,
+                runtime=runtime,
+            ),
+        )
+
+    async def ensure_classification(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Load or durably produce the ticket classification."""
+
+        return await self._observe_node(
+            node_name=_ENSURE_CLASSIFICATION_NODE,
+            observation_name=_ENSURE_CLASSIFICATION_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._ensure_classification(
+                state=state,
+                runtime=runtime,
+            ),
+        )
+
+    async def decide_next_action(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Persist one terminal or sensitive proposal decision."""
+
+        return await self._observe_node(
+            node_name=_DECIDE_NEXT_ACTION_NODE,
+            observation_name=_DECIDE_NEXT_ACTION_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._decide_next_action(
+                state=state,
+                runtime=runtime,
+            ),
+            success_metadata=lambda result: _decision_success_metadata(result),
+        )
+
+    async def execute_read_only_tool(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> Never:
+        """Keep the initial workflow surface sensitive-only."""
+
+        observation = _FailOpenObservation(
+            client=self.observability_client,
+            attributes=_build_node_attributes(
+                node_name=_EXECUTE_READ_ONLY_TOOL_NODE,
+                observation_name=_EXECUTE_READ_ONLY_TOOL_OBSERVATION_NAME,
+                state=state,
+                context=None,
+            ),
+        )
+        started_at = monotonic()
+        observation.start()
+        try:
+            self._execute_read_only_tool()
+        except (
+            RetryableAgentRunExecutionError,
+            TerminalAgentRunExecutionError,
+        ) as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except Exception:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={"latency_ms": _elapsed_ms(started_at)},
+                    error_code=_UNEXPECTED_NODE_ERROR_CODE,
+                )
+            )
+            raise
+        finally:
+            observation.close()
+        raise RuntimeError("execute_read_only_tool must raise.")
+
+    async def prepare_sensitive_action(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Persist or reuse the proposal and ApprovalRequest."""
+
+        return await self._observe_node(
+            node_name=_PREPARE_SENSITIVE_ACTION_NODE,
+            observation_name=_PREPARE_SENSITIVE_ACTION_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._prepare_sensitive_action(
+                state=state,
+                runtime=runtime,
+            ),
+            success_metadata=lambda result: {
+                "requires_approval": True,
+                "approval_request_id": (
+                    str(result["approval_request_id"])
+                    if result.get("approval_request_id") is not None
+                    else None
+                ),
+                "approval_status": _approval_status_metadata(
+                    result.get("approval_status"),
+                ),
+                "tool_name": result.get("proposed_tool_name"),
+            },
+        )
+
+    async def await_human_approval(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> HumanApprovedSupportGraphState:
+        """Interrupt for approval and project a valid resume payload."""
+
+        observation = _FailOpenObservation(
+            client=self.observability_client,
+            attributes=_build_node_attributes(
+                node_name=_AWAIT_HUMAN_APPROVAL_NODE,
+                observation_name=_AWAIT_HUMAN_APPROVAL_OBSERVATION_NAME,
+                state=state,
+                context=None,
+            ),
+        )
+        started_at = monotonic()
+        observation.start()
+        try:
+            return await self._await_human_approval(state)
+        except GraphInterrupt:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.OK,
+                    metadata={
+                        "node_outcome": "workflow_paused",
+                        "approval_request_id": (
+                            str(state["approval_request_id"])
+                            if state.get("approval_request_id") is not None
+                            else None
+                        ),
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                )
+            )
+            raise
+        except (
+            RetryableAgentRunExecutionError,
+            TerminalAgentRunExecutionError,
+        ) as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except Exception:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={"latency_ms": _elapsed_ms(started_at)},
+                    error_code=_UNEXPECTED_NODE_ERROR_CODE,
+                )
+            )
+            raise
+        finally:
+            observation.close()
+
+    async def handle_approval_decision(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Validate the resume payload against durable approval state."""
+
+        return await self._observe_node(
+            node_name=_HANDLE_APPROVAL_DECISION_NODE,
+            observation_name=_HANDLE_APPROVAL_DECISION_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._handle_approval_decision(
+                state=state,
+                runtime=runtime,
+            ),
+            success_metadata=lambda result: {
+                "approval_status": _approval_status_metadata(
+                    result.get("approval_status"),
+                ),
+                "approval_request_id": (
+                    str(result["approval_request_id"])
+                    if result.get("approval_request_id") is not None
+                    else None
+                ),
+            },
+        )
+
+    async def execute_sensitive_tool(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Execute one approved escalation through the grant-backed adapter."""
+
+        return await self._observe_node(
+            node_name=_EXECUTE_SENSITIVE_TOOL_NODE,
+            observation_name=_EXECUTE_SENSITIVE_TOOL_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._execute_sensitive_tool(
+                state=state,
+                runtime=runtime,
+            ),
+            success_metadata=lambda result: {
+                "tool_name": result.get("proposed_tool_name"),
+                "approval_request_id": (
+                    str(result["approval_request_id"])
+                    if result.get("approval_request_id") is not None
+                    else None
+                ),
+            },
+        )
+
+    async def draft_grounded_recommendation(
+        self,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
+        """Draft and persist one approval-aware recommendation."""
+
+        return await self._observe_node(
+            node_name=_DRAFT_GROUNDED_RECOMMENDATION_NODE,
+            observation_name=_DRAFT_GROUNDED_RECOMMENDATION_OBSERVATION_NAME,
+            state=state,
+            context=runtime.context,
+            execute=lambda: self._draft_grounded_recommendation(
+                state=state,
+                runtime=runtime,
+            ),
+            success_metadata=lambda result: {
+                "recommendation_created": (result.get("recommendation_id") is not None),
+            },
+        )
+
+    async def validate_recommendation(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> HumanApprovedSupportGraphState:
+        """Apply the recommendation validation contract after drafting."""
+
+        return await self._observe_node(
+            node_name=_VALIDATE_RECOMMENDATION_NODE,
+            observation_name=_VALIDATE_RECOMMENDATION_OBSERVATION_NAME,
+            state=state,
+            context=None,
+            execute=lambda: self._validate_recommendation(state),
+        )
+
+    async def persist_recommendation(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> HumanApprovedSupportGraphState:
+        """Acknowledge durable recommendation persistence for routing."""
+
+        return await self._observe_node(
+            node_name=_PERSIST_RECOMMENDATION_NODE,
+            observation_name=_PERSIST_RECOMMENDATION_OBSERVATION_NAME,
+            state=state,
+            context=None,
+            execute=lambda: self._persist_recommendation(state),
+        )
+
+    async def fail_workflow(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> Never:
+        """Translate graph failure state into a terminal run error."""
+
+        observation = _FailOpenObservation(
+            client=self.observability_client,
+            attributes=_build_node_attributes(
+                node_name=_FAIL_WORKFLOW_NODE,
+                observation_name=_FAIL_WORKFLOW_OBSERVATION_NAME,
+                state=state,
+                context=None,
+            ),
+        )
+        started_at = monotonic()
+        observation.start()
+        try:
+            self._fail_workflow(state)
+        except (
+            RetryableAgentRunExecutionError,
+            TerminalAgentRunExecutionError,
+        ) as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except Exception:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={"latency_ms": _elapsed_ms(started_at)},
+                    error_code=_UNEXPECTED_NODE_ERROR_CODE,
+                )
+            )
+            raise
+        finally:
+            observation.close()
+        raise RuntimeError("fail_workflow must raise a typed workflow exception.")
+
+    def route(
+        self,
+        state: HumanApprovedSupportGraphState,
+    ) -> str:
+        """Return the deterministic route for validated state."""
+
+        snapshot = validate_human_approved_support_state(state)
+        return select_human_approved_support_route(
+            snapshot,
+        ).route.value
+
+    async def _load_run_context(
+        self,
+        *,
+        state: HumanApprovedSupportGraphState,
+        runtime: Runtime[AgentRunExecutionContext],
+    ) -> HumanApprovedSupportGraphState:
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -129,13 +554,12 @@ class HumanApprovedSupportWorkflowNodes:
             update={"run_context_loaded": True},
         ).to_graph_state()
 
-    async def ensure_classification(
+    async def _ensure_classification(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Load or durably produce the ticket classification."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -162,13 +586,12 @@ class HumanApprovedSupportWorkflowNodes:
             classification,
         ).to_graph_state()
 
-    async def decide_next_action(
+    async def _decide_next_action(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Persist one terminal or sensitive proposal decision."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -246,12 +669,7 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def execute_read_only_tool(
-        self,
-        state: HumanApprovedSupportGraphState,
-    ) -> Never:
-        """Keep the initial workflow surface sensitive-only."""
-
+    def _execute_read_only_tool(self) -> Never:
         raise TerminalAgentRunExecutionError(
             error_code="human_approved_read_only_path_unavailable",
             error_summary=(
@@ -259,13 +677,12 @@ class HumanApprovedSupportWorkflowNodes:
             ),
         )
 
-    async def prepare_sensitive_action(
+    async def _prepare_sensitive_action(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Persist or reuse the proposal and ApprovalRequest."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -291,12 +708,10 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def await_human_approval(
+    async def _await_human_approval(
         self,
         state: HumanApprovedSupportGraphState,
     ) -> HumanApprovedSupportGraphState:
-        """Interrupt for approval and project a valid resume payload."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -310,7 +725,6 @@ class HumanApprovedSupportWorkflowNodes:
                 error_summary=("The graph cannot interrupt without a durable pending approval."),
             )
 
-        # The payload is reconstructed from checkpoint-safe values.
         payload = ApprovalInterruptPayload(
             approval_request_id=snapshot.approval_request_id,
             agent_tool_call_id=snapshot.agent_tool_call_id,
@@ -348,13 +762,12 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def handle_approval_decision(
+    async def _handle_approval_decision(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Validate the resume payload against durable approval state."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -420,13 +833,12 @@ class HumanApprovedSupportWorkflowNodes:
             updates["sensitive_execution_output"] = None
         return snapshot.model_copy(update=updates).to_graph_state()
 
-    async def execute_sensitive_tool(
+    async def _execute_sensitive_tool(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Execute one approved escalation through the grant-backed adapter."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -444,13 +856,12 @@ class HumanApprovedSupportWorkflowNodes:
             runtime.context,
         )
 
-    async def draft_grounded_recommendation(
+    async def _draft_grounded_recommendation(
         self,
+        *,
         state: HumanApprovedSupportGraphState,
         runtime: Runtime[AgentRunExecutionContext],
     ) -> HumanApprovedSupportGraphState:
-        """Draft and persist one approval-aware recommendation."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -472,12 +883,10 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def validate_recommendation(
+    async def _validate_recommendation(
         self,
         state: HumanApprovedSupportGraphState,
     ) -> HumanApprovedSupportGraphState:
-        """Apply the recommendation validation contract after drafting."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -496,12 +905,10 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def persist_recommendation(
+    async def _persist_recommendation(
         self,
         state: HumanApprovedSupportGraphState,
     ) -> HumanApprovedSupportGraphState:
-        """Acknowledge durable recommendation persistence for routing."""
-
         snapshot = _advance_graph_step(
             validate_human_approved_support_state(state),
         )
@@ -520,12 +927,10 @@ class HumanApprovedSupportWorkflowNodes:
             },
         ).to_graph_state()
 
-    async def fail_workflow(
+    def _fail_workflow(
         self,
         state: HumanApprovedSupportGraphState,
     ) -> Never:
-        """Translate graph failure state into a terminal run error."""
-
         snapshot = validate_human_approved_support_state(state)
         error_code = snapshot.current_error_code or "human_approved_workflow_state_invalid"
         raise TerminalAgentRunExecutionError(
@@ -535,16 +940,74 @@ class HumanApprovedSupportWorkflowNodes:
             ),
         )
 
-    def route(
+    async def _observe_node(
         self,
+        *,
+        node_name: str,
+        observation_name: str,
         state: HumanApprovedSupportGraphState,
-    ) -> str:
-        """Return the deterministic route for validated state."""
+        context: AgentRunExecutionContext | None,
+        execute: Callable[[], Awaitable[HumanApprovedSupportGraphState]],
+        success_metadata: Callable[
+            [HumanApprovedSupportGraphState],
+            Mapping[str, JsonValue],
+        ]
+        | None = None,
+    ) -> HumanApprovedSupportGraphState:
+        observation = _FailOpenObservation(
+            client=self.observability_client,
+            attributes=_build_node_attributes(
+                node_name=node_name,
+                observation_name=observation_name,
+                state=state,
+                context=context,
+            ),
+        )
+        started_at = monotonic()
+        observation.start()
 
-        snapshot = validate_human_approved_support_state(state)
-        return select_human_approved_support_route(
-            snapshot,
-        ).route.value
+        try:
+            result = await execute()
+        except (
+            RetryableAgentRunExecutionError,
+            TerminalAgentRunExecutionError,
+        ) as error:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={
+                        "error_code": error.error_code,
+                        "latency_ms": _elapsed_ms(started_at),
+                    },
+                    error_code=error.error_code,
+                )
+            )
+            raise
+        except Exception:
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.ERROR,
+                    metadata={"latency_ms": _elapsed_ms(started_at)},
+                    error_code=_UNEXPECTED_NODE_ERROR_CODE,
+                )
+            )
+            raise
+        else:
+            metadata: dict[str, JsonValue] = {
+                "latency_ms": _elapsed_ms(started_at),
+            }
+            if success_metadata is not None:
+                with suppress(Exception):
+                    metadata.update(dict(success_metadata(result)))
+            observation.complete(
+                ObservationUpdate(
+                    status=ObservationStatus.OK,
+                    metadata=metadata,
+                )
+            )
+            return result
+        finally:
+            observation.close()
 
     async def _load_classification(
         self,
@@ -684,3 +1147,123 @@ def _require_int(
     if value is None:
         raise ValueError(f"{field_name} is required.")
     return value
+
+
+class _FailOpenObservation:
+    """Node-owned fail-open boundary around one observation."""
+
+    def __init__(
+        self,
+        *,
+        client: ObservabilityClient,
+        attributes: ObservationAttributes | None,
+    ) -> None:
+        self._client = client
+        self._attributes = attributes
+        self._manager: AbstractContextManager[ObservationScope] | None = None
+        self._scope: ObservationScope | None = None
+        self._completed = False
+
+    def start(self) -> None:
+        if self._attributes is None:
+            return
+
+        try:
+            self._manager = self._client.start_observation(
+                self._attributes,
+            )
+            self._scope = self._manager.__enter__()
+        except Exception:
+            self._manager = None
+            self._scope = None
+
+    def complete(self, update: ObservationUpdate) -> None:
+        if self._scope is None or self._completed:
+            return
+
+        try:
+            self._scope.update(update)
+            self._completed = True
+        except Exception:
+            return
+
+    def close(self) -> None:
+        if self._manager is None:
+            return
+
+        try:
+            self._manager.__exit__(None, None, None)
+        except Exception:
+            return
+        finally:
+            self._manager = None
+            self._scope = None
+
+
+def _build_node_attributes(
+    *,
+    node_name: str,
+    observation_name: str,
+    state: HumanApprovedSupportGraphState,
+    context: AgentRunExecutionContext | None,
+) -> ObservationAttributes | None:
+    try:
+        metadata: dict[str, JsonValue] = {
+            "node_name": node_name,
+            "agent_run_id": str(state["agent_run_id"]),
+            "workspace_id": str(state["workspace_id"]),
+            "ticket_id": str(state["ticket_id"]),
+            "workflow_name": str(state["workflow_name"]),
+            "workflow_version": str(state["workflow_version"]),
+        }
+        approval_request_id = state.get("approval_request_id")
+        if approval_request_id is not None:
+            metadata["approval_request_id"] = str(approval_request_id)
+        if context is not None:
+            metadata["agent_run_attempt_id"] = str(context.attempt.id)
+            metadata["execution_request_id"] = str(
+                context.attempt.execution_request_id,
+            )
+            metadata["correlation_id"] = str(
+                context.agent_run.correlation_id,
+            )
+
+        return ObservationAttributes(
+            name=observation_name,
+            observation_type=ObservationType.SPAN,
+            metadata=metadata,
+            metadata_paths=_NODE_METADATA_PATHS,
+            input_data=None,
+            input_paths=frozenset(),
+            output_paths=frozenset(),
+        )
+    except Exception:
+        return None
+
+
+def _decision_success_metadata(
+    result: HumanApprovedSupportGraphState,
+) -> dict[str, JsonValue]:
+    metadata: dict[str, JsonValue] = {}
+    decision_kind = result.get("decision_kind")
+    if isinstance(decision_kind, HumanApprovedDecisionKind):
+        metadata["decision_kind"] = decision_kind.value
+    elif decision_kind is not None:
+        metadata["decision_kind"] = str(decision_kind)
+    tool_name = result.get("proposed_tool_name")
+    if tool_name is not None:
+        metadata["tool_name"] = str(tool_name)
+        metadata["requires_approval"] = True
+    return metadata
+
+
+def _approval_status_metadata(value: object) -> JsonValue:
+    if isinstance(value, HumanApprovalCheckpointStatus):
+        return value.value
+    if value is None:
+        return None
+    return str(value)
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((monotonic() - started_at) * 1000))

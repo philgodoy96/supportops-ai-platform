@@ -466,3 +466,40 @@ def test_search_knowledge_dependency_shares_process_observability_client() -> No
     assert state.observability_client is observability_client
     assert second._observability_client is observability_client
     assert second._observability_client is service._observability_client
+
+
+def test_decide_approval_dependency_shares_process_observability_client() -> None:
+    from supportops.modules.approvals.api.dependencies import (
+        get_decide_approval_request,
+    )
+    from supportops.modules.approvals.application.services import (
+        DecideApprovalRequest,
+    )
+
+    settings = create_settings()
+    profile = create_knowledge_index_profile()
+    embedding_provider = create_embedding_provider_mock()
+    observability_client = create_observability_client_mock()
+    session = MagicMock(spec=AsyncSession)
+    request = MagicMock()
+    state = ApplicationState(
+        settings=settings,
+        embedding_provider=embedding_provider,
+        knowledge_index_profile=profile,
+        postgresql_engine=MagicMock(spec=AsyncEngine),
+        postgresql_session_factory=MagicMock(
+            spec=async_sessionmaker[AsyncSession],
+        ),
+        qdrant_client=MagicMock(spec=AsyncQdrantClient),
+        observability_client=observability_client,
+    )
+    request.app.state.supportops = state
+
+    first = get_decide_approval_request(request=request, session=session)
+    second = get_decide_approval_request(request=request, session=session)
+
+    assert isinstance(first, DecideApprovalRequest)
+    assert first._observability_client is observability_client
+    assert second._observability_client is observability_client
+    assert first._observability_client is second._observability_client
+    assert state.observability_client is observability_client

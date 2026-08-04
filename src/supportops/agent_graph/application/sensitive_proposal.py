@@ -32,9 +32,30 @@ from supportops.modules.approvals.domain.repositories import (
     ApprovalRequestPersistenceResult,
     ApprovalRequestRepository,
 )
+from supportops.observability.contracts import ObservabilityClient
+from supportops.observability.identity import agent_run_trace_identity
+from supportops.observability.models import (
+    EventObservation,
+    FieldPaths,
+    ObservationStatus,
+)
+from supportops.observability.noop import NoOpObservabilityClient
 
 type UtcNowProvider = Callable[[], datetime]
 type UuidFactory = Callable[[], UUID]
+
+_APPROVAL_REQUESTED_EVENT_METADATA_PATHS: FieldPaths = frozenset(
+    {
+        ("approval_request_id",),
+        ("agent_run_id",),
+        ("agent_run_attempt_id",),
+        ("workspace_id",),
+        ("ticket_id",),
+        ("tool_name",),
+        ("approval_status",),
+        ("expires_at",),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +129,7 @@ class SensitiveProposalService:
         approval_ttl_seconds: float,
         utc_now: UtcNowProvider | None = None,
         uuid_factory: UuidFactory = uuid4,
+        observability_client: ObservabilityClient | None = None,
     ) -> None:
         if approval_ttl_seconds <= 0:
             raise ValueError(
@@ -121,6 +143,7 @@ class SensitiveProposalService:
         self._approval_ttl_seconds = approval_ttl_seconds
         self._utc_now = utc_now or _utc_now
         self._uuid_factory = uuid_factory
+        self._observability_client = observability_client or NoOpObservabilityClient()
 
     async def execute(
         self,
@@ -205,12 +228,19 @@ class SensitiveProposalService:
                 persistence_result=approval_result,
             )
 
-        return SensitiveProposalOutcome(
+        outcome = SensitiveProposalOutcome(
             tool_call=durable_tool_call,
             approval_request=durable_approval,
             tool_call_created=(tool_result is AgentToolCallPersistenceResult.APPLIED),
             approval_request_created=(approval_result is ApprovalRequestPersistenceResult.APPLIED),
         )
+        if outcome.approval_request_created:
+            _safe_record_approval_requested(
+                client=self._observability_client,
+                context=context,
+                approval_request=durable_approval,
+            )
+        return outcome
 
     async def _resolve_tool_call(
         self,
@@ -305,3 +335,35 @@ def _validate_matching_tool_proposal(
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _safe_record_approval_requested(
+    *,
+    client: ObservabilityClient,
+    context: AgentRunExecutionContext,
+    approval_request: ApprovalRequest,
+) -> None:
+    try:
+        client.record_trace_event(
+            identity=agent_run_trace_identity(
+                agent_run_id=approval_request.agent_run_id,
+                ticket_id=approval_request.ticket_id,
+            ),
+            event=EventObservation(
+                name="approval.requested",
+                status=ObservationStatus.OK,
+                metadata={
+                    "approval_request_id": str(approval_request.id),
+                    "agent_run_id": str(approval_request.agent_run_id),
+                    "agent_run_attempt_id": str(context.attempt.id),
+                    "workspace_id": str(approval_request.workspace_id),
+                    "ticket_id": str(approval_request.ticket_id),
+                    "tool_name": approval_request.tool_name,
+                    "approval_status": approval_request.status.value,
+                    "expires_at": approval_request.expires_at.isoformat(),
+                },
+                metadata_paths=_APPROVAL_REQUESTED_EVENT_METADATA_PATHS,
+            ),
+        )
+    except Exception:
+        return

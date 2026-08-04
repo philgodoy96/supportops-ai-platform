@@ -7,6 +7,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from supportops.core.transactions import TransactionManager
 from supportops.modules.agent_runs.application.execution import (
@@ -50,6 +51,7 @@ from supportops.observability.identity import (
     agent_run_trace_identity,
 )
 from supportops.observability.models import (
+    EventObservation,
     FieldPaths,
     JsonValue,
     ObservationAttributes,
@@ -61,6 +63,18 @@ from supportops.observability.models import (
 from supportops.observability.noop import NoOpObservabilityClient
 
 UtcNowProvider = Callable[[], datetime]
+
+_WORKFLOW_PAUSED_EVENT_METADATA_PATHS: FieldPaths = frozenset(
+    {
+        ("approval_request_id",),
+        ("agent_run_id",),
+        ("agent_run_attempt_id",),
+        ("workspace_id",),
+        ("ticket_id",),
+        ("agent_run_status",),
+        ("attempt_outcome",),
+    }
+)
 
 _AGENT_RUN_TRACE_METADATA_PATHS: FieldPaths = frozenset(
     {
@@ -288,7 +302,7 @@ class ProcessClaimedAgentRun:
                         ),
                     )
                 return result, _map_success_outcome(result)
-            case PausedForApproval():
+            case PausedForApproval() as paused:
                 async with self._transaction_manager.transaction():
                     result = await self._agent_run_repository.mark_waiting_for_approval(
                         WaitForApprovalAgentRunCommand(
@@ -296,6 +310,13 @@ class ProcessClaimedAgentRun:
                             lease_token=claim.attempt.lease_token,
                             finished_at=finished_at,
                         ),
+                    )
+                if result is AgentRunTransitionResult.APPLIED:
+                    _safe_record_workflow_paused(
+                        client=self._observability_client,
+                        run=run,
+                        attempt=claim.attempt,
+                        approval_request_id=paused.approval_request_id,
                     )
                 return result, _map_pause_outcome(result)
             case _:
@@ -604,3 +625,35 @@ def _failure_disposition(
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _safe_record_workflow_paused(
+    *,
+    client: ObservabilityClient,
+    run: AgentRun,
+    attempt: AgentRunAttempt,
+    approval_request_id: UUID,
+) -> None:
+    try:
+        client.record_trace_event(
+            identity=agent_run_trace_identity(
+                agent_run_id=run.id,
+                ticket_id=run.ticket_id,
+            ),
+            event=EventObservation(
+                name="workflow.paused",
+                status=ObservationStatus.OK,
+                metadata={
+                    "approval_request_id": str(approval_request_id),
+                    "agent_run_id": str(run.id),
+                    "agent_run_attempt_id": str(attempt.id),
+                    "workspace_id": str(run.workspace_id),
+                    "ticket_id": str(run.ticket_id),
+                    "agent_run_status": (AgentRunStatus.WAITING_FOR_APPROVAL.value),
+                    "attempt_outcome": (AgentRunAttemptOutcome.AWAITING_APPROVAL.value),
+                },
+                metadata_paths=_WORKFLOW_PAUSED_EVENT_METADATA_PATHS,
+            ),
+        )
+    except Exception:
+        return
