@@ -41,6 +41,7 @@ dependencies = [
     "sqlalchemy[asyncio]==2.0.51",
     "uvicorn==0.50.2",
     "tiktoken==0.13.0",
+    "langfuse==4.14.2",
 ]
 
 [project.scripts]
