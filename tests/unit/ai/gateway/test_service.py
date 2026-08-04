@@ -2,7 +2,11 @@
 
 from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from decimal import Decimal
+from types import TracebackType
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -26,13 +30,26 @@ from supportops.ai.gateway.results import (
     LLMInvocationStatus,
 )
 from supportops.ai.gateway.service import LLMGateway
+from supportops.ai.pricing.catalog import PRICING_CATALOG_VERSION
 from supportops.ai.schemas.ticket_classification import (
     TICKET_CLASSIFICATION_SCHEMA_VERSION,
     TicketClassificationResult,
 )
+from supportops.observability.contracts import TraceScope
+from supportops.observability.models import (
+    ObservabilityProvider,
+    ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
+    ObservationUpdate,
+    PricingStatus,
+    TraceAttributes,
+)
 
 _MODEL = "test-model"
 _PROVIDER = "test-provider"
+_MOCK_MODEL = "mock-ticket-classifier-v1"
+_MOCK_PROVIDER = "mock"
 
 
 class SequenceClock:
@@ -61,14 +78,17 @@ class RecordingProvider:
     def __init__(
         self,
         outcomes: Iterable[LLMProviderResponse | ProviderErrorOutcome],
+        *,
+        provider_name: str = _PROVIDER,
     ) -> None:
         self._outcomes = deque(outcomes)
+        self._provider_name = provider_name
         self.requests: list[LLMRequest] = []
         self.closed = False
 
     @property
     def provider_name(self) -> str:
-        return _PROVIDER
+        return self._provider_name
 
     async def generate(
         self,
@@ -92,10 +112,128 @@ class RecordingProvider:
         self.closed = True
 
 
-def _request() -> LLMRequest:
+@dataclass
+class RecordingObservationScope:
+    """Observation scope that records updates."""
+
+    attributes: ObservationAttributes
+    updates: list[ObservationUpdate] = field(default_factory=list)
+    update_error: Exception | None = None
+    observation_id: str | None = "observation-1"
+
+    def update(self, update: ObservationUpdate) -> None:
+        if self.update_error is not None:
+            raise self.update_error
+        self.updates.append(update)
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager["RecordingObservationScope"]:
+        del attributes
+        raise AssertionError("Nested observations are not expected.")
+
+    def record_event(self, event: object) -> None:
+        del event
+
+
+class RecordingObservationManager(AbstractContextManager[RecordingObservationScope]):
+    """Context manager for one recorded observation."""
+
+    def __init__(
+        self,
+        *,
+        scope: RecordingObservationScope,
+        exit_error: Exception | None = None,
+    ) -> None:
+        self._scope = scope
+        self._exit_error = exit_error
+        self.exit_args: (
+            tuple[
+                type[BaseException] | None,
+                BaseException | None,
+                TracebackType | None,
+            ]
+            | None
+        ) = None
+
+    def __enter__(self) -> RecordingObservationScope:
+        return self._scope
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        self.exit_args = (exc_type, exc, traceback)
+        if self._exit_error is not None:
+            raise self._exit_error
+        return False
+
+
+class RecordingObservabilityClient:
+    """Observability double satisfying ObservabilityClient for gateway tests."""
+
+    def __init__(self) -> None:
+        self.started_attributes: list[ObservationAttributes] = []
+        self.scopes: list[RecordingObservationScope] = []
+        self.managers: list[RecordingObservationManager] = []
+        self.start_error: Exception | None = None
+        self.update_error: Exception | None = None
+        self.exit_error: Exception | None = None
+        self.enabled = True
+        self.shutdown_calls = 0
+
+    @property
+    def provider(self) -> ObservabilityProvider:
+        return ObservabilityProvider.NOOP
+
+    def start_trace(
+        self,
+        attributes: TraceAttributes,
+    ) -> AbstractContextManager[TraceScope]:
+        del attributes
+        raise AssertionError("Gateway must not start traces.")
+
+    def start_observation(
+        self,
+        attributes: ObservationAttributes,
+    ) -> AbstractContextManager[RecordingObservationScope]:
+        if self.start_error is not None:
+            raise self.start_error
+
+        self.started_attributes.append(attributes)
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            update_error=self.update_error,
+        )
+        manager = RecordingObservationManager(
+            scope=scope,
+            exit_error=self.exit_error,
+        )
+        self.scopes.append(scope)
+        self.managers.append(manager)
+        return manager
+
+    def record_event(self, event: object) -> None:
+        del event
+
+    def flush(self) -> None:
+        return None
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def _request(
+    *,
+    model: str = _MODEL,
+    metadata: dict[str, str] | None = None,
+) -> LLMRequest:
     return LLMRequest(
         operation=LLMOperation.TICKET_CLASSIFICATION,
-        model=_MODEL,
+        model=model,
         instructions="Classify the supplied support ticket.",
         input=(
             "BEGIN_UNTRUSTED_TICKET_JSON\n"
@@ -104,10 +242,36 @@ def _request() -> LLMRequest:
         ),
         output_schema=TicketClassificationResult,
         timeout_seconds=12,
-        metadata={
+        metadata=metadata
+        or {
             "prompt_id": "ticket-classification",
             "prompt_version": "1",
         },
+    )
+
+
+def _observability_metadata() -> dict[str, str]:
+    return {
+        "supportops_workspace_id": "workspace-1",
+        "supportops_agent_run_id": "agent-run-1",
+        "supportops_agent_run_attempt_id": "attempt-1",
+        "supportops_correlation_id": "correlation-1",
+        "supportops_prompt_id": "ticket-classification",
+        "supportops_prompt_version": "1",
+        "supportops_prompt_content_hash": "hash-1",
+        "supportops_schema_version": (TICKET_CLASSIFICATION_SCHEMA_VERSION),
+        "llm_invocation_id": "should-not-export",
+        "execution_request_id": "should-not-export",
+    }
+
+
+def _observability_request(
+    *,
+    model: str = _MODEL,
+) -> LLMRequest:
+    return _request(
+        model=model,
+        metadata=_observability_metadata(),
     )
 
 
@@ -142,6 +306,28 @@ def _response(
         usage=usage,
         finish_reason="completed",
     )
+
+
+def _assert_observation_is_content_free(
+    attributes: ObservationAttributes,
+    updates: Iterable[ObservationUpdate],
+) -> None:
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+    assert attributes.input_data is None
+
+    serialized = repr(attributes.metadata)
+    for update in updates:
+        serialized += repr(update.metadata)
+        serialized += repr(update.output_data)
+        serialized += repr(update.status_message)
+
+    assert "BEGIN_UNTRUSTED_TICKET_JSON" not in serialized
+    assert "Invoice question" not in serialized
+    assert "Classify the supplied support ticket." not in serialized
+    assert "llm_invocation_id" not in attributes.metadata
+    assert "execution_request_id" not in attributes.metadata
+    assert "should-not-export" not in serialized
 
 
 async def test_returns_application_validated_output_and_trace() -> None:
@@ -568,3 +754,351 @@ def test_rejects_negative_repair_configuration() -> None:
             provider=provider,
             max_repair_attempts=-1,
         )
+
+
+async def test_successful_provider_request_creates_one_generation() -> None:
+    usage = LLMTokenUsage(
+        input_tokens=120,
+        cached_input_tokens=20,
+        output_tokens=30,
+        reasoning_tokens=10,
+        total_tokens=150,
+    )
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+                usage=usage,
+                provider=_MOCK_PROVIDER,
+                model=_MOCK_MODEL,
+            ),
+        ),
+        provider_name=_MOCK_PROVIDER,
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability),
+        clock=SequenceClock((1.0, 1.05)),
+    )
+
+    result = await gateway.generate(
+        _observability_request(model=_MOCK_MODEL),
+    )
+
+    assert len(result.invocations) == 1
+    assert len(observability.scopes) == 1
+
+    attributes = observability.started_attributes[0]
+    update = observability.scopes[0].updates[0]
+
+    assert attributes.name == "llm.generate"
+    assert attributes.observation_type is ObservationType.GENERATION
+    assert attributes.provider == _MOCK_PROVIDER
+    assert attributes.model == _MOCK_MODEL
+    assert attributes.metadata["operation"] == (LLMOperation.TICKET_CLASSIFICATION.value)
+    assert attributes.metadata["invocation_sequence"] == 1
+    assert attributes.metadata["is_repair"] is False
+    assert attributes.metadata["provider"] == _MOCK_PROVIDER
+    assert attributes.metadata["model"] == _MOCK_MODEL
+    assert attributes.metadata["prompt_id"] == "ticket-classification"
+    assert attributes.metadata["prompt_version"] == "1"
+    assert attributes.metadata["prompt_hash"] == "hash-1"
+    assert attributes.metadata["schema_version"] == (TICKET_CLASSIFICATION_SCHEMA_VERSION)
+    assert attributes.metadata["agent_run_id"] == "agent-run-1"
+    assert attributes.metadata["workspace_id"] == "workspace-1"
+    assert attributes.metadata["correlation_id"] == "correlation-1"
+    assert attributes.input_paths == frozenset()
+    assert attributes.output_paths == frozenset()
+
+    assert update.status is ObservationStatus.OK
+    assert update.error_code is None
+    assert update.usage is not None
+    assert update.usage.input_tokens == 100
+    assert update.usage.cached_input_tokens == 20
+    assert update.usage.output_tokens == 20
+    assert update.usage.reasoning_tokens == 10
+    assert update.usage.total_tokens is None
+    assert update.cost is not None
+    assert update.cost.pricing_status is PricingStatus.KNOWN
+    assert update.cost.input_cost == Decimal("0")
+    assert update.cost.cached_input_cost == Decimal("0")
+    assert update.cost.output_cost == Decimal("0")
+    assert update.cost.total_cost is None
+    assert update.metadata["provider_request_id"] == "request-1"
+    assert update.metadata["latency_ms"] == 50
+    assert update.metadata["pricing_found"] is True
+    assert update.metadata["pricing_catalog_version"] == (PRICING_CATALOG_VERSION)
+    _assert_observation_is_content_free(attributes, observability.scopes[0].updates)
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_unknown_pricing_omits_cost_values() -> None:
+    usage = LLMTokenUsage(
+        input_tokens=10,
+        cached_input_tokens=0,
+        output_tokens=5,
+        total_tokens=15,
+    )
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+                usage=usage,
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    await gateway.generate(_observability_request())
+
+    update = observability.scopes[0].updates[0]
+
+    assert update.usage is not None
+    assert update.cost is not None
+    assert update.cost.pricing_status is PricingStatus.UNKNOWN
+    assert update.cost.input_cost is None
+    assert update.cost.cached_input_cost is None
+    assert update.cost.output_cost is None
+    assert update.cost.total_cost is None
+    assert update.metadata["pricing_found"] is False
+    assert update.metadata["pricing_catalog_version"] == (PRICING_CATALOG_VERSION)
+
+
+async def test_missing_usage_omits_usage_and_cost() -> None:
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+                usage=None,
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    await gateway.generate(_observability_request())
+
+    update = observability.scopes[0].updates[0]
+
+    assert update.usage is None
+    assert update.cost is None
+    assert "pricing_found" not in update.metadata
+    assert "pricing_catalog_version" not in update.metadata
+
+
+async def test_validation_failure_and_repair_create_two_observations() -> None:
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                {"category": "invalid"},
+                provider_request_id="request-1",
+            ),
+            _response(
+                _valid_output(),
+                provider_request_id="request-2",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.generate(_observability_request())
+
+    assert len(result.invocations) == 2
+    assert len(observability.scopes) == 2
+    assert observability.started_attributes[0].metadata["is_repair"] is False
+    assert observability.started_attributes[0].metadata["invocation_sequence"] == 1
+    assert observability.started_attributes[1].metadata["is_repair"] is True
+    assert observability.started_attributes[1].metadata["invocation_sequence"] == 2
+    assert observability.scopes[0].updates[0].status is ObservationStatus.ERROR
+    assert observability.scopes[0].updates[0].error_code == (
+        LLMErrorCode.OUTPUT_VALIDATION_FAILED.value
+    )
+    assert observability.scopes[1].updates[0].status is ObservationStatus.OK
+    assert result.invocations[0].status is LLMInvocationStatus.VALIDATION_FAILED
+    assert result.invocations[1].status is LLMInvocationStatus.SUCCEEDED
+
+
+async def test_zero_repair_budget_creates_one_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                {"category": "invalid"},
+                provider_request_id="request-1",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.generate(_observability_request())
+
+    assert len(observability.scopes) == 1
+    assert observability.scopes[0].updates[0].status is ObservationStatus.ERROR
+    assert isinstance(captured.value.error, LLMOutputValidationError)
+    assert len(captured.value.invocations) == 1
+
+
+async def test_non_repairable_provider_failure_creates_one_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            ProviderErrorOutcome(
+                LLMTimeoutError(provider_request_id="request-1"),
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.generate(_observability_request())
+
+    assert len(observability.scopes) == 1
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == LLMErrorCode.TIMEOUT.value
+    assert update.metadata["provider_request_id"] == "request-1"
+    assert captured.value.error_code is LLMErrorCode.TIMEOUT
+    assert len(captured.value.invocations) == 1
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_observability_start_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.start_error = RuntimeError("start failed")
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.generate(_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert len(observability.scopes) == 0
+
+
+async def test_observability_update_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.update_error = RuntimeError("update failed")
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.generate(_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert observability.scopes[0].updates == []
+
+
+async def test_observability_exit_failure_preserves_success() -> None:
+    observability = RecordingObservabilityClient()
+    observability.exit_error = RuntimeError("exit failed")
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    result = await gateway.generate(_request())
+
+    assert result.accepted_invocation_sequence == 1
+    assert len(observability.scopes[0].updates) == 1
+
+
+async def test_business_exception_is_preserved_exactly() -> None:
+    observability = RecordingObservabilityClient()
+    provider_error = LLMTimeoutError(provider_request_id="request-1")
+    provider = RecordingProvider(
+        (ProviderErrorOutcome(provider_error),),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(LLMGatewayFailure) as captured:
+        await gateway.generate(_request())
+
+    assert captured.value.error is provider_error
+    assert observability.managers[0].exit_args == (None, None, None)
+
+
+async def test_provenance_mismatch_records_unhandled_error_observation() -> None:
+    observability = RecordingObservabilityClient()
+    provider = RecordingProvider(
+        (
+            _response(
+                _valid_output(),
+                provider_request_id="request-1",
+                provider="different-provider",
+            ),
+        ),
+    )
+    gateway = LLMGateway(
+        provider=provider,
+        max_repair_attempts=0,
+        observability_client=cast(Any, observability),
+    )
+
+    with pytest.raises(RuntimeError, match="provenance does not match"):
+        await gateway.generate(_request())
+
+    assert len(observability.scopes) == 1
+    update = observability.scopes[0].updates[0]
+    assert update.status is ObservationStatus.ERROR
+    assert update.error_code == "unhandled_business_error"

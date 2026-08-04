@@ -180,6 +180,67 @@ async def test_creates_process_scoped_mock_runtime() -> None:
         await runtime.close()
 
 
+async def test_worker_runtimes_share_one_observability_client() -> None:
+    settings = _create_settings()
+    checkpoint_runtime = FakeCheckpointRuntime()
+    embedding_provider = FakeEmbeddingProvider()
+    qdrant_client = FakeQdrantClient()
+    observability_client = FakeObservabilityClient()
+
+    async def checkpoint_runtime_factory(
+        *,
+        database_url: SecretStr,
+    ) -> FakeCheckpointRuntime:
+        del database_url
+        return checkpoint_runtime
+
+    llm_runtime = create_worker_llm_runtime(
+        provider_name="mock",
+        openai_api_key=None,
+        openai_model="gpt-5-nano",
+        openai_base_url=None,
+        request_timeout_seconds=12,
+        transport_max_retries=2,
+        max_repair_attempts=1,
+        observability_client=cast(Any, observability_client),
+    )
+    controlled_runtime = await create_worker_controlled_support_runtime(
+        settings=settings,
+        checkpoint_runtime_factory=cast(
+            Any,
+            checkpoint_runtime_factory,
+        ),
+        embedding_provider_factory=cast(
+            Any,
+            lambda configured_settings: embedding_provider,
+        ),
+        qdrant_client_factory=cast(
+            Any,
+            lambda configured_settings: qdrant_client,
+        ),
+        index_profile_factory=cast(
+            Any,
+            lambda configured_settings: object(),
+        ),
+        observability_client=cast(Any, observability_client),
+    )
+
+    try:
+        assert llm_runtime.gateway._observability_client is cast(
+            Any,
+            observability_client,
+        )
+        assert controlled_runtime.observability_client is cast(
+            Any,
+            observability_client,
+        )
+    finally:
+        await controlled_runtime.close()
+        await llm_runtime.close()
+
+    assert observability_client.shutdown_calls == 1
+
+
 async def test_creates_process_scoped_openai_runtime_without_network() -> None:
     runtime = create_worker_llm_runtime(
         provider_name="openai",

@@ -38,6 +38,8 @@ from supportops.modules.agent_runs.infrastructure.worker_runtime import (
     AgentRunExecutorFactory,
     PostgreSqlAgentWorkerCycleRunner,
 )
+from supportops.observability.composition import create_observability_client
+from supportops.observability.contracts import ObservabilityClient
 from supportops.worker.composition import (
     WorkerControlledSupportRuntime,
     WorkerLLMRuntime,
@@ -94,22 +96,35 @@ async def run_worker(
         if resolved_settings.openai_base_url is not None
         else None
     )
-    llm_runtime: WorkerLLMRuntime = create_worker_llm_runtime(
-        provider_name=provider_name,
-        openai_api_key=openai_api_key,
-        openai_model=resolved_settings.openai_model,
-        openai_base_url=openai_base_url,
-        request_timeout_seconds=(resolved_settings.llm_request_timeout_seconds),
-        transport_max_retries=(resolved_settings.llm_transport_max_retries),
-        max_repair_attempts=(resolved_settings.llm_max_repair_attempts),
+    observability_client: ObservabilityClient = create_observability_client(
+        resolved_settings,
     )
+
+    try:
+        llm_runtime = create_worker_llm_runtime(
+            provider_name=provider_name,
+            openai_api_key=openai_api_key,
+            openai_model=resolved_settings.openai_model,
+            openai_base_url=openai_base_url,
+            request_timeout_seconds=(resolved_settings.llm_request_timeout_seconds),
+            transport_max_retries=(resolved_settings.llm_transport_max_retries),
+            max_repair_attempts=(resolved_settings.llm_max_repair_attempts),
+            observability_client=observability_client,
+        )
+    except Exception:
+        with suppress(Exception):
+            observability_client.shutdown()
+        raise
 
     try:
         controlled_runtime = await build_controlled_runtime(
             settings=resolved_settings,
+            observability_client=observability_client,
         )
     except Exception:
         await llm_runtime.close()
+        with suppress(Exception):
+            observability_client.shutdown()
         raise
 
     build_engine = engine_factory or create_worker_engine

@@ -1029,6 +1029,7 @@ def create_worker_llm_runtime(
     request_timeout_seconds: float,
     transport_max_retries: int,
     max_repair_attempts: int,
+    observability_client: ObservabilityClient | None = None,
 ) -> WorkerLLMRuntime:
     """Create one explicitly configured process-scoped LLM runtime."""
 
@@ -1067,6 +1068,7 @@ def create_worker_llm_runtime(
     gateway = LLMGateway(
         provider=provider,
         max_repair_attempts=max_repair_attempts,
+        observability_client=observability_client,
     )
 
     return WorkerLLMRuntime(
@@ -1083,6 +1085,7 @@ async def create_worker_controlled_support_runtime(
     embedding_provider_factory: EmbeddingProviderFactory = (create_embedding_provider),
     qdrant_client_factory: QdrantClientFactory = (create_qdrant_client),
     index_profile_factory: KnowledgeIndexProfileFactory = (build_knowledge_index_profile),
+    observability_client: ObservabilityClient | None = None,
     observability_client_factory: ObservabilityClientFactory = (create_observability_client),
 ) -> WorkerControlledSupportRuntime:
     """Create one process-scoped controlled-support runtime."""
@@ -1095,10 +1098,16 @@ async def create_worker_controlled_support_runtime(
     checkpoint_runtime: PostgresCheckpointRuntime | None = None
     embedding_provider: EmbeddingProvider | None = None
     qdrant_client: AsyncQdrantClient | None = None
-    observability_client: ObservabilityClient | None = None
+    owned_observability_client = observability_client
+    created_observability_client = False
 
     try:
-        observability_client = observability_client_factory(settings)
+        if owned_observability_client is None:
+            owned_observability_client = observability_client_factory(
+                settings,
+            )
+            created_observability_client = True
+
         checkpoint_runtime = await checkpoint_runtime_factory(
             database_url=checkpoint_database_url,
         )
@@ -1119,9 +1128,16 @@ async def create_worker_controlled_support_runtime(
             checkpoint_runtime=checkpoint_runtime,
             embedding_provider=embedding_provider,
             qdrant_client=qdrant_client,
-            observability_client=observability_client,
+            observability_client=(
+                owned_observability_client if created_observability_client else None
+            ),
         )
         raise
+
+    if owned_observability_client is None:
+        raise RuntimeError(
+            "Controlled-support runtime requires an observability client.",
+        )
 
     return WorkerControlledSupportRuntime(
         checkpoint_runtime=checkpoint_runtime,
@@ -1130,7 +1146,7 @@ async def create_worker_controlled_support_runtime(
         index_profile=index_profile,
         vector_store=vector_store,
         vector_searcher=vector_searcher,
-        observability_client=observability_client,
+        observability_client=owned_observability_client,
         approval_ttl_seconds=settings.approval_ttl_seconds,
         agent_graph_tool_timeout_seconds=(settings.agent_graph_tool_timeout_seconds),
     )
