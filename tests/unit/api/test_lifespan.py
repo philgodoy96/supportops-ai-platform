@@ -459,7 +459,10 @@ def test_search_knowledge_dependency_shares_process_observability_client() -> No
         ),
     ):
         service = get_search_knowledge(session=session, state=state)
+        second = get_search_knowledge(session=session, state=state)
 
     assert service._observability_client is observability_client
     assert state.embedding_provider is embedding_provider
     assert state.observability_client is observability_client
+    assert second._observability_client is observability_client
+    assert second._observability_client is service._observability_client

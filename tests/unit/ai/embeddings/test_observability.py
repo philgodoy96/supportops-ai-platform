@@ -21,11 +21,18 @@ from supportops.ai.embeddings.errors import (
 from supportops.ai.embeddings.observability import (
     ObservingEmbeddingProvider,
 )
+from supportops.observability.context import (
+    ActiveObservationContext,
+    current_observation_context,
+    observation_context_scope,
+)
 from supportops.observability.contracts import TraceScope
 from supportops.observability.models import (
     EventObservation,
     ObservabilityProvider,
     ObservationAttributes,
+    ObservationStatus,
+    ObservationType,
     ObservationUpdate,
     PricingStatus,
     TraceAttributes,
@@ -44,6 +51,7 @@ class FakeEmbeddingProvider:
         self._response = response
         self._error = error
         self.requests: list[EmbeddingRequest] = []
+        self.parent_observation_names: list[str | None] = []
         self.close_calls = 0
 
     @property
@@ -55,6 +63,10 @@ class FakeEmbeddingProvider:
         request: EmbeddingRequest,
     ) -> EmbeddingProviderResponse:
         self.requests.append(request)
+        parent = current_observation_context()
+        self.parent_observation_names.append(
+            None if parent is None else parent.name,
+        )
 
         if self._error is not None:
             raise self._error
@@ -72,8 +84,10 @@ class RecordingObservationScope:
     def __init__(
         self,
         *,
+        attributes: ObservationAttributes,
         fail_update: bool = False,
     ) -> None:
+        self.attributes = attributes
         self._fail_update = fail_update
         self.updates: list[ObservationUpdate] = []
 
@@ -111,11 +125,18 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         self._fail_enter = fail_enter
         self._fail_exit = fail_exit
         self.exit_calls = 0
+        self._context_manager = observation_context_scope(
+            ActiveObservationContext(
+                name=scope.attributes.name,
+                observation_id=scope.observation_id,
+            )
+        )
 
     def __enter__(self) -> RecordingObservationScope:
         if self._fail_enter:
             raise RuntimeError("synthetic enter failure")
 
+        self._context_manager.__enter__()
         return self._scope
 
     def __exit__(
@@ -124,11 +145,8 @@ class RecordingObservationManager(AbstractContextManager[RecordingObservationSco
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> Literal[False]:
-        del exc_type
-        del exc
-        del traceback
-
         self.exit_calls += 1
+        self._context_manager.__exit__(exc_type, exc, traceback)
 
         if self._fail_exit:
             raise RuntimeError("synthetic exit failure")
@@ -153,6 +171,8 @@ class RecordingObservabilityClient:
         self.attributes: list[ObservationAttributes] = []
         self.scopes: list[RecordingObservationScope] = []
         self.managers: list[RecordingObservationManager] = []
+        self.parent_observation_names: list[str | None] = []
+        self.lifecycle: list[tuple[str, str]] = []
 
     @property
     def provider(self) -> ObservabilityProvider:
@@ -176,7 +196,16 @@ class RecordingObservabilityClient:
         if self._fail_start:
             raise RuntimeError("synthetic start failure")
 
-        scope = RecordingObservationScope(fail_update=self._fail_update)
+        parent = current_observation_context()
+        self.parent_observation_names.append(
+            None if parent is None else parent.name,
+        )
+        self.lifecycle.append(("start", attributes.name))
+
+        scope = RecordingObservationScope(
+            attributes=attributes,
+            fail_update=self._fail_update,
+        )
         manager = RecordingObservationManager(
             scope=scope,
             fail_enter=self._fail_enter,
@@ -231,6 +260,7 @@ def _response(
     provider: str = "mock",
     model: str = "mock-hashing-embedding-v1",
     usage: EmbeddingTokenUsage | None = _DEFAULT_USAGE,
+    provider_request_id: str | None = "embedding-request-1",
 ) -> EmbeddingProviderResponse:
     return EmbeddingProviderResponse(
         embeddings=(
@@ -241,7 +271,7 @@ def _response(
         model=model,
         dimensions=2,
         usage=usage,
-        provider_request_id="embedding-request-1",
+        provider_request_id=provider_request_id,
     )
 
 
@@ -260,16 +290,20 @@ async def test_records_one_embedding_observation_per_provider_call() -> None:
     assert len(provider.requests) == 1
     assert len(observability.attributes) == 1
     assert len(observability.scopes) == 1
+    assert len(observability.attributes) == len(provider.requests)
 
     attributes = observability.attributes[0]
 
     assert attributes.name == "embedding.request"
-    assert attributes.observation_type.value == "embedding"
+    assert attributes.observation_type is ObservationType.EMBEDDING
     assert attributes.provider == "mock"
     assert attributes.model == "mock-hashing-embedding-v1"
     assert attributes.input_data is None
     assert attributes.input_paths == frozenset()
     assert attributes.output_paths == frozenset()
+    assert provider.parent_observation_names == ["embedding.request"]
+    assert current_observation_context() is None
+    assert observability.managers[0].exit_calls == 1
 
 
 @pytest.mark.asyncio
@@ -299,6 +333,8 @@ async def test_exports_only_safe_embedding_metadata() -> None:
     assert "unsafe_field" not in metadata
     assert "inputs" not in metadata
     assert "embeddings" not in metadata
+    assert "first synthetic input" not in repr(metadata)
+    assert "second synthetic input" not in repr(metadata)
 
 
 @pytest.mark.asyncio
@@ -314,8 +350,7 @@ async def test_maps_usage_and_known_zero_mock_cost() -> None:
 
     update = observability.scopes[0].updates[0]
 
-    assert update.status is not None
-    assert update.status.value == "ok"
+    assert update.status is ObservationStatus.OK
     assert update.usage is not None
     assert update.usage.input_tokens == 12
     assert update.usage.total_tokens is None
@@ -327,6 +362,27 @@ async def test_maps_usage_and_known_zero_mock_cost() -> None:
 
     assert update.metadata["pricing_found"] is True
     assert update.metadata["provider_request_id"] == "embedding-request-1"
+    assert update.metadata["output_item_count"] == 2
+    assert isinstance(update.metadata["latency_ms"], int)
+    assert "(1.0, 0.0)" not in repr(update.metadata)
+
+
+@pytest.mark.asyncio
+async def test_omits_provider_request_id_when_absent() -> None:
+    provider = FakeEmbeddingProvider(
+        response=_response(provider_request_id=None),
+    )
+    observability = RecordingObservabilityClient()
+    wrapper = ObservingEmbeddingProvider(
+        provider=provider,
+        observability_client=observability,
+    )
+
+    await wrapper.embed(_request())
+
+    update = observability.scopes[0].updates[0]
+
+    assert "provider_request_id" not in update.metadata
 
 
 @pytest.mark.asyncio
@@ -395,11 +451,11 @@ async def test_provider_error_is_observed_and_preserved() -> None:
         await wrapper.embed(_request())
 
     assert exception_info.value is expected_error
+    assert current_observation_context() is None
 
     update = observability.scopes[0].updates[0]
 
-    assert update.status is not None
-    assert update.status.value == "error"
+    assert update.status is ObservationStatus.ERROR
     assert update.error_code == "embedding_timeout"
     assert update.metadata["error_code"] == "embedding_timeout"
     assert update.metadata["provider_request_id"] == "embedding-timeout-1"
@@ -434,6 +490,7 @@ async def test_observability_failures_do_not_change_provider_result(
 
     assert result == _response()
     assert len(provider.requests) == 1
+    assert current_observation_context() is None
 
 
 @pytest.mark.asyncio
@@ -472,3 +529,25 @@ async def test_close_is_delegated_to_underlying_provider() -> None:
 
     assert provider.close_calls == 1
     assert wrapper.wrapped_provider is provider
+
+
+@pytest.mark.asyncio
+async def test_observation_context_restores_parent_after_completion() -> None:
+    provider = FakeEmbeddingProvider(response=_response())
+    observability = RecordingObservabilityClient()
+    wrapper = ObservingEmbeddingProvider(
+        provider=provider,
+        observability_client=observability,
+    )
+
+    with observation_context_scope(
+        ActiveObservationContext(name="parent.boundary"),
+    ):
+        await wrapper.embed(_request())
+        active = current_observation_context()
+        assert active is not None
+        assert active.name == "parent.boundary"
+
+    assert observability.parent_observation_names == ["parent.boundary"]
+    assert provider.parent_observation_names == ["embedding.request"]
+    assert current_observation_context() is None
