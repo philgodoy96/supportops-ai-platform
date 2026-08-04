@@ -1,12 +1,27 @@
 """Environment-based application settings."""
 
+import re
 from enum import StrEnum
 from functools import lru_cache
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, PostgresDsn, SecretStr, field_validator, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BeforeValidator,
+    Field,
+    PostgresDsn,
+    SecretStr,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from supportops.observability.models import (
+    ObservabilityCaptureMode,
+    ObservabilityProvider,
+)
 
 
 class ApplicationEnvironment(StrEnum):
@@ -63,6 +78,26 @@ _CONTROLLED_SUPPORT_LOGICAL_LLM_GENERATIONS = 6
 _CHECKPOINT_URL_ERROR = (
     "agent_graph_checkpoint_database_url must be a valid PostgreSQL connection URL."
 )
+_LANGFUSE_ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_LANGFUSE_RELEASE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_HTTP_URL_ADAPTER: TypeAdapter[AnyHttpUrl] = TypeAdapter(AnyHttpUrl)
+
+
+def _validate_http_or_https_url(value: object) -> str:
+    """Validate and normalize HTTP or HTTPS URLs without custom URL parsing."""
+
+    if not isinstance(value, str):
+        raise ValueError("URL value must be a string")
+
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise ValueError("value must not be blank")
+
+    validated_url = _HTTP_URL_ADAPTER.validate_python(normalized_value)
+    return str(validated_url).rstrip("/")
+
+
+HttpOrHttpsUrl = Annotated[str, BeforeValidator(_validate_http_or_https_url)]
 
 
 class Settings(BaseSettings):
@@ -150,6 +185,16 @@ class Settings(BaseSettings):
         le=2,
     )
 
+    ai_observability_provider: ObservabilityProvider = ObservabilityProvider.NOOP
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_base_url: HttpOrHttpsUrl = "https://cloud.langfuse.com"
+    langfuse_environment: str = Field(default="local", min_length=1, max_length=64)
+    langfuse_release: str | None = Field(default=None, max_length=128)
+    langfuse_capture_mode: ObservabilityCaptureMode = ObservabilityCaptureMode.METADATA_ONLY
+    langfuse_flush_at_attempt_end: bool = False
+    langfuse_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+
     qdrant_url: str = Field(min_length=1)
     qdrant_api_key: str | None = None
 
@@ -184,6 +229,24 @@ class Settings(BaseSettings):
 
         if isinstance(value, SecretStr):
             return value
+
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            return normalized_value or None
+
+        return value
+
+    @field_validator("langfuse_public_key", "langfuse_secret_key", mode="before")
+    @classmethod
+    def normalize_langfuse_secret(cls, value: object) -> object:
+        """Normalize optional Langfuse secrets without exposing secret values."""
+
+        if value is None:
+            return None
+
+        if isinstance(value, SecretStr):
+            normalized_value = value.get_secret_value().strip()
+            return normalized_value or None
 
         if isinstance(value, str):
             normalized_value = value.strip()
@@ -241,6 +304,44 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @field_validator("langfuse_environment")
+    @classmethod
+    def validate_langfuse_environment(cls, value: str) -> str:
+        """Normalize and validate Langfuse environment labels."""
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("langfuse_environment must not be blank")
+
+        if not _LANGFUSE_ENVIRONMENT_PATTERN.fullmatch(normalized_value):
+            raise ValueError(
+                "langfuse_environment must start with an ASCII letter or digit and "
+                "contain only ASCII letters, digits, periods, underscores, or hyphens"
+            )
+
+        return normalized_value
+
+    @field_validator("langfuse_release")
+    @classmethod
+    def validate_langfuse_release(cls, value: str | None) -> str | None:
+        """Normalize and validate optional Langfuse release labels."""
+
+        if value is None:
+            return None
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            return None
+
+        if not _LANGFUSE_RELEASE_PATTERN.fullmatch(normalized_value):
+            raise ValueError(
+                "langfuse_release must start with an ASCII letter or digit and "
+                "contain only ASCII letters, digits, periods, underscores, "
+                "hyphens, or plus signs"
+            )
+
+        return normalized_value
 
     @field_validator("qdrant_api_key")
     @classmethod
@@ -332,6 +433,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 "agent_graph_tool_timeout_seconds must be smaller than "
                 "worker_execution_timeout_seconds."
+            )
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_langfuse_observability_configuration(self) -> Self:
+        """Require Langfuse credentials only when the Langfuse provider is selected."""
+
+        if self.ai_observability_provider is not ObservabilityProvider.LANGFUSE:
+            return self
+
+        missing_fields: list[str] = []
+        if self.langfuse_public_key is None:
+            missing_fields.append("langfuse_public_key")
+        if self.langfuse_secret_key is None:
+            missing_fields.append("langfuse_secret_key")
+
+        if missing_fields:
+            raise ValueError(
+                f"{', '.join(missing_fields)} required when ai_observability_provider is langfuse."
             )
 
         return self

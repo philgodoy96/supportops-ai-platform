@@ -13,6 +13,10 @@ from supportops.core.settings import (
     LogLevel,
     Settings,
 )
+from supportops.observability.models import (
+    ObservabilityCaptureMode,
+    ObservabilityProvider,
+)
 
 SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_ENVIRONMENT",
@@ -55,6 +59,15 @@ SUPPORTOPS_ENVIRONMENT_VARIABLES = (
     "SUPPORTOPS_EMBEDDING_DIMENSIONS",
     "SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS",
     "SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES",
+    "SUPPORTOPS_AI_OBSERVABILITY_PROVIDER",
+    "SUPPORTOPS_LANGFUSE_PUBLIC_KEY",
+    "SUPPORTOPS_LANGFUSE_SECRET_KEY",
+    "SUPPORTOPS_LANGFUSE_BASE_URL",
+    "SUPPORTOPS_LANGFUSE_ENVIRONMENT",
+    "SUPPORTOPS_LANGFUSE_RELEASE",
+    "SUPPORTOPS_LANGFUSE_CAPTURE_MODE",
+    "SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END",
+    "SUPPORTOPS_LANGFUSE_TIMEOUT_SECONDS",
     "SUPPORTOPS_QDRANT_URL",
     "SUPPORTOPS_QDRANT_API_KEY",
     "SUPPORTOPS_DEPENDENCY_HEALTH_TIMEOUT_SECONDS",
@@ -128,6 +141,15 @@ def test_settings_use_safe_local_defaults() -> None:
     assert settings.embedding_dimensions == 64
     assert settings.embedding_request_timeout_seconds == 12.0
     assert settings.embedding_transport_max_retries == 1
+    assert settings.ai_observability_provider is ObservabilityProvider.NOOP
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_base_url == "https://cloud.langfuse.com"
+    assert settings.langfuse_environment == "local"
+    assert settings.langfuse_release is None
+    assert settings.langfuse_capture_mode is ObservabilityCaptureMode.METADATA_ONLY
+    assert settings.langfuse_flush_at_attempt_end is False
+    assert settings.langfuse_timeout_seconds == 5.0
     assert settings.qdrant_api_key is None
     assert settings.dependency_health_timeout_seconds == 2.0
 
@@ -873,3 +895,134 @@ def test_settings_require_qdrant_url() -> None:
 def test_settings_reject_invalid_postgresql_url() -> None:
     with pytest.raises(ValidationError):
         create_required_settings(postgresql_url="not-a-postgresql-url")
+
+
+def test_settings_default_observability_provider_is_noop() -> None:
+    settings = create_required_settings()
+
+    assert settings.ai_observability_provider is ObservabilityProvider.NOOP
+
+
+def test_settings_default_langfuse_capture_mode_is_metadata_only() -> None:
+    settings = create_required_settings()
+
+    assert settings.langfuse_capture_mode is ObservabilityCaptureMode.METADATA_ONLY
+
+
+def test_settings_noop_observability_does_not_require_langfuse_keys() -> None:
+    settings = create_required_settings(
+        ai_observability_provider=ObservabilityProvider.NOOP,
+        langfuse_public_key=None,
+        langfuse_secret_key=None,
+    )
+
+    assert settings.ai_observability_provider is ObservabilityProvider.NOOP
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+
+
+def test_settings_accept_valid_langfuse_observability_configuration() -> None:
+    settings = create_required_settings(
+        ai_observability_provider=ObservabilityProvider.LANGFUSE,
+        langfuse_public_key="pk-lf-test-public",
+        langfuse_secret_key="sk-lf-test-secret",
+        langfuse_base_url="https://langfuse.example.com",
+        langfuse_environment="staging",
+        langfuse_release="1.2.3+build",
+        langfuse_capture_mode=ObservabilityCaptureMode.REDACTED_CONTENT,
+        langfuse_flush_at_attempt_end=True,
+        langfuse_timeout_seconds=10.0,
+    )
+
+    assert settings.ai_observability_provider is ObservabilityProvider.LANGFUSE
+    assert settings.langfuse_public_key is not None
+    assert settings.langfuse_public_key.get_secret_value() == "pk-lf-test-public"
+    assert settings.langfuse_secret_key is not None
+    assert settings.langfuse_secret_key.get_secret_value() == "sk-lf-test-secret"
+    assert settings.langfuse_base_url == "https://langfuse.example.com"
+    assert settings.langfuse_environment == "staging"
+    assert settings.langfuse_release == "1.2.3+build"
+    assert settings.langfuse_capture_mode is ObservabilityCaptureMode.REDACTED_CONTENT
+    assert settings.langfuse_flush_at_attempt_end is True
+    assert settings.langfuse_timeout_seconds == 10.0
+
+
+def test_settings_reject_langfuse_provider_without_public_key() -> None:
+    with pytest.raises(ValidationError, match=r"langfuse_public_key") as raised_error:
+        create_required_settings(
+            ai_observability_provider=ObservabilityProvider.LANGFUSE,
+            langfuse_public_key=None,
+            langfuse_secret_key="sk-lf-test-secret",
+        )
+
+    assert "sk-lf-test-secret" not in str(raised_error.value)
+
+
+def test_settings_reject_langfuse_provider_without_secret_key() -> None:
+    with pytest.raises(ValidationError, match=r"langfuse_secret_key") as raised_error:
+        create_required_settings(
+            ai_observability_provider=ObservabilityProvider.LANGFUSE,
+            langfuse_public_key="pk-lf-test-public",
+            langfuse_secret_key=None,
+        )
+
+    assert "pk-lf-test-public" not in str(raised_error.value)
+
+
+def test_settings_reject_langfuse_provider_with_whitespace_only_keys() -> None:
+    with pytest.raises(ValidationError, match=r"langfuse_public_key") as raised_error:
+        create_required_settings(
+            ai_observability_provider=ObservabilityProvider.LANGFUSE,
+            langfuse_public_key="   ",
+            langfuse_secret_key="\t",
+        )
+
+    error_text = str(raised_error.value)
+    assert "langfuse_secret_key" in error_text
+
+
+def test_settings_reject_unsupported_observability_provider() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(ai_observability_provider="unsupported-provider")
+
+
+def test_settings_reject_unsupported_langfuse_capture_mode() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(langfuse_capture_mode="unsupported-capture-mode")
+
+
+def test_settings_reject_invalid_langfuse_base_url() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(langfuse_base_url="not-a-valid-url")
+
+
+def test_settings_reject_non_positive_langfuse_timeout() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(langfuse_timeout_seconds=0)
+
+
+def test_settings_reject_langfuse_timeout_above_maximum() -> None:
+    with pytest.raises(ValidationError):
+        create_required_settings(langfuse_timeout_seconds=30.1)
+
+
+def test_settings_reject_invalid_langfuse_environment_characters() -> None:
+    with pytest.raises(ValidationError, match=r"langfuse_environment"):
+        create_required_settings(langfuse_environment="bad env!")
+
+
+def test_settings_reject_invalid_langfuse_release_characters() -> None:
+    with pytest.raises(ValidationError, match=r"langfuse_release"):
+        create_required_settings(langfuse_release="bad release!")
+
+
+def test_settings_langfuse_keys_absent_from_repr() -> None:
+    settings = create_required_settings(
+        ai_observability_provider=ObservabilityProvider.LANGFUSE,
+        langfuse_public_key="pk-lf-test-public",
+        langfuse_secret_key="sk-lf-test-secret",
+    )
+
+    representation = repr(settings)
+    assert "pk-lf-test-public" not in representation
+    assert "sk-lf-test-secret" not in representation
