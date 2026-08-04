@@ -242,6 +242,21 @@ async def test_idle_cycle_recovers_expires_then_attempts_claim() -> None:
     assert expiration_command.batch_size == 100
 
 
+async def test_idle_cycle_does_not_start_agent_run_trace_or_flush() -> None:
+    worker, _, processor, _, _ = create_worker()
+    processor.execute = AsyncMock(
+        side_effect=AssertionError(
+            "idle cycles must not enter AgentRun processing",
+        ),
+    )
+
+    result = await worker.execute()
+
+    assert result.outcome is WorkerCycleOutcome.IDLE
+    assert result.agent_run_id is None
+    processor.execute.assert_not_awaited()
+
+
 async def test_cycle_reports_recovery_even_when_no_run_is_claimed() -> None:
     worker, _, processor, expire_pending_approvals, _ = create_worker(
         recovery_result=create_recovery_result(),

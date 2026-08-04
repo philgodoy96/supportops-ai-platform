@@ -565,6 +565,14 @@ async def test_approval_requested_emitted_only_after_durable_creation() -> None:
     assert event.event.metadata["approval_status"] == "pending"
     assert "proposed_input" not in event.event.metadata
     assert "request_reason" not in event.event.metadata
+    assert "ticket_subject" not in event.event.metadata
+    assert "ticket_description" not in event.event.metadata
+    assert "tool_arguments" not in event.event.metadata
+    assert "escalation_reason" not in event.event.metadata
+    assert "lease_token" not in event.event.metadata
+    assert "user_id" not in event.event.metadata
+    exported = repr(event.event)
+    assert "Potential security incident." not in exported
     assert observability.started_traces == []
 
 

@@ -1001,6 +1001,7 @@ class _RecordingObservabilityClient:
         self.trace_events: list[_RecordingTraceEvent] = []
         self.started_traces: list[object] = []
         self.started_observations: list[object] = []
+        self.flush_calls = 0
 
     def start_trace(self, attributes: object) -> AbstractContextManager[object]:
         self.started_traces.append(attributes)
@@ -1019,10 +1020,45 @@ class _RecordingObservabilityClient:
         self.trace_events.append(_RecordingTraceEvent(identity=identity, event=event))
 
     def flush(self) -> None:
-        return None
+        self.flush_calls += 1
 
     def shutdown(self) -> None:
         return None
+
+
+_FORBIDDEN_APPROVAL_EVENT_KEYS = frozenset(
+    {
+        "proposed_input",
+        "decision_comment",
+        "decision_actor_reference",
+        "approval_comment",
+        "approver_identity",
+        "ticket_subject",
+        "ticket_description",
+        "conversation_content",
+        "tool_arguments",
+        "tool_output",
+        "escalation_reason",
+        "recommendation_text",
+        "decision_summary",
+        "lease_token",
+        "execution_grant",
+        "authorization_headers",
+        "credentials",
+        "user_id",
+        "traceback",
+    }
+)
+
+
+def _assert_safe_approval_events(observability: _RecordingObservabilityClient) -> None:
+    for item in observability.trace_events:
+        assert _FORBIDDEN_APPROVAL_EVENT_KEYS.isdisjoint(item.event.metadata)
+        exported = repr(item.event)
+        assert "operator:alice" not in exported
+        assert "Potential security incident." not in exported
+        assert "Escalation is not required." not in exported
+        assert "proposed_input" not in exported
 
 
 @pytest.mark.asyncio
@@ -1048,6 +1084,8 @@ async def test_approve_emits_approval_approved_and_resume_scheduled() -> None:
     assert "proposed_input" not in approved.event.metadata
     assert observability.started_traces == []
     assert observability.started_observations == []
+    assert observability.flush_calls == 0
+    _assert_safe_approval_events(observability)
 
 
 @pytest.mark.asyncio
@@ -1065,6 +1103,8 @@ async def test_reject_emits_approval_rejected() -> None:
         "approval.rejected",
         "workflow.resume_scheduled",
     ]
+    assert observability.flush_calls == 0
+    _assert_safe_approval_events(observability)
 
 
 @pytest.mark.asyncio
