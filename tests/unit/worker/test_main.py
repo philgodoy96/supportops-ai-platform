@@ -365,13 +365,19 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
     )
     controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
     _reset_capturing_cycle_runner()
     create_runtime = MagicMock(return_value=llm_runtime)
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
+    create_observability = MagicMock(return_value=observability_client)
 
     caplog.set_level(logging.INFO, logger="supportops.worker")
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            create_observability,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             create_runtime,
@@ -400,6 +406,7 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
         )
 
     assert exit_code == 0
+    create_observability.assert_called_once_with(settings)
     create_runtime.assert_called_once_with(
         provider_name="openai",
         openai_api_key="secret-openai-key",
@@ -408,8 +415,12 @@ async def test_run_worker_composes_llm_runtime_and_closes_resources(
         request_timeout_seconds=15.0,
         transport_max_retries=2,
         max_repair_attempts=0,
+        observability_client=observability_client,
     )
-    create_controlled_runtime.assert_awaited_once_with(settings=settings)
+    create_controlled_runtime.assert_awaited_once_with(
+        settings=settings,
+        observability_client=observability_client,
+    )
     assert callable(_captured_cycle_runner_kwargs()["executor_factory"])
     assert controlled_runtime.close_calls == 1
     assert controlled_runtime.observability_client.shutdown_calls == 1
@@ -444,12 +455,17 @@ async def test_run_worker_executor_factory_builds_session_scoped_registry() -> N
     llm_runtime = FakeLLMRuntime()
     controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
     _reset_capturing_cycle_runner()
     registry = object()
     create_registry = MagicMock(return_value=registry)
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -489,7 +505,10 @@ async def test_run_worker_executor_factory_builds_session_scoped_registry() -> N
         result = executor_factory(session, transaction_manager)
 
         assert result is registry
-        create_controlled_runtime.assert_awaited_once_with(settings=settings)
+        create_controlled_runtime.assert_awaited_once_with(
+            settings=settings,
+            observability_client=observability_client,
+        )
         create_registry.assert_called_once_with(
             session=session,
             transaction_manager=transaction_manager,
@@ -506,9 +525,14 @@ async def test_run_worker_closes_controlled_runtime_when_engine_construction_fai
     settings = _create_settings()
     llm_runtime = FakeLLMRuntime()
     controlled_runtime = FakeControlledRuntime()
+    observability_client = FakeObservabilityClient()
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -537,15 +561,21 @@ async def test_run_worker_closes_controlled_runtime_when_engine_construction_fai
 async def test_run_worker_closes_llm_runtime_when_controlled_runtime_creation_fails() -> None:
     settings = _create_settings()
     llm_runtime = FakeLLMRuntime()
+    observability_client = FakeObservabilityClient()
 
     async def failing_controlled_runtime_factory(
         *,
         settings: Settings,
+        observability_client: object | None = None,
     ) -> FakeControlledRuntime:
-        del settings
+        del settings, observability_client
         raise RuntimeError("controlled runtime unavailable")
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -565,6 +595,7 @@ async def test_run_worker_closes_llm_runtime_when_controlled_runtime_creation_fa
         )
 
     assert llm_runtime.close_calls == 1
+    assert observability_client.shutdown_calls == 1
 
 
 async def test_run_worker_closes_controlled_runtime_when_worker_execution_fails() -> None:
@@ -572,9 +603,14 @@ async def test_run_worker_closes_controlled_runtime_when_worker_execution_fails(
     llm_runtime = FakeLLMRuntime()
     controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -614,9 +650,14 @@ async def test_run_worker_disposes_engine_when_provider_close_fails() -> None:
     llm_runtime.close_error = RuntimeError("provider close failed")
     controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -659,9 +700,14 @@ async def test_run_worker_observability_shutdown_failure_preserves_exit_code() -
         "observability shutdown failed",
     )
     engine = FakeEngine()
+    observability_client = FakeObservabilityClient()
     create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
 
     with (
+        patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
         patch(
             "supportops.worker.main.create_worker_llm_runtime",
             return_value=llm_runtime,
@@ -701,13 +747,27 @@ async def test_run_worker_holds_one_process_observability_client() -> None:
     llm_runtime = FakeLLMRuntime()
     controlled_runtime = FakeControlledRuntime()
     engine = FakeEngine()
-    create_controlled_runtime = AsyncMock(return_value=controlled_runtime)
+    observability_client = FakeObservabilityClient()
+    create_runtime = MagicMock(return_value=llm_runtime)
     _reset_capturing_cycle_runner()
+
+    async def controlled_runtime_factory(
+        *,
+        settings: Settings,
+        observability_client: FakeObservabilityClient,
+    ) -> FakeControlledRuntime:
+        del settings
+        controlled_runtime.observability_client = observability_client
+        return controlled_runtime
 
     with (
         patch(
+            "supportops.worker.main.create_observability_client",
+            return_value=observability_client,
+        ),
+        patch(
             "supportops.worker.main.create_worker_llm_runtime",
-            return_value=llm_runtime,
+            create_runtime,
         ),
         patch(
             "supportops.worker.main.async_sessionmaker",
@@ -729,12 +789,17 @@ async def test_run_worker_holds_one_process_observability_client() -> None:
         exit_code = await run_worker(
             settings=settings,
             engine_factory=_as_engine_factory(engine),
-            controlled_runtime_factory=create_controlled_runtime,
+            controlled_runtime_factory=cast(
+                Any,
+                controlled_runtime_factory,
+            ),
         )
 
         executor_factory = _captured_cycle_runner_kwargs()["executor_factory"]
         assert callable(executor_factory)
 
     assert exit_code == 0
-    create_controlled_runtime.assert_awaited_once_with(settings=settings)
-    assert controlled_runtime.observability_client.shutdown_calls == 1
+    create_runtime.assert_called_once()
+    assert create_runtime.call_args.kwargs["observability_client"] is (observability_client)
+    assert controlled_runtime.observability_client is observability_client
+    assert observability_client.shutdown_calls == 1
