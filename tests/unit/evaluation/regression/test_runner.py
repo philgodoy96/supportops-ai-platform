@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import TypedDict
 
 import pytest
 
-from supportops.evaluation.contracts.hashing import sha256_hexdigest
+from supportops.evaluation.contracts.hashing import canonical_json_bytes, sha256_hexdigest
 from supportops.evaluation.regression.models import (
     DOMAIN_CONTROLLED_SUPPORT,
     DOMAIN_HUMAN_APPROVAL,
@@ -23,6 +24,7 @@ from supportops.evaluation.regression.runner import (
     UnknownRegressionDomainError,
     run_repository_regression,
 )
+from supportops.evaluation.semantic_retrieval.dataset import SemanticRetrievalDatasetError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -89,15 +91,32 @@ def test_default_three_domain_execution_is_incomplete(monkeypatch: pytest.Monkey
         DOMAIN_HUMAN_APPROVAL,
     )
     assert result.not_provided_domains == (DOMAIN_TICKET_CLASSIFICATION,)
+    assert DOMAIN_TICKET_CLASSIFICATION not in {item.domain for item in result.domain_results}
     assert result.status is RegressionAggregateStatus.INCOMPLETE
     assert result.blocking_failure_count == 0
     assert result.incomplete_domain_count == 3
+    assert all(
+        domain_result.status is RegressionAggregateStatus.INCOMPLETE
+        for domain_result in result.domain_results
+    )
 
 
-def test_committed_fixtures_score_without_network() -> None:
+def test_committed_fixtures_score_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _deny_network(*_args: object, **_kwargs: object) -> None:
+        raise OSError("network access is forbidden during regression scoring")
+
+    monkeypatch.setattr(socket, "create_connection", _deny_network)
+
     result = run_repository_regression(**_default_paths())
 
     assert result.status is RegressionAggregateStatus.INCOMPLETE
+    assert result.blocking_failure_count == 0
+    assert tuple(item.domain for item in result.domain_results) == (
+        DOMAIN_SEMANTIC_RETRIEVAL,
+        DOMAIN_CONTROLLED_SUPPORT,
+        DOMAIN_HUMAN_APPROVAL,
+    )
+    assert result.not_provided_domains == (DOMAIN_TICKET_CLASSIFICATION,)
     assert all(
         domain_result.status is RegressionAggregateStatus.INCOMPLETE
         for domain_result in result.domain_results
@@ -108,10 +127,16 @@ def test_stable_domain_order_and_repository_hash() -> None:
     first = run_repository_regression(**_default_paths())
     second = run_repository_regression(**_default_paths())
 
-    assert tuple(item.domain for item in first.domain_results) == tuple(
+    expected_order = tuple(
         domain for domain in STABLE_DOMAIN_ORDER if domain != DOMAIN_TICKET_CLASSIFICATION
     )
+    assert tuple(item.domain for item in first.domain_results) == expected_order
+    assert tuple(item.domain for item in second.domain_results) == expected_order
     assert first.content_hash == second.content_hash
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+    assert canonical_json_bytes(first) == canonical_json_bytes(second)
+    assert "created_at" not in first.model_dump(mode="json")
+    assert "created_at" not in json.dumps(first.model_dump(mode="json"))
     content = RepositoryRegressionResultContent.model_validate(
         first.model_dump(exclude={"content_hash"})
     )
@@ -174,8 +199,8 @@ def test_unknown_domain_rejected() -> None:
 
 def test_artifact_validation_failure_does_not_overwrite_output(tmp_path: Path) -> None:
     output_path = tmp_path / "repository-regression.json"
-    output_path.write_text('{"preserved":true}\n', encoding="utf-8")
-    original = output_path.read_text(encoding="utf-8")
+    preserved = b'{"preserved":true}\n'
+    output_path.write_bytes(preserved)
 
     with pytest.raises(OSError):
         run_repository_regression(
@@ -185,7 +210,27 @@ def test_artifact_validation_failure_does_not_overwrite_output(tmp_path: Path) -
             output_path=output_path,
         )
 
-    assert output_path.read_text(encoding="utf-8") == original
+    assert output_path.read_bytes() == preserved
+
+
+def test_malformed_artifact_does_not_overwrite_output(tmp_path: Path) -> None:
+    dataset = tmp_path / "bad-dataset.jsonl"
+    predictions = tmp_path / "bad-predictions.jsonl"
+    output_path = tmp_path / "repository-regression.json"
+    preserved = b'{"preserved":true}\n'
+    dataset.write_bytes(b"{not-json\n")
+    predictions.write_bytes(b"{not-json\n")
+    output_path.write_bytes(preserved)
+
+    with pytest.raises(SemanticRetrievalDatasetError):
+        run_repository_regression(
+            domains=(DOMAIN_SEMANTIC_RETRIEVAL,),
+            semantic_retrieval_dataset=dataset,
+            semantic_retrieval_predictions=predictions,
+            output_path=output_path,
+        )
+
+    assert output_path.read_bytes() == preserved
 
 
 def test_successful_output_is_canonical_and_atomic(tmp_path: Path) -> None:
@@ -202,3 +247,4 @@ def test_successful_output_is_canonical_and_atomic(tmp_path: Path) -> None:
     assert payload["status"] == RegressionAggregateStatus.INCOMPLETE.value
     assert "created_at" not in payload
     assert list(payload.keys()) == sorted(payload.keys())
+    assert output_path.read_bytes() == canonical_json_bytes(result) + b"\n"

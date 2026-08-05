@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
@@ -11,6 +12,8 @@ import pytest
 
 from supportops.evaluation.regression.cli import build_parser, run_cli
 from supportops.evaluation.regression.models import (
+    DOMAIN_CONTROLLED_SUPPORT,
+    DOMAIN_HUMAN_APPROVAL,
     DOMAIN_SEMANTIC_RETRIEVAL,
     DOMAIN_TICKET_CLASSIFICATION,
     RegressionAggregateStatus,
@@ -44,15 +47,82 @@ def test_default_score_succeeds_and_writes_output(
 
     assert exit_code == 0
     assert stderr.getvalue() == ""
-    assert "status=incomplete" in stdout.getvalue()
+    summary = stdout.getvalue()
+    assert "status=incomplete" in summary
+    assert "blocking_failure_count=0" in summary
+    assert DOMAIN_SEMANTIC_RETRIEVAL in summary
+    assert DOMAIN_CONTROLLED_SUPPORT in summary
+    assert DOMAIN_HUMAN_APPROVAL in summary
+    assert DOMAIN_TICKET_CLASSIFICATION in summary
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["status"] == RegressionAggregateStatus.INCOMPLETE.value
+    assert payload["blocking_failure_count"] == 0
+    assert [item["domain"] for item in payload["domain_results"]] == [
+        DOMAIN_SEMANTIC_RETRIEVAL,
+        DOMAIN_CONTROLLED_SUPPORT,
+        DOMAIN_HUMAN_APPROVAL,
+    ]
+    assert payload["not_provided_domains"] == [DOMAIN_TICKET_CLASSIFICATION]
+
+
+def test_default_score_completes_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PROJECT_ROOT)
+
+    def _deny_network(*_args: object, **_kwargs: object) -> None:
+        raise OSError("network access is forbidden during regression scoring")
+
+    monkeypatch.setattr(socket, "create_connection", _deny_network)
+
+    exit_code = run_cli(["score"], stdout=StringIO(), stderr=StringIO())
+
+    assert exit_code == 0
 
 
 def test_incomplete_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(PROJECT_ROOT)
     exit_code = run_cli(["score"], stdout=StringIO(), stderr=StringIO())
     assert exit_code == 0
+
+
+def test_passed_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    passed = build_repository_regression_result(
+        domain_results=(
+            build_domain_profile_result(
+                profile_id="semantic-retrieval-release-gates",
+                profile_version=1,
+                domain=DOMAIN_SEMANTIC_RETRIEVAL,
+                source_report_hash="a" * 64,
+                gate_results=(
+                    RegressionGateResult(
+                        gate_id="retrieval.workspace-isolation",
+                        domain=DOMAIN_SEMANTIC_RETRIEVAL,
+                        category=RegressionGateCategory.SAFETY,
+                        outcome=RegressionGateOutcome.PASSED,
+                        blocking=True,
+                        metric_name="workspace_isolation_rate.rate",
+                        operator=RegressionGateOperator.EQUAL,
+                        actual_value=Decimal("1.000000"),
+                        threshold_value=Decimal("1.000000"),
+                        reason="forced pass",
+                    ),
+                ),
+            ),
+        ),
+        not_provided_domains=(DOMAIN_TICKET_CLASSIFICATION,),
+    )
+
+    def _fake_run(**_kwargs: object) -> RepositoryRegressionResult:
+        return passed
+
+    monkeypatch.setattr(
+        "supportops.evaluation.regression.cli.run_repository_regression",
+        _fake_run,
+    )
+    exit_code = run_cli(["score"], stdout=StringIO(), stderr=StringIO())
+    assert exit_code == 0
+    assert passed.status is RegressionAggregateStatus.PASSED
 
 
 def test_blocking_failure_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,13 +161,20 @@ def test_blocking_failure_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     exit_code = run_cli(["score"], stdout=StringIO(), stderr=StringIO())
     assert exit_code == 1
+    assert failed.status is RegressionAggregateStatus.FAILED
 
 
-def test_malformed_artifact_returns_non_zero(tmp_path: Path) -> None:
+def test_malformed_artifact_returns_artifact_failure_and_preserves_output(
+    tmp_path: Path,
+) -> None:
     dataset = tmp_path / "bad-dataset.jsonl"
     predictions = tmp_path / "bad-predictions.jsonl"
-    dataset.write_text("{not-json\n", encoding="utf-8")
-    predictions.write_text("{not-json\n", encoding="utf-8")
+    output_path = tmp_path / "regression.json"
+    preserved = b'{"preserved":true}\n'
+    dataset.write_bytes(b"{not-json\n")
+    predictions.write_bytes(b"{not-json\n")
+    output_path.write_bytes(preserved)
+    stderr = StringIO()
 
     exit_code = run_cli(
         [
@@ -108,12 +185,16 @@ def test_malformed_artifact_returns_non_zero(tmp_path: Path) -> None:
             str(dataset),
             "--semantic-retrieval-predictions",
             str(predictions),
+            "--output",
+            str(output_path),
         ],
         stdout=StringIO(),
-        stderr=StringIO(),
+        stderr=stderr,
     )
 
     assert exit_code == 3
+    assert stderr.getvalue().strip() != ""
+    assert output_path.read_bytes() == preserved
 
 
 def test_unsupported_domain_is_usage_error() -> None:

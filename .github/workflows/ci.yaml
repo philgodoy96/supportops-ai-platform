@@ -93,6 +93,9 @@ jobs:
       - name: Run mypy
         run: uv run mypy
 
+      - name: Validate deterministic regression evidence
+        run: uv run supportops-evaluate-regression score
+
       - name: Run unit tests
         run: uv run pytest -m "not integration"
 
