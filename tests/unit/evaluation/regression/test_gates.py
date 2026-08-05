@@ -279,6 +279,8 @@ def test_retrieval_workspace_isolation_failure() -> None:
     gate = _gate_by_id(profile, "retrieval.workspace-isolation")
 
     assert gate.outcome is RegressionGateOutcome.FAILED
+    assert gate.blocking is True
+    assert profile.blocking_failure_count == 1
     assert profile.status is RegressionAggregateStatus.FAILED
 
 
@@ -296,6 +298,8 @@ def test_controlled_support_forbidden_execution_failure() -> None:
     gate = _gate_by_id(profile, "controlled-support.forbidden-tool-execution")
 
     assert gate.outcome is RegressionGateOutcome.FAILED
+    assert gate.blocking is True
+    assert profile.blocking_failure_count == 1
     assert profile.status is RegressionAggregateStatus.FAILED
 
 
@@ -310,11 +314,11 @@ def test_controlled_support_repeated_acceptance_failure() -> None:
         }
     )
     profile = evaluate_controlled_support_release_gates(report)
+    gate = _gate_by_id(profile, "controlled-support.repeated-tool-acceptance")
 
-    assert (
-        _gate_by_id(profile, "controlled-support.repeated-tool-acceptance").outcome
-        is RegressionGateOutcome.FAILED
-    )
+    assert gate.outcome is RegressionGateOutcome.FAILED
+    assert gate.blocking is True
+    assert profile.status is RegressionAggregateStatus.FAILED
 
 
 def test_controlled_support_invalid_citation_failure() -> None:
@@ -328,11 +332,10 @@ def test_controlled_support_invalid_citation_failure() -> None:
         }
     )
     profile = evaluate_controlled_support_release_gates(report)
+    gate = _gate_by_id(profile, "controlled-support.citation-validity")
 
-    assert (
-        _gate_by_id(profile, "controlled-support.citation-validity").outcome
-        is RegressionGateOutcome.FAILED
-    )
+    assert gate.outcome is RegressionGateOutcome.FAILED
+    assert gate.blocking is True
 
 
 def test_approval_unauthorized_execution_failure() -> None:
@@ -346,11 +349,11 @@ def test_approval_unauthorized_execution_failure() -> None:
         }
     )
     profile = evaluate_human_approval_release_gates(report)
+    gate = _gate_by_id(profile, "human-approval.unauthorized-sensitive-execution")
 
-    assert (
-        _gate_by_id(profile, "human-approval.unauthorized-sensitive-execution").outcome
-        is RegressionGateOutcome.FAILED
-    )
+    assert gate.outcome is RegressionGateOutcome.FAILED
+    assert gate.blocking is True
+    assert profile.status is RegressionAggregateStatus.FAILED
 
 
 def test_approval_rejected_and_expired_non_execution_failures() -> None:
@@ -369,15 +372,14 @@ def test_approval_rejected_and_expired_non_execution_failures() -> None:
         }
     )
     profile = evaluate_human_approval_release_gates(report)
+    rejected = _gate_by_id(profile, "human-approval.rejected-non-execution")
+    expired = _gate_by_id(profile, "human-approval.expired-non-execution")
 
-    assert (
-        _gate_by_id(profile, "human-approval.rejected-non-execution").outcome
-        is RegressionGateOutcome.FAILED
-    )
-    assert (
-        _gate_by_id(profile, "human-approval.expired-non-execution").outcome
-        is RegressionGateOutcome.FAILED
-    )
+    assert rejected.outcome is RegressionGateOutcome.FAILED
+    assert rejected.blocking is True
+    assert expired.outcome is RegressionGateOutcome.FAILED
+    assert expired.blocking is True
+    assert profile.status is RegressionAggregateStatus.FAILED
 
 
 def test_approval_checkpoint_and_grant_mismatch_failures() -> None:
@@ -396,14 +398,14 @@ def test_approval_checkpoint_and_grant_mismatch_failures() -> None:
         }
     )
     profile = evaluate_human_approval_release_gates(report)
+    checkpoint = _gate_by_id(profile, "human-approval.checkpoint-match")
+    grant = _gate_by_id(profile, "human-approval.grant-match")
 
-    assert (
-        _gate_by_id(profile, "human-approval.checkpoint-match").outcome
-        is RegressionGateOutcome.FAILED
-    )
-    assert (
-        _gate_by_id(profile, "human-approval.grant-match").outcome is RegressionGateOutcome.FAILED
-    )
+    assert checkpoint.outcome is RegressionGateOutcome.FAILED
+    assert checkpoint.blocking is True
+    assert grant.outcome is RegressionGateOutcome.FAILED
+    assert grant.blocking is True
+    assert profile.status is RegressionAggregateStatus.FAILED
 
 
 def test_gate_profile_hashes_are_deterministic() -> None:
