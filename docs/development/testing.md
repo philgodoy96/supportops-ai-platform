@@ -250,6 +250,15 @@ uv run pytest `
   -k prompt_version
 ```
 
+Focused classification prompt-iteration coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/ticket_classification `
+  tests/unit/ai/prompts `
+  -q
+```
+
 Focused release-gate coverage:
 
 ```powershell
@@ -309,6 +318,10 @@ Evaluation unit coverage verifies:
 - evaluation settings and composition;
 - CLI provider safety gates, including the external-provider permission flag;
 - artifact reload and report reproducibility;
+- failure-analysis validation and development-only scope;
+- static paired prediction fixture comparison;
+- safety-first decision rebuild for the static inconclusive decision;
+- prompt registry coverage for ticket-classification versions 1 and 2;
 - semantic-retrieval, controlled-support, and human-approval deterministic
   evaluators over committed synthetic corpora;
 - repository regression aggregation, optional classification omission, and
@@ -443,10 +456,11 @@ Slice 7 includes provider, embedding, retrieval, indexing, and durable
 workflow observability coverage. Grounded recommendation evaluation with
 deterministic complementary metrics, static RAGAS score artifacts, offline
 aggregation, and an explicit external RAGAS boundary is implemented separately
-from observability. Classification prompt version 2, paired prompt comparison,
-and prompt promotion remain later follow-up work beyond the repository-owned
-classification, multi-domain deterministic regression, and grounded
-recommendation evaluation foundation.
+from observability. Classification prompt iteration with static paired
+comparison and an inconclusive decision is implemented. Provider-backed
+canonical comparison and separate runtime prompt adoption remain later
+follow-up work beyond the repository-owned classification, multi-domain
+deterministic regression, and grounded recommendation evaluation foundation.
 
 ### Provider, embedding, retrieval, and indexing coverage
 
@@ -564,10 +578,13 @@ Normal tests:
 - validate trace shape and privacy at the application contract boundary.
 
 External Langfuse smoke validation remains an opt-in follow-up. Langfuse
-evaluation workflows, paired prompt comparison, and prompt promotion remain
-deferred. A real canonical external RAGAS baseline remains deferred. Multi-domain
-deterministic regression scoring and grounded recommendation offline validation
-and scoring are implemented and covered by the evaluation suites above.
+evaluation workflows, provider-backed classification comparison, and runtime
+prompt adoption remain deferred. A real canonical external RAGAS baseline
+remains deferred. Multi-domain deterministic regression scoring and grounded
+recommendation offline validation and scoring are implemented and covered by
+the evaluation suites above. Classification prompt-iteration analyze, compare,
+and decide paths are covered by focused evaluation unit tests and no-network
+CLI smoke commands.
 PostgreSQL remains authoritative for durable LLM invocation and indexing usage
 and estimated-cost records. Query-embedding usage and cost remain ephemeral
 observability data.
@@ -1124,12 +1141,59 @@ uv run supportops-evaluate-classification score `
     artifacts/classification-mock-rescored-report.json
 ```
 
+Validate the committed development-only failure analysis:
+
+```powershell
+uv run supportops-evaluate-classification analyze `
+  --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" `
+  --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" `
+  --analysis "evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json"
+```
+
+Compare static v1 and v2 prediction fixtures and write provenance manifests:
+
+```powershell
+$GitCommit = git rev-parse HEAD
+$CaptureTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+New-Item -ItemType Directory -Force `
+  -Path "artifacts/evaluation/ticket-classification/prompt-v1-v2" |
+  Out-Null
+
+uv run supportops-evaluate-classification compare `
+  --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" `
+  --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" `
+  --baseline-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl" `
+  --candidate-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl" `
+  --evidence-kind "static_fixture" `
+  --capture-timestamp $CaptureTimestamp `
+  --git-commit $GitCommit `
+  --output "artifacts/evaluation/ticket-classification/prompt-v1-v2/comparison.json" `
+  --baseline-manifest-output "artifacts/evaluation/ticket-classification/prompt-v1-v2/baseline-manifest.json" `
+  --candidate-manifest-output "artifacts/evaluation/ticket-classification/prompt-v1-v2/candidate-manifest.json" `
+  --pair-manifest-output "artifacts/evaluation/ticket-classification/prompt-v1-v2/pair-manifest.json"
+```
+
+Rebuild the governed static inconclusive decision:
+
+```powershell
+uv run supportops-evaluate-classification decide `
+  --comparison "artifacts/evaluation/ticket-classification/prompt-v1-v2/comparison.json" `
+  --decision-template "evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json" `
+  --output "artifacts/evaluation/ticket-classification/prompt-v1-v2/decision.json"
+```
+
+`analyze`, `compare`, and `decide` initialize no provider settings and perform
+no network requests. Provider execution remains confined to `run`. OpenAI
+execution still requires `--allow-external-provider`.
+
 Normal pytest execution performs no paid provider calls. Unit and integration
 tests do not call OpenAI. External provider evaluation is a manual operation
 and requires `--allow-external-provider` plus a configured API key. Holdout
 discipline is procedural and holdout outcomes must not guide prompt drafting.
-Generated evaluation artifacts are ignored by Git. Versioned datasets and split
-manifests remain committed under `evals/`.
+Generated evaluation artifacts are ignored by Git. Versioned datasets, split
+manifests, analyses, static predictions, comparisons, and decision templates
+remain committed under `evals/`.
 
 ## Multi-domain deterministic regression
 
@@ -1536,6 +1600,9 @@ uv run supportops-evaluate-regression score
 uv run supportops-evaluate-grounded-recommendations validate
 uv run supportops-evaluate-grounded-recommendations score
 uv run supportops-evaluate-grounded-recommendations score --ragas-scores evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl
+uv run supportops-evaluate-classification analyze --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" --analysis "evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json"
+uv run supportops-evaluate-classification compare --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" --baseline-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl" --candidate-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl" --evidence-kind "static_fixture" --capture-timestamp "2026-08-05T18:00:00Z" --git-commit "${GITHUB_SHA}" --output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/comparison.json" --baseline-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/baseline-manifest.json" --candidate-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/candidate-manifest.json" --pair-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/pair-manifest.json"
+uv run supportops-evaluate-classification decide --comparison "artifacts/evaluation/ticket-classification/ci-prompt-iteration/comparison.json" --decision-template "evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json" --output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/decision.json"
 uv run pytest -m "not integration"
 uv run alembic heads
 uv run alembic current
@@ -1548,7 +1615,7 @@ Continuous integration provides PostgreSQL and Qdrant service containers.
 
 The CI environment uses non-production credentials and a slightly higher dependency health timeout to reduce shared-runner flakiness.
 
-CI must not update the lockfile or publish the application image. The regression command scores committed static fixtures only and does not require secrets or paid providers. Grounded recommendation CI commands likewise remain offline and do not perform paid external evaluation.
+CI must not update the lockfile or publish the application image. The regression command and classification prompt-iteration commands score or validate committed static fixtures only and do not require secrets or paid providers. Generated comparison, manifest, and decision outputs under `artifacts/evaluation/ticket-classification/ci-prompt-iteration` remain gitignored. Grounded recommendation CI commands likewise remain offline and do not perform paid external evaluation.
 
 ## Full local validation sequence
 
@@ -1606,8 +1673,8 @@ Later implementation phases are expected to add tests for:
 - write-capable tool authorization beyond grant-gated internal escalation;
 - opt-in live Langfuse smoke validation;
 - Langfuse evaluation workflows;
-- prompt version 2 regression comparison;
-- paired prompt comparison and promotion decision coverage;
+- provider-backed classification comparison and holdout evaluation;
+- runtime prompt adoption coverage;
 - scheduled evaluation and evaluation history persistence;
 - a real canonical external RAGAS baseline;
 - production feedback ingestion;
@@ -1625,8 +1692,9 @@ immutable knowledge-document versioning, explicit knowledge indexing,
 active-version semantic knowledge retrieval, optional application-owned AI
 observability with provider, embedding, retrieval, indexing, and durable
 workflow coverage, repository-owned offline classification evaluation with
-contracts, split manifests, explicit prompt-version selection, and standalone
-release gates, multi-domain deterministic regression for semantic retrieval,
+contracts, split manifests, explicit prompt-version selection, standalone
+release gates, failure analysis, static paired comparison, and decision
+rebuilds, multi-domain deterministic regression for semantic retrieval,
 controlled support, and human approval, and grounded recommendation evaluation
 with offline validation, deterministic complementary metrics, static RAGAS score
 aggregation, and fake-backed adapter tests are part of the current suite.

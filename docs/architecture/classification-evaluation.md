@@ -71,8 +71,17 @@ The platform implements:
 - sequential mock or OpenAI evaluation execution;
 - explicit evaluation prompt-version selection with no implicit latest
   selection;
+- registered immutable prompt `ticket-classification` versions 1 and 2;
+- development-only failure analysis with dataset-design hypotheses;
+- committed static paired prediction fixtures for versions 1 and 2;
+- paired v1-versus-v2 comparison with candidate release-gate evaluation;
+- safety-first prompt decision outcomes `promoted`, `rejected`, and
+  `inconclusive`;
+- EvaluationManifest provenance for baseline, candidate, and pair bindings;
+- no-network `analyze`, `compare`, and `decide` commands;
 - an explicit external-provider permission gate;
-- atomic prediction and report artifact writes.
+- atomic prediction, report, comparison, manifest, and decision artifact
+  writes.
 
 ## Architectural boundaries
 
@@ -142,23 +151,28 @@ separate from runtime business authority and optional observability.
 
 ```text
 immutable dataset + split sidecar
-→ explicit prompt version
+→ development-only failure analysis
+→ explicit prompt version (1 or 2)
 → prediction artifact or evaluation predictor
 → deterministic evaluator
-→ standalone release-gate evaluation
-→ JSON report
+→ standalone or paired release-gate evaluation
+→ governed decision artifact
+→ JSON report / comparison / manifests
 ```
 
 Evaluation owns:
 
 - synthetic case validation;
 - split-manifest validation;
+- failure-analysis validation;
 - artifact provenance;
 - prediction alignment;
 - deterministic quality, safety, validity, latency, and usage metrics;
-- standalone release-gate evaluation;
+- standalone and paired release-gate evaluation;
 - usage and estimated-cost aggregation;
-- reproducible reports.
+- paired comparison evidence;
+- safety-first prompt decision artifacts;
+- reproducible reports and manifests.
 
 Evaluation does not:
 
@@ -168,7 +182,7 @@ Evaluation does not:
 - persist TicketClassification records;
 - mutate Ticket status;
 - change the runtime classification prompt pin;
-- authorize prompt promotion from standalone reports;
+- authorize runtime adoption from static or incomplete evidence;
 - promote prompts automatically;
 - execute tools or approvals.
 
@@ -659,6 +673,256 @@ evidence and remain `not_applicable` for a standalone report. A perfect
 standalone report is therefore intentionally `incomplete`. Standalone reports
 cannot authorize prompt promotion.
 
+## Failure analysis
+
+Committed failure analysis is a development-only drafting input:
+
+```text
+evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json
+```
+
+The artifact is scoped to the development split. Holdout and safety-gate cases
+are not used as prompt-drafting inputs.
+
+Evidence kinds use exact artifact terminology:
+
+```text
+provider_observation
+static_fixture
+dataset_design_hypothesis
+```
+
+The committed analysis contains dataset-design hypotheses only. Provider
+observation count is zero. Static-fixture observation count is zero. The
+analysis does not claim that prompt version 1 was empirically proven to fail
+on a provider.
+
+Prompt-revision constraints require:
+
+- development-split evidence only while drafting prompt version 2;
+- preservation of the `ticket-classification-v1` structured output schema;
+- no requested, persisted, or evaluated chain-of-thought;
+- no encoding of case IDs or exact dataset wording into prompt version 2;
+- runtime prompt version 1 remaining pinned until separate adoption approval.
+
+## Prompt versioning and immutability
+
+Prompt identity remains:
+
+```text
+prompt_id = ticket-classification
+```
+
+Prompt version 1 remains immutable. Prompt version 2 is registered separately
+in the same registry. Lookup is explicit by version. There is no implicit
+latest-version selection.
+
+Both versions use the structured output schema:
+
+```text
+ticket-classification-v1
+```
+
+Runtime classification remains pinned to version 1 through
+`TICKET_CLASSIFICATION_PROMPT_VERSION`. Prompt version 2 does not become
+production-active through evaluation registration, static comparison, or an
+inconclusive decision.
+
+Version 2 strengthens classification guidance without case-specific
+overfitting:
+
+- evidence-ordered decision flow;
+- security and incident precedence;
+- operational impact separated from sentiment intensity;
+- conservative ambiguity handling;
+- stronger human-review guidance;
+- preserved untrusted-input boundary.
+
+## Static prediction evidence
+
+Committed paired prediction artifacts are:
+
+```text
+evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl
+evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl
+```
+
+Their evidence kind is `static_fixture`.
+
+Their purpose is:
+
+- contract testing;
+- deterministic comparison testing;
+- release-gate testing;
+- governance and decision-path validation;
+- no-network CI.
+
+They are not OpenAI outputs, provider-backed quality evidence, production
+baselines, or statistical claims about real model performance. Deliberate
+baseline errors exist only to prove comparison and decision semantics. Those
+errors are not described as observed model failures.
+
+## Paired comparison
+
+Paired comparison requires:
+
+- identical dataset identity and hash;
+- identical split-manifest identity and hash;
+- identical case IDs and dataset order;
+- identical provider and model identity;
+- same prompt ID;
+- distinct prompt versions;
+- distinct prompt hashes.
+
+Implemented comparison outputs include:
+
+- exact-match delta;
+- per-field accuracy deltas;
+- human-review false-negative and false-positive deltas;
+- failed prediction delta;
+- prediction coverage delta;
+- latency, token, and cost evidence;
+- improved, regressed, and unchanged case IDs;
+- explicit holdout regressions;
+- explicit safety-gate regressions;
+- candidate release-gate outcomes.
+
+Missing and failed predictions remain visible. No weighted aggregate score
+exists.
+
+Committed static comparison:
+
+```text
+evals/ticket-classification/comparisons/ticket-classification-prompt-v1-v2.static.json
+```
+
+## Paired release gates
+
+Paired evaluation resolves quality and efficiency gates that remain
+`not_applicable` in standalone mode:
+
+```text
+classification.structured-label-non-regression
+classification.category-accuracy-non-regression
+classification.target-metric-improvement
+classification.mean-token-increase
+classification.mean-cost-increase
+classification.mean-latency-increase
+```
+
+`target_metric.improvement` uses structured-label exact-match rate and requires
+strict candidate improvement. Safety and reliability gates remain blocking.
+Unknown efficiency evidence remains `not_applicable`. Unknown evidence is not
+converted to zero.
+
+For the committed static comparison:
+
+```text
+gate status:
+incomplete
+
+blocking failures:
+0
+
+not-applicable gates:
+mean token increase
+mean cost increase
+```
+
+The static fixture demonstrates comparison behavior. It is not a
+production-quality pass.
+
+## Decision semantics
+
+Governed decision outcomes are:
+
+```text
+promoted
+rejected
+inconclusive
+```
+
+Safety-first behavior:
+
+- blocking release-gate failures prevent promotion;
+- increased human-review false negatives prevent promotion;
+- decreased prediction coverage prevents promotion;
+- increased failed predictions prevent promotion;
+- safety-gate regressions prevent promotion;
+- incomplete provider evidence produces `inconclusive`;
+- complete provider evidence without human approval produces `inconclusive`;
+- promotion requires complete provider-backed evidence and identified human
+  approval;
+- static evidence always produces `inconclusive`;
+- static evidence cannot approve runtime adoption.
+
+Committed static decision:
+
+```text
+evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json
+
+outcome:
+inconclusive
+
+run status:
+incomplete
+
+approved_for_runtime_adoption:
+false
+
+separate_runtime_adoption_required:
+true
+```
+
+Prompt version 2 is neither approved nor deployed by this decision artifact.
+
+## Evaluation, adoption, and rollout boundaries
+
+Four layers remain distinct:
+
+1. evaluation evidence;
+2. prompt decision artifact;
+3. runtime prompt selection;
+4. production rollout.
+
+Changing the runtime prompt version is intentionally a separate, reviewable
+repository change. That separation is an explicit governance and release-safety
+boundary, not an implementation deficiency.
+
+## Comparison provenance
+
+The `compare` command generates:
+
+- baseline `EvaluationManifest`;
+- candidate `EvaluationManifest`;
+- a pair manifest binding both manifests, both report hashes, and the
+  comparison hash.
+
+Manifest provenance includes:
+
+```text
+dataset identity and hash
+split-manifest identity and hash
+provider and model
+prompt ID, version, and hash
+schema version
+pricing catalog version
+capture timestamp
+Git commit
+prediction hash
+run status
+```
+
+Generated manifests remain under gitignored `artifacts/`.
+
+## Provider boundary
+
+`analyze`, `compare`, and `decide` are no-network commands. None initializes
+provider settings. None exposes external-provider acknowledgement. Provider
+execution remains confined to `run`. OpenAI execution still requires
+`--allow-external-provider`. `score` and `run` remain available for offline
+scoring and prediction generation.
+
 ### Summary evaluation
 
 Summary text is intentionally excluded from exact match.
@@ -714,11 +978,76 @@ The command remains domain-specific, so the stable prompt ID remains implicit:
 ticket-classification
 ```
 
-The default evaluation prompt version remains `1`. There is no implicit latest
-version. An unsupported version fails without provider execution, fallback, or
-artifact replacement. Runtime classification remains independently pinned to
-its approved prompt version. Evaluation selection does not change the
-production default.
+The default evaluation prompt version remains `1`. Supported versions are `1`
+and `2`. There is no implicit latest version. An unsupported version fails
+without provider execution, fallback, or artifact replacement. Runtime
+classification remains independently pinned to version 1. Evaluation selection
+does not change the production default.
+
+### Failure-analysis validation
+
+```powershell
+uv run supportops-evaluate-classification analyze `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --split-manifest `
+    evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json `
+  --analysis `
+    evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json
+```
+
+`analyze` validates the committed development-only failure analysis. It
+initializes no provider and makes no network request.
+
+### Paired comparison
+
+```powershell
+$GitCommit = git rev-parse HEAD
+$CaptureTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+New-Item -ItemType Directory -Force `
+  -Path "artifacts/evaluation/ticket-classification/prompt-v1-v2" |
+  Out-Null
+
+uv run supportops-evaluate-classification compare `
+  --dataset `
+    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
+  --split-manifest `
+    evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json `
+  --baseline-predictions `
+    evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl `
+  --candidate-predictions `
+    evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl `
+  --evidence-kind "static_fixture" `
+  --capture-timestamp $CaptureTimestamp `
+  --git-commit $GitCommit `
+  --output `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/comparison.json `
+  --baseline-manifest-output `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/baseline-manifest.json `
+  --candidate-manifest-output `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/candidate-manifest.json `
+  --pair-manifest-output `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/pair-manifest.json
+```
+
+`compare` consumes existing prediction artifacts and writes comparison plus
+provenance manifests. It initializes no provider and makes no network request.
+
+### Governed decision rebuild
+
+```powershell
+uv run supportops-evaluate-classification decide `
+  --comparison `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/comparison.json `
+  --decision-template `
+    evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json `
+  --output `
+    artifacts/evaluation/ticket-classification/prompt-v1-v2/decision.json
+```
+
+`decide` rebuilds a governed decision from a comparison and immutable decision
+template. It initializes no provider and makes no network request.
 
 ### Offline scoring
 
@@ -795,6 +1124,9 @@ The command fails closed if the external-provider permission flag is absent.
 
 The flag is rejected for the mock provider so it cannot become a meaningless
 habit or hidden default.
+
+Provider execution remains confined to `run`. `analyze`, `compare`, `decide`,
+and `score` remain no-network.
 
 ## Provider composition
 
@@ -990,6 +1322,7 @@ Evaluation tests cover:
 - evaluation manifest and prediction-envelope validation;
 - dataset validation and pinned hash;
 - split-manifest validation and frozen allocation;
+- failure-analysis validation and development-only scope;
 - prediction validation and hashing;
 - exact-match and field-level metrics;
 - structured-output validity and invalid-output rate;
@@ -1001,12 +1334,15 @@ Evaluation tests cover:
 - standalone release-gate outcomes and aggregate statuses;
 - quality and efficiency gates remaining not applicable without paired
   baseline evidence;
+- paired comparison deltas and candidate release-gate outcomes;
+- safety-first decision outcomes and static inconclusive decisions;
 - prompt and runtime provenance consistency;
 - explicit prompt-version selection and unsupported-version failure;
+- prompt registry coverage for versions 1 and 2;
 - mock Gateway prediction;
 - repair trace preservation;
 - provider lifecycle;
-- CLI safety gates;
+- CLI safety gates for `analyze`, `compare`, `decide`, `score`, and `run`;
 - offline scoring;
 - artifact reload and deterministic report hashes.
 
@@ -1041,9 +1377,9 @@ defensible methodology.
 
 The platform records prompt provenance and generates evidence. It does not
 automatically change production behavior. Standalone release-gate reports
-cannot authorize promotion. Prompt version 2 and paired comparison remain
-planned and should be introduced only after evaluation results identify
-concrete failure patterns and the change can be reviewed explicitly.
+cannot authorize promotion. Static comparison and inconclusive decisions
+cannot approve runtime adoption. Changing the runtime prompt pin remains a
+separate, reviewable repository change.
 
 ### No RAGAS in classification evaluation
 
@@ -1058,14 +1394,16 @@ The following remain outside this boundary:
 
 - classification mutation and override APIs;
 - reclassification scheduling;
-- prompt version 2;
-- paired prompt comparison;
-- canonical baseline evidence for paired comparison;
-- prompt promotion, rejection, or inconclusive decisions;
+- provider-backed canonical v1/v2 comparison;
+- holdout evaluation after prompt freeze;
+- human review of provider evidence;
+- separate runtime prompt adoption pull request;
+- production rollout monitoring;
 - automatic prompt promotion;
 - automatic prompt optimization;
 - evaluation database persistence;
-- evaluation dashboards beyond standalone classification release gates;
+- evaluation dashboards beyond standalone and paired classification release
+  gates;
 - scheduled or online evaluation runs;
 - parallel provider execution;
 - cross-provider fallback;

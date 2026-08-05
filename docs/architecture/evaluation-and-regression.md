@@ -41,18 +41,27 @@ The current evaluation foundation provides:
 - deterministic complementary grounded recommendation metrics;
 - normalized static RAGAS score artifacts and offline RAGAS aggregation;
 - an evaluation-only RAGAS dependency boundary and explicit external RAGAS runner;
-- a committed human qualitative review rubric for grounded recommendations.
+- a committed human qualitative review rubric for grounded recommendations;
+- development-only classification failure analysis;
+- immutable ticket-classification prompt version 2 registered for evaluation;
+- static paired v1/v2 prediction fixtures;
+- paired classification comparison and candidate release-gate evaluation;
+- safety-first prompt decision artifacts with static inconclusive outcome;
+- no-network `analyze`, `compare`, and `decide` classification commands.
 
 Within the committed synthetic regression corpus, the multi-domain regression command scores committed static fixtures. It does not execute live embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse.
 
 Grounded recommendation offline validation and scoring likewise consume committed fixtures without network access. External RAGAS execution is opt-in, evaluates existing predictions only, and writes generated evidence under `artifacts/`.
 
+Classification prompt iteration uses repository-owned static fixtures for contract, comparison, gate, and decision-path validation. Static evidence remains inconclusive for runtime adoption. Provider-backed canonical comparison and runtime prompt adoption remain later governed milestones.
+
 The following capabilities remain outside the current foundation and are introduced in later evaluation milestones:
 
 - a real canonical external RAGAS baseline;
-- paired prompt comparison;
-- classification prompt version 2;
-- prompt promotion, rejection, or inconclusive decisions.
+- provider-backed canonical v1/v2 classification comparison;
+- holdout evaluation after prompt freeze;
+- human review of provider evidence with runtime adoption approval;
+- separate runtime prompt adoption and production rollout monitoring.
 
 ## Evaluation Ownership
 
@@ -67,7 +76,9 @@ Git-versioned project artifacts are authoritative for:
 - canonical prediction and report evidence selected for the repository;
 - normalized static RAGAS score fixtures used for offline aggregation tests;
 - human review rubrics;
-- promotion, rejection, or inconclusive decisions when those decisions exist.
+- promotion, rejection, or inconclusive decisions when those decisions exist;
+- development-only failure analysis;
+- static paired classification prediction fixtures and comparison artifacts.
 
 Runtime business records remain owned by PostgreSQL. Qdrant remains a rebuildable retrieval projection. Langfuse remains optional and non-authoritative. Generated external evaluation artifacts under `artifacts/` are run-specific evidence; they are not repository authority until explicitly selected and committed as canonical fixtures.
 
@@ -351,6 +362,35 @@ Standalone safety and reliability gates evaluate:
 Quality and efficiency non-regression gates require paired baseline evidence. They remain `not_applicable` for a standalone report.
 
 A perfect standalone report is therefore intentionally `incomplete`. Standalone evidence cannot authorize prompt promotion.
+
+## Classification Prompt Iteration Evidence Layers
+
+Classification prompt iteration keeps evidence layers distinct:
+
+```text
+deterministic repository-owned artifacts
+→ datasets, splits, static fixtures, analyses, comparisons, decisions
+
+probabilistic / provider-backed evidence
+→ opt-in OpenAI prediction runs under artifacts/
+
+human approval
+→ identified review required before any promotion outcome
+
+regression checks
+→ multi-domain deterministic scoring for retrieval, controlled support,
+  and human approval
+
+grounded evaluation
+→ recommendation fixtures, deterministic complementary metrics, and RAGAS
+```
+
+RAGAS applies only to grounded recommendation evaluation. It does not apply to
+classification comparison.
+
+Static classification fixtures demonstrate comparison and decision behavior.
+They are not provider-backed quality evidence. Runtime remains pinned to prompt
+version 1. Changing that pin remains a separate governed repository change.
 
 ## Semantic Retrieval Regression
 
@@ -773,7 +813,20 @@ Normal CI may execute:
 - grounded recommendation unit tests with fake-backed adapters;
 - `supportops-evaluate-grounded-recommendations validate`;
 - `supportops-evaluate-grounded-recommendations score`;
-- `supportops-evaluate-grounded-recommendations score` with the committed static RAGAS score fixture.
+- `supportops-evaluate-grounded-recommendations score` with the committed static RAGAS score fixture;
+- `supportops-evaluate-classification analyze` against the committed failure analysis;
+- `supportops-evaluate-classification compare` against static v1/v2 prediction fixtures;
+- `supportops-evaluate-classification decide` rebuilding the static inconclusive decision.
+
+Classification prompt-iteration CI writes generated comparison, manifests, and
+decision artifacts under:
+
+```text
+artifacts/evaluation/ticket-classification/ci-prompt-iteration
+```
+
+Those outputs remain gitignored. The workflow requires no secrets and performs
+no provider calls.
 
 Normal CI must not execute:
 
@@ -784,6 +837,7 @@ Normal CI must not execute:
 - Langfuse external calls;
 - human review sessions;
 - prompt promotion;
+- runtime prompt adoption;
 - grounded recommendation `run` with `--allow-external-provider`.
 
 Normal CI grounded evaluation uses no API keys and no acknowledgement flag. Fake-backed adapter tests only are permitted. No external smoke test runs in GitHub Actions. External provider execution remains explicit and requires acknowledgement.
@@ -809,9 +863,11 @@ They must not claim global or statistical superiority.
 The architecture intentionally defers:
 
 - a real canonical external RAGAS baseline;
-- classification prompt version 2;
-- paired v1-versus-v2 comparison;
-- prompt promotion, rejection, or inconclusive decisions;
+- provider-backed canonical v1/v2 classification comparison;
+- holdout evaluation after prompt freeze;
+- human review of provider evidence;
+- separate runtime prompt adoption;
+- production rollout monitoring;
 - automatic prompt optimization;
 - production feedback ingestion;
 - scheduled evaluation;
