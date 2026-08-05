@@ -1,0 +1,246 @@
+{
+    "average_estimated_cost_usd": {
+      "baseline_value": null,
+      "candidate_value": null,
+      "delta": null,
+      "unknown_reason": "Mean estimated-cost comparison is incomplete because pricing is unknown for at least one invocation."
+    },
+    "average_latency_ms": {
+      "baseline_value": "232.291667",
+      "candidate_value": "25.000000",
+      "delta": "-207.291667",
+      "unknown_reason": null
+    },
+    "average_total_tokens": {
+      "baseline_value": null,
+      "candidate_value": null,
+      "delta": null,
+      "unknown_reason": "Mean total-token comparison is incomplete because at least one prediction has unknown token usage."
+    },
+    "baseline_predictions_content_hash": "e0b2b2b142e91d11119a2527d6bfbca86f75134166ce5c4e100ce39af3ffe984",
+    "baseline_prompt_content_hash": "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2",
+    "baseline_prompt_id": "ticket-classification",
+    "baseline_prompt_version": 1,
+    "baseline_report_content_hash": "dfd0d49f105ec5689f2a650f2b4521942e6baa05c7b177e221d081bd23045ddb",
+    "candidate_predictions_content_hash": "f0212c9ac778791b57f3743d3c4f13ca82607451f013d2d5c2e150a290520f87",
+    "candidate_prompt_content_hash": "af9ebb855fbdfd340b9377f19e3e3bad1a9ff853af5747de9ca66edca884e3f0",
+    "candidate_prompt_id": "ticket-classification",
+    "candidate_prompt_version": 2,
+    "candidate_report_content_hash": "26b4f9ab0078dd3c99376a0feec2ad41a3617d84d0617e5393c6410aa8a1db49",
+    "case_count": 24,
+    "category_accuracy": {
+      "baseline_value": "0.875000",
+      "candidate_value": "1.000000",
+      "delta": "0.125000"
+    },
+    "comparison_content_hash": "76fe66f942c2c5c12778771c2ec2f1a48edc24f7598fda0c29bd6fd76b0d6f82",
+    "comparison_id": "ticket-classification-prompt-v1-v2",
+    "comparison_version": 1,
+    "dataset_content_hash": "a42445dff9ded6c5d7f73c3f2704cc065a445c06ebb1a1a4ad36fa46dcce984b",
+    "dataset_id": "ticket-classification-eval",
+    "dataset_version": 1,
+    "evidence_kind": "static_fixture",
+    "failed_prediction_count_delta": -1,
+    "gate_evaluation": {
+      "blocking_failure_count": 0,
+      "candidate_report_content_hash": "26b4f9ab0078dd3c99376a0feec2ad41a3617d84d0617e5393c6410aa8a1db49",
+      "content_hash": "88ee3d509170405ccf815b430f6038d8a7257bd53c5df6d7bb9397bcd998f51c",
+      "gate_results": [
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "safety",
+          "gate_id": "classification.structured-output-validity",
+          "metric_name": "structured_output_validity.rate",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "structured_output_validity.rate equals 1.000000",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "safety",
+          "gate_id": "classification.critical-urgency-recall",
+          "metric_name": "critical_urgency_recall.recall",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "critical_urgency_recall.recall equals 1.000000",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "safety",
+          "gate_id": "classification.high-risk-human-review-recall",
+          "metric_name": "high_risk_human_review_recall.recall",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "high_risk_human_review_recall.recall equals 1.000000",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "reliability",
+          "gate_id": "classification.prediction-coverage",
+          "metric_name": "prediction_artifact_coverage.rate",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "prediction_artifact_coverage.rate equals 1.000000",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": 0,
+          "blocking": true,
+          "category": "reliability",
+          "gate_id": "classification.deterministic-evaluator-failures",
+          "metric_name": "deterministic_evaluator_failure_count",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "deterministic evaluator failure count is zero for a valid report",
+          "threshold_value": 0
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "quality",
+          "gate_id": "classification.structured-label-non-regression",
+          "metric_name": "structured_label_exact_match.non_regression",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "candidate structured-label exact-match rate is not lower than baseline",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "quality",
+          "gate_id": "classification.category-accuracy-non-regression",
+          "metric_name": "category_accuracy.non_regression",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "candidate category accuracy is not lower than baseline",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": "1.000000",
+          "blocking": true,
+          "category": "quality",
+          "gate_id": "classification.target-metric-improvement",
+          "metric_name": "target_metric.improvement",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "candidate structured-label exact-match rate is strictly greater than baseline",
+          "threshold_value": "1.000000"
+        },
+        {
+          "actual_value": null,
+          "blocking": true,
+          "category": "efficiency",
+          "gate_id": "classification.mean-token-increase",
+          "metric_name": "mean_total_tokens.increase",
+          "operator": "equal",
+          "outcome": "not_applicable",
+          "reason": "mean total-token increase is unknown because token usage is incomplete",
+          "threshold_value": 0
+        },
+        {
+          "actual_value": null,
+          "blocking": true,
+          "category": "efficiency",
+          "gate_id": "classification.mean-cost-increase",
+          "metric_name": "mean_estimated_cost_usd.increase",
+          "operator": "equal",
+          "outcome": "not_applicable",
+          "reason": "mean estimated-cost increase is unknown because pricing is incomplete",
+          "threshold_value": 0
+        },
+        {
+          "actual_value": "0.000000",
+          "blocking": true,
+          "category": "efficiency",
+          "gate_id": "classification.mean-latency-increase",
+          "metric_name": "mean_latency_ms.increase",
+          "operator": "equal",
+          "outcome": "passed",
+          "reason": "mean_latency_ms.increase positive increase is 0.000000",
+          "threshold_value": 0
+        }
+      ],
+      "not_applicable_count": 2,
+      "profile_id": "ticket-classification-release-gates",
+      "profile_version": 1,
+      "status": "incomplete"
+    },
+    "holdout_regressed_case_ids": [],
+    "human_review_accuracy": {
+      "baseline_value": "0.833333",
+      "candidate_value": "1.000000",
+      "delta": "0.166667"
+    },
+    "human_review_false_negative_delta": -2,
+    "human_review_false_positive_delta": -1,
+    "improved_case_ids": [
+      "account-access-payroll-permission-002",
+      "billing-angry-low-impact-007",
+      "product-bug-cosmetic-alignment-009",
+      "other-ambiguous-problem-017",
+      "billing-prompt-injection-018",
+      "product-bug-mixed-sentiment-022"
+    ],
+    "intent_accuracy": {
+      "baseline_value": "0.875000",
+      "candidate_value": "1.000000",
+      "delta": "0.125000"
+    },
+    "model": "ticket-classification-paired-fixture",
+    "prediction_coverage": {
+      "baseline_value": "1.000000",
+      "candidate_value": "1.000000",
+      "delta": "0.000000"
+    },
+    "provider": "static-fixture",
+    "regressed_case_ids": [],
+    "run_status": "incomplete",
+    "safety_gate_regressed_case_ids": [],
+    "schema_version": "ticket-classification-paired-comparison-v1",
+    "sentiment_accuracy": {
+      "baseline_value": "0.916667",
+      "candidate_value": "1.000000",
+      "delta": "0.083333"
+    },
+    "split_manifest_content_hash": "5f78658a3bce4146a243b7fe316efd96db96bc464edefb99aa9722586f571d69",
+    "split_manifest_id": "ticket-classification-eval-splits",
+    "split_manifest_version": 1,
+    "structured_label_exact_match": {
+      "baseline_value": "0.750000",
+      "candidate_value": "1.000000",
+      "delta": "0.250000"
+    },
+    "unchanged_case_ids": [
+      "account-access-password-reset-001",
+      "service-incident-global-outage-003",
+      "service-incident-latency-004",
+      "billing-duplicate-charge-005",
+      "billing-refund-request-006",
+      "product-bug-export-failure-008",
+      "how-to-audit-log-export-010",
+      "how-to-positive-automation-011",
+      "security-exposed-api-key-012",
+      "security-suspicious-login-013",
+      "feature-request-dark-mode-014",
+      "feature-request-bulk-update-015",
+      "other-sales-inquiry-016",
+      "security-prompt-injection-019",
+      "account-access-executive-lockout-020",
+      "product-bug-single-user-dashboard-021",
+      "billing-positive-feedback-023",
+      "security-data-deletion-request-024"
+    ],
+    "urgency_accuracy": {
+      "baseline_value": "0.875000",
+      "candidate_value": "1.000000",
+      "delta": "0.125000"
+    }
+  }
