@@ -123,3 +123,47 @@ def load_ragas_runtime(
         package_version=installed_version,
         module=ragas_module,
     )
+
+
+from supportops.evaluation.grounded_recommendations.ragas_scores import (  # noqa: E402
+    GroundedRecommendationRagasCaseScore,
+    GroundedRecommendationRagasMetricScore,
+    RagasMetricStatus,
+)
+
+
+def normalize_ragas_evaluation_result(
+    *,
+    result: RagasEvaluationResult,
+) -> GroundedRecommendationRagasCaseScore:
+    """Map adapter metric results onto persisted RAGAS case score contracts."""
+
+    metrics: list[GroundedRecommendationRagasMetricScore] = []
+
+    for metric_result in result.metrics:
+        if metric_result.score is not None:
+            metrics.append(
+                GroundedRecommendationRagasMetricScore(
+                    metric=metric_result.metric,
+                    status=RagasMetricStatus.SUCCEEDED,
+                    score=metric_result.score,
+                    error_code=None,
+                    reason=None,
+                )
+            )
+            continue
+
+        metrics.append(
+            GroundedRecommendationRagasMetricScore(
+                metric=metric_result.metric,
+                status=RagasMetricStatus.FAILED,
+                score=None,
+                error_code=metric_result.error_code,
+                reason=None,
+            )
+        )
+
+    return GroundedRecommendationRagasCaseScore(
+        case_id=result.case_id,
+        metrics=tuple(metrics),
+    )
