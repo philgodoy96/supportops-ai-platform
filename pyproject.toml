@@ -47,6 +47,7 @@ dependencies = [
 [project.scripts]
 supportops-worker = "supportops.worker.main:main"
 supportops-evaluate-classification = "supportops.evaluation.ticket_classification.cli:main"
+supportops-evaluate-regression = "supportops.evaluation.regression.cli:main"
 supportops-index-knowledge = "supportops.knowledge_index.cli:main"
 supportops-graph-checkpoints = "supportops.agent_graph.cli:main"
 
