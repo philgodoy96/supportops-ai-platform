@@ -36,14 +36,20 @@ The current evaluation foundation provides:
 - deterministic semantic-retrieval regression;
 - deterministic controlled-support regression;
 - deterministic human-approval regression;
-- repository-level deterministic regression scoring through `supportops-evaluate-regression score`.
+- repository-level deterministic regression scoring through `supportops-evaluate-regression score`;
+- grounded recommendation evaluation with a committed synthetic dataset and static predictions;
+- deterministic complementary grounded recommendation metrics;
+- normalized static RAGAS score artifacts and offline RAGAS aggregation;
+- an evaluation-only RAGAS dependency boundary and explicit external RAGAS runner;
+- a committed human qualitative review rubric for grounded recommendations.
 
 Within the committed synthetic regression corpus, the multi-domain regression command scores committed static fixtures. It does not execute live embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse.
 
+Grounded recommendation offline validation and scoring likewise consume committed fixtures without network access. External RAGAS execution is opt-in, evaluates existing predictions only, and writes generated evidence under `artifacts/`.
+
 The following capabilities remain outside the current foundation and are introduced in later evaluation milestones:
 
-- grounded recommendation model-based evaluation;
-- RAGAS integration;
+- a real canonical external RAGAS baseline;
 - paired prompt comparison;
 - classification prompt version 2;
 - prompt promotion, rejection, or inconclusive decisions.
@@ -59,9 +65,11 @@ Git-versioned project artifacts are authoritative for:
 - evaluation manifests;
 - deterministic gate profiles;
 - canonical prediction and report evidence selected for the repository;
-- promotion, rejection, or inconclusive decisions.
+- normalized static RAGAS score fixtures used for offline aggregation tests;
+- human review rubrics;
+- promotion, rejection, or inconclusive decisions when those decisions exist.
 
-Runtime business records remain owned by PostgreSQL. Qdrant remains a rebuildable retrieval projection. Langfuse remains optional and non-authoritative.
+Runtime business records remain owned by PostgreSQL. Qdrant remains a rebuildable retrieval projection. Langfuse remains optional and non-authoritative. Generated external evaluation artifacts under `artifacts/` are run-specific evidence; they are not repository authority until explicitly selected and committed as canonical fixtures.
 
 ## Dataset Immutability
 
@@ -122,6 +130,14 @@ evals/human-approval/predictions/human-approval-eval-v1.static.jsonl
 ```
 
 These fixtures are typed prediction envelopes. Scoring consumes the fixtures as evidence and does not regenerate them through runtime services.
+
+Grounded recommendation evaluation owns a separate committed corpus under:
+
+```text
+evals/grounded-recommendations/
+```
+
+That domain is documented in the grounded recommendation section below and is not part of `supportops-evaluate-regression score`.
 
 ## Development, Holdout, and Safety Gates
 
@@ -483,6 +499,248 @@ Exit semantics:
 
 The command performs no network calls, requires no secrets or runtime services, and writes optional output atomically. Normal CI explicitly runs `supportops-evaluate-regression score`.
 
+## Grounded Recommendation Evaluation
+
+Grounded recommendation evaluation measures drafted recommendation quality against a committed synthetic corpus without changing runtime workflow execution.
+
+The evaluation plane separates four concerns:
+
+```text
+runtime recommendation generation
+→ worker-owned controlled support drafting and persistence
+
+deterministic offline evaluation
+→ committed dataset and static predictions scored without network access
+
+external model-based evaluation
+→ explicit RAGAS runs over existing predictions
+
+human qualitative review
+→ committed rubric and lightweight review protocol
+```
+
+### Evaluation-only dependency
+
+`ragas==0.4.3` is isolated in the `evaluation` dependency group. It is not a runtime dependency of the API or worker. Normal CI may install the group for fake-backed unit tests and offline validation. Normal CI never performs paid external evaluation. Dependency resolution beyond the committed lockfile is not claimed as independently stable.
+
+### Dataset
+
+Canonical dataset:
+
+```text
+evals/grounded-recommendations/datasets/grounded-recommendations-eval-v1.jsonl
+```
+
+Identity:
+
+```text
+dataset_id: grounded-recommendations-eval
+dataset_version: 1
+schema_version: grounded-recommendations-eval-v1
+source: synthetic
+case_count: 14
+```
+
+Coverage includes fully grounded and partially grounded responses, unsupported and contradictory claims, missing and invalid citations, correct abstention, hallucinated answers under insufficient evidence, cross-workspace evidence, ticket and retrieved-document prompt injection, human-review recommendations, and correct and incorrect escalation.
+
+Retrieved context content is embedded in the dataset. Offline validation does not require PostgreSQL, Qdrant, LangGraph, embeddings, or providers. Results apply within the committed synthetic corpus and are not statistically representative of production traffic.
+
+### Static prediction fixture
+
+Canonical predictions:
+
+```text
+evals/grounded-recommendations/predictions/grounded-recommendations-eval-v1.static.jsonl
+```
+
+Predictions use the shared `EvaluationPredictionEnvelope`, contain structured recommendation output, contain no hidden reasoning and no raw provider response, preserve explicit failure states, include usage and cost fields when known, and are suitable for deterministic offline scoring.
+
+### Deterministic complementary metrics
+
+Deterministic scoring reports:
+
+```text
+recommended_action_accuracy
+human_review_accuracy
+evidence_sufficiency_accuracy
+citation_identity_accuracy
+workspace_isolation_rate
+grounded_abstention_accuracy
+prediction_coverage
+average latency
+average total tokens
+estimated cost
+```
+
+Workspace isolation, citation identity, and prediction coverage are safety and reliability evidence. Unknown usage values remain unknown. Failed and missing predictions are not silently dropped. Deterministic scoring is independent of RAGAS.
+
+### Static normalized RAGAS score fixture
+
+Canonical artifact:
+
+```text
+evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl
+```
+
+This synthetic normalized score fixture exists for contract, loader, aggregation, and CLI testing. It is not a real OpenAI or RAGAS run, not a canonical external baseline, and does not contain provider or model provenance.
+
+Metrics represented:
+
+```text
+faithfulness
+answer_relevancy
+context_precision
+context_recall
+```
+
+No-context cases may mark context metrics `not_applicable`. Score artifacts preserve succeeded, failed, and not-applicable outcomes. Offline aggregation requires no network access.
+
+### Adapter isolation
+
+RAGAS execution is isolated behind an application-owned adapter boundary. Fake-backed unit tests exercise normalization and failure visibility without provider calls. The external OpenAI adapter is constructed only for acknowledged `run` executions and is not part of normal CI.
+
+### Command surface
+
+Command:
+
+```text
+supportops-evaluate-grounded-recommendations
+```
+
+Subcommands:
+
+```text
+validate
+score
+run
+```
+
+#### validate
+
+```powershell
+uv run supportops-evaluate-grounded-recommendations validate
+```
+
+Behavior:
+
+- no network;
+- validates the dataset and optional prediction or RAGAS artifacts;
+- validates hashes and schema;
+- no secrets or services required.
+
+#### score
+
+```powershell
+uv run supportops-evaluate-grounded-recommendations score
+```
+
+Optional offline RAGAS aggregation:
+
+```powershell
+uv run supportops-evaluate-grounded-recommendations score `
+  --ragas-scores "evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl"
+```
+
+Behavior:
+
+- no network;
+- builds the deterministic complementary report;
+- optionally aggregates an existing normalized RAGAS score artifact;
+- does not instantiate evaluator models;
+- does not generate embeddings.
+
+#### run
+
+External behavior:
+
+- evaluates existing recommendation predictions;
+- does not generate recommendations;
+- does not execute LangGraph or tools;
+- requires `--allow-external-provider`;
+- reads evaluator credentials from `SUPPORTOPS_EVALUATION_OPENAI_API_KEY`;
+- does not implicitly fall back to `SUPPORTOPS_OPENAI_API_KEY`;
+- records system model and evaluator model separately;
+- allows same-model evaluation with a warning;
+- writes generated artifacts under an explicit `artifacts/` directory;
+- rejects committed `evals/grounded-recommendations` output paths;
+- may incur provider cost;
+- keeps provider and evaluator failures visible.
+
+External runs must not place real API keys or real external results into committed fixtures.
+
+### Exit codes
+
+```text
+0: successful validate/score or complete/incomplete external run with valid artifacts
+2: CLI usage error
+3: artifact validation, composition, or scoring failure
+4: missing external-provider acknowledgement
+```
+
+### Generated artifact layout
+
+External runs write:
+
+```text
+artifacts/evaluation/grounded-recommendations/<run-id>/
+  manifest.json
+  ragas-scores.jsonl
+  deterministic-report.json
+  ragas-report.json
+  failures.jsonl
+```
+
+Generated artifacts are gitignored. Writes are atomic. Canonical committed fixtures are never overwritten by failed external runs. The manifest is the provenance authority for external evaluation.
+
+### Manifest provenance
+
+The manifest binds:
+
+```text
+dataset identity and hash
+prediction hash
+system provider/model
+evaluator provider/model
+evaluator embedding model
+workflow name/version
+prompt id/version/hash
+RAGAS version
+Git commit
+run status
+```
+
+Evaluator output never modifies runtime prompts.
+
+### Human review rubric
+
+Canonical rubric:
+
+```text
+evals/grounded-recommendations/rubrics/human-review-rubric-v1.json
+```
+
+The rubric defines seven dimensions on a 1–5 scale:
+
+```text
+correctness
+grounding
+actionability
+safety
+citation quality
+abstention quality
+human-review appropriateness
+```
+
+For version 1, all 14 cases are reviewed, notes are required for scores at or below 2, evidence references are required, safety concerns are blocking, blocking issues require a second review, and unresolved blocking disagreement is inconclusive. This is a lightweight review protocol, not an annotation platform.
+
+### RAGAS limitations
+
+RAGAS scores are probabilistic evaluation evidence. They are not absolute truth, not statistically representative of production traffic, and do not replace deterministic safety gates. Model choice can affect scores. Same-model evaluation can introduce bias. External provider behavior can drift. Failures and not-applicable metrics must remain visible. No automatic release or prompt promotion decision is made.
+
+### Domain artifact documentation
+
+Committed grounded recommendation artifacts are summarized in [`../../evals/grounded-recommendations/README.md`](../../evals/grounded-recommendations/README.md).
+
 ## Evaluation Versus Observability
 
 Observability and evaluation have different failure semantics.
@@ -511,7 +769,11 @@ Normal CI may execute:
 - prompt registry and hash tests;
 - report and artifact hashing tests;
 - atomic-write tests;
-- `supportops-evaluate-regression score` against committed multi-domain fixtures.
+- `supportops-evaluate-regression score` against committed multi-domain fixtures;
+- grounded recommendation unit tests with fake-backed adapters;
+- `supportops-evaluate-grounded-recommendations validate`;
+- `supportops-evaluate-grounded-recommendations score`;
+- `supportops-evaluate-grounded-recommendations score` with the committed static RAGAS score fixture.
 
 Normal CI must not execute:
 
@@ -520,16 +782,19 @@ Normal CI must not execute:
 - real RAGAS judges;
 - paid embeddings;
 - Langfuse external calls;
-- human review;
-- prompt promotion.
+- human review sessions;
+- prompt promotion;
+- grounded recommendation `run` with `--allow-external-provider`.
 
-External provider execution remains explicit and requires acknowledgement.
+Normal CI grounded evaluation uses no API keys and no acknowledgement flag. Fake-backed adapter tests only are permitted. No external smoke test runs in GitHub Actions. External provider execution remains explicit and requires acknowledgement.
 
 ## Limitations
 
 The current classification corpus is small, synthetic, and curated. It supports regression detection within the project boundary, but it is not statistically representative of production traffic.
 
 The multi-domain retrieval, controlled-support, and human-approval corpora are likewise synthetic and curated. Within the committed synthetic regression corpus they support deterministic regression detection. They are not representative of production traffic.
+
+The grounded recommendation corpus is synthetic and curated. Deterministic complementary metrics and offline RAGAS aggregation apply within that committed corpus. Static RAGAS score fixtures are synthetic contract evidence, not production-quality baselines. External RAGAS scores remain probabilistic and model-dependent.
 
 Evaluation reports must use language such as:
 
@@ -543,11 +808,7 @@ They must not claim global or statistical superiority.
 
 The architecture intentionally defers:
 
-- RAGAS integration;
-- grounded recommendation model-based evaluation;
-- evaluator-model isolation;
-- human qualitative review;
-- canonical external provider baselines;
+- a real canonical external RAGAS baseline;
 - classification prompt version 2;
 - paired v1-versus-v2 comparison;
 - prompt promotion, rejection, or inconclusive decisions;
@@ -559,6 +820,7 @@ The architecture intentionally defers:
 - Langfuse datasets or experiments;
 - production A/B testing;
 - automatic deployment;
+- a full annotation platform;
 - large-scale benchmark construction.
 
-These capabilities require additional product, privacy, operational, and statistical design beyond the repository-owned regression foundation.
+These capabilities require additional product, privacy, operational, and statistical design beyond the repository-owned evaluation foundation.

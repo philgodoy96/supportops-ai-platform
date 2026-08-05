@@ -708,7 +708,26 @@ The corpus contains 14 deterministic regression cases. Scoring consumes typed st
 - successful completion;
 - tool-call, LLM invocation, latency, token, and cost aggregates.
 
-Expected failures remain explicit and require exact error codes. Normal CI scores these committed fixtures through `supportops-evaluate-regression score` and does not execute LangGraph, tools, providers, PostgreSQL, Qdrant, or Langfuse for the check. Model-based recommendation quality evaluation remains deferred.
+Expected failures remain explicit and require exact error codes. Normal CI scores these committed fixtures through `supportops-evaluate-regression score` and does not execute LangGraph, tools, providers, PostgreSQL, Qdrant, or Langfuse for the check.
+
+## External grounded recommendation evaluation
+
+Drafted recommendation outputs may be evaluated outside the worker without changing runtime workflow execution.
+
+The external grounded recommendation runner consumes existing prediction artifacts that already contain structured recommendation fields such as:
+
+```text
+response_text
+recommended_action
+requires_human_review
+evidence_sufficient
+citations
+retrieved contexts
+```
+
+Retrieved contexts for evaluation cases are embedded in the committed grounded recommendation dataset. The runner does not generate recommendations, does not execute LangGraph or tools, and does not mutate runtime prompts. Deterministic complementary metrics and optional offline RAGAS aggregation remain network-free. Acknowledged external RAGAS runs may call an evaluator provider, record system and evaluator model provenance separately, and write generated evidence under `artifacts/`.
+
+Domain architecture, commands, artifact layout, and limitations are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Committed fixtures are summarized in [`../../evals/grounded-recommendations/README.md`](../../evals/grounded-recommendations/README.md).
 
 Repository regression aggregation and release-gate profile `controlled-support-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
 
@@ -740,8 +759,7 @@ The Slice 5 workflow intentionally defers:
 - authentication and authorization;
 - checkpoint inspection endpoints;
 - raw graph-state exposure;
-- RAGAS evaluation;
-- grounded recommendation model-based evaluation;
+- a real canonical external RAGAS baseline;
 - prompt-version comparison;
 - Langfuse and Phoenix integration;
 - operational dashboards;
@@ -749,7 +767,7 @@ The Slice 5 workflow intentionally defers:
 
 Human-in-the-loop approval and write-capable actions belong to the next workflow boundary.
 
-Deterministic controlled-support regression already consumes durable provenance contracts through committed static fixtures. Observability capabilities continue to remain separate from evaluation ownership.
+Deterministic controlled-support regression already consumes durable provenance contracts through committed static fixtures. Grounded recommendation evaluation evaluates existing recommendation predictions externally and does not change runtime workflow execution. Observability capabilities continue to remain separate from evaluation ownership.
 
 ## Related documentation
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, optional application-owned AI observability, offline classification evaluation, multi-domain deterministic regression scoring, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, optional application-owned AI observability, offline classification evaluation, multi-domain deterministic regression scoring, grounded recommendation evaluation validation and offline scoring, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -232,6 +232,14 @@ uv run pytest `
   -q
 ```
 
+Focused grounded recommendation evaluation coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/grounded_recommendations `
+  -q
+```
+
 Focused prompt-version selection coverage:
 
 ```powershell
@@ -304,7 +312,11 @@ Evaluation unit coverage verifies:
 - semantic-retrieval, controlled-support, and human-approval deterministic
   evaluators over committed synthetic corpora;
 - repository regression aggregation, optional classification omission, and
-  deterministic domain ordering.
+  deterministic domain ordering;
+- grounded recommendation dataset, prediction, deterministic complementary
+  metrics, static RAGAS score, offline aggregation, CLI, and fake-backed
+  adapter coverage;
+- grounded recommendation human review rubric loading and policy validation.
 
 Normal pytest execution performs no paid provider calls. External provider
 evaluation remains a manual operation that requires explicit acknowledgement.
@@ -428,10 +440,13 @@ Default tests use mock embeddings and make no OpenAI network calls.
 ## AI observability tests
 
 Slice 7 includes provider, embedding, retrieval, indexing, and durable
-workflow observability coverage. RAGAS, classification prompt version 2,
-paired prompt comparison, and prompt promotion remain later follow-up work
-beyond the repository-owned classification and multi-domain deterministic
-regression foundation.
+workflow observability coverage. Grounded recommendation evaluation with
+deterministic complementary metrics, static RAGAS score artifacts, offline
+aggregation, and an explicit external RAGAS boundary is implemented separately
+from observability. Classification prompt version 2, paired prompt comparison,
+and prompt promotion remain later follow-up work beyond the repository-owned
+classification, multi-domain deterministic regression, and grounded
+recommendation evaluation foundation.
 
 ### Provider, embedding, retrieval, and indexing coverage
 
@@ -548,12 +563,13 @@ Normal tests:
 - do not call Langfuse Cloud;
 - validate trace shape and privacy at the application contract boundary.
 
-External Langfuse smoke validation remains an opt-in follow-up. RAGAS,
-Langfuse evaluation workflows, paired prompt comparison, and prompt
-promotion remain deferred. Multi-domain deterministic regression scoring is
-implemented and covered by the evaluation suites above. PostgreSQL remains
-authoritative for durable LLM invocation and indexing usage and
-estimated-cost records. Query-embedding usage and cost remain ephemeral
+External Langfuse smoke validation remains an opt-in follow-up. Langfuse
+evaluation workflows, paired prompt comparison, and prompt promotion remain
+deferred. A real canonical external RAGAS baseline remains deferred. Multi-domain
+deterministic regression scoring and grounded recommendation offline validation
+and scoring are implemented and covered by the evaluation suites above.
+PostgreSQL remains authoritative for durable LLM invocation and indexing usage
+and estimated-cost records. Query-embedding usage and cost remain ephemeral
 observability data.
 
 ## Integration tests
@@ -1145,6 +1161,48 @@ uv run pytest `
   -q
 ```
 
+## Grounded recommendation evaluation
+
+Grounded recommendation evaluation uses committed synthetic fixtures and the
+`supportops-evaluate-grounded-recommendations` CLI. Offline commands perform no
+network access and do not require secrets or runtime services.
+
+Focused unit coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/grounded_recommendations `
+  -q
+```
+
+Offline validation and scoring:
+
+```powershell
+uv run supportops-evaluate-grounded-recommendations validate
+
+uv run supportops-evaluate-grounded-recommendations score
+
+uv run supportops-evaluate-grounded-recommendations score `
+  --ragas-scores "evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl"
+```
+
+`validate` and `score` do not instantiate evaluator models or generate
+embeddings. Normal CI runs these offline commands without API keys and without
+`--allow-external-provider`.
+
+External RAGAS evaluation of existing predictions is a manual operation. It
+requires `--allow-external-provider`, credentials from
+`SUPPORTOPS_EVALUATION_OPENAI_API_KEY`, and an output directory under
+`artifacts/`. The command does not implicitly fall back to
+`SUPPORTOPS_OPENAI_API_KEY`. Do not place a real API key in documentation or
+committed files. No real external smoke tests are committed, and no `external`
+pytest marker is introduced for this boundary.
+
+Domain architecture is documented in
+[`../architecture/evaluation-and-regression.md`](../architecture/evaluation-and-regression.md).
+Committed fixtures are summarized in
+[`../../evals/grounded-recommendations/README.md`](../../evals/grounded-recommendations/README.md).
+
 ## Workspace, ticket, and AgentRun API tests
 
 Workspace API integration coverage verifies:
@@ -1475,6 +1533,9 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run supportops-evaluate-regression score
+uv run supportops-evaluate-grounded-recommendations validate
+uv run supportops-evaluate-grounded-recommendations score
+uv run supportops-evaluate-grounded-recommendations score --ragas-scores evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl
 uv run pytest -m "not integration"
 uv run alembic heads
 uv run alembic current
@@ -1487,7 +1548,7 @@ Continuous integration provides PostgreSQL and Qdrant service containers.
 
 The CI environment uses non-production credentials and a slightly higher dependency health timeout to reduce shared-runner flakiness.
 
-CI must not update the lockfile or publish the application image. The regression command scores committed static fixtures only and does not require secrets or paid providers.
+CI must not update the lockfile or publish the application image. The regression command scores committed static fixtures only and does not require secrets or paid providers. Grounded recommendation CI commands likewise remain offline and do not perform paid external evaluation.
 
 ## Full local validation sequence
 
@@ -1548,12 +1609,11 @@ Later implementation phases are expected to add tests for:
 - prompt version 2 regression comparison;
 - paired prompt comparison and promotion decision coverage;
 - scheduled evaluation and evaluation history persistence;
-- grounded recommendation model-based evaluation;
-- generation evaluation beyond structured classification;
-- RAGAS;
+- a real canonical external RAGAS baseline;
 - production feedback ingestion;
-- evaluation dashboards beyond standalone classification and multi-domain
-  release gates;
+- a full annotation platform;
+- evaluation dashboards beyond standalone classification, multi-domain
+  release gates, and grounded recommendation evaluation;
 - idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
@@ -1566,6 +1626,7 @@ active-version semantic knowledge retrieval, optional application-owned AI
 observability with provider, embedding, retrieval, indexing, and durable
 workflow coverage, repository-owned offline classification evaluation with
 contracts, split manifests, explicit prompt-version selection, and standalone
-release gates, and multi-domain deterministic regression for semantic
-retrieval, controlled support, and human approval are part of the current
-suite.
+release gates, multi-domain deterministic regression for semantic retrieval,
+controlled support, and human approval, and grounded recommendation evaluation
+with offline validation, deterministic complementary metrics, static RAGAS score
+aggregation, and fake-backed adapter tests are part of the current suite.
