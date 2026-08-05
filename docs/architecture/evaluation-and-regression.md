@@ -32,18 +32,21 @@ The current evaluation foundation provides:
 - structured-output validity metrics;
 - urgency and human-review safety recall;
 - latency and token aggregates;
-- standalone classification release-gate evaluation.
+- standalone classification release-gate evaluation;
+- deterministic semantic-retrieval regression;
+- deterministic controlled-support regression;
+- deterministic human-approval regression;
+- repository-level deterministic regression scoring through `supportops-evaluate-regression score`.
+
+Within the committed synthetic regression corpus, the multi-domain regression command scores committed static fixtures. It does not execute live embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse.
 
 The following capabilities remain outside the current foundation and are introduced in later evaluation milestones:
 
-- deterministic retrieval regression;
-- controlled-agent regression;
-- approval-workflow regression;
-- grounded recommendation evaluation;
+- grounded recommendation model-based evaluation;
 - RAGAS integration;
 - paired prompt comparison;
-- prompt version 2;
-- prompt promotion decisions.
+- classification prompt version 2;
+- prompt promotion, rejection, or inconclusive decisions.
 
 ## Evaluation Ownership
 
@@ -93,6 +96,32 @@ split manifest version
 ```
 
 A behavioral change requires a new dataset version. A procedural split change requires a new split-manifest version.
+
+Committed multi-domain regression datasets are also immutable synthetic corpora:
+
+```text
+evals/semantic-retrieval/datasets/semantic-retrieval-eval-v1.jsonl
+evals/controlled-support/datasets/controlled-support-eval-v1.jsonl
+evals/human-approval/datasets/human-approval-eval-v1.jsonl
+```
+
+Case counts within the committed synthetic regression corpus:
+
+```text
+semantic retrieval: 10
+controlled support: 14
+human approval: 14
+```
+
+Committed static prediction fixtures used by repository regression scoring:
+
+```text
+evals/semantic-retrieval/predictions/semantic-retrieval-eval-v1.static.jsonl
+evals/controlled-support/predictions/controlled-support-eval-v1.static.jsonl
+evals/human-approval/predictions/human-approval-eval-v1.static.jsonl
+```
+
+These fixtures are typed prediction envelopes. Scoring consumes the fixtures as evidence and does not regenerate them through runtime services.
 
 ## Development, Holdout, and Safety Gates
 
@@ -191,6 +220,8 @@ write temporary file
 A hash mismatch or incomplete write cannot overwrite an existing canonical artifact.
 
 Temporary and local execution artifacts remain under ignored artifact directories until explicitly selected as repository evidence.
+
+Optional repository-regression output follows the same atomic write boundary. Scoring failures do not replace an existing output artifact.
 
 ## Classification Metrics
 
@@ -305,6 +336,153 @@ Quality and efficiency non-regression gates require paired baseline evidence. Th
 
 A perfect standalone report is therefore intentionally `incomplete`. Standalone evidence cannot authorize prompt promotion.
 
+## Semantic Retrieval Regression
+
+Deterministic semantic-retrieval evaluation scores committed static retrieval predictions against immutable dataset version 1.
+
+Within the committed synthetic regression corpus:
+
+- dataset path: `evals/semantic-retrieval/datasets/semantic-retrieval-eval-v1.jsonl`;
+- static prediction fixture: `evals/semantic-retrieval/predictions/semantic-retrieval-eval-v1.static.jsonl`;
+- case count: 10.
+
+Metric family:
+
+- document hit rate at k;
+- chunk hit rate at k;
+- mean reciprocal rank;
+- recall at k;
+- no-result accuracy;
+- workspace isolation rate;
+- citation resolution rate;
+- average latency;
+- average query embedding tokens;
+- estimated query cost.
+
+Scoring performs no live embeddings and no Qdrant execution. Duplicate retrieved chunks count once. Cosine similarity score is ranking evidence only and is not treated as calibrated confidence.
+
+Release-gate profile identity:
+
+```text
+semantic-retrieval-release-gates / 1
+```
+
+## Controlled-Support Regression
+
+Deterministic controlled-support evaluation scores committed static execution-trace fixtures against immutable dataset version 1.
+
+Within the committed synthetic regression corpus:
+
+- dataset path: `evals/controlled-support/datasets/controlled-support-eval-v1.jsonl`;
+- static execution-trace fixture: `evals/controlled-support/predictions/controlled-support-eval-v1.static.jsonl`;
+- case count: 14.
+
+Metric family:
+
+- expected outcome accuracy;
+- required tool call rate;
+- forbidden tool call rate;
+- exact tool-sequence acceptance;
+- repeated tool acceptance rate;
+- step-limit behavior;
+- recommended-action accuracy;
+- human-review recommendation accuracy;
+- citation validity;
+- grounded abstention;
+- workspace isolation;
+- successful completion;
+- tool-call, LLM invocation, latency, token, and cost aggregates.
+
+Scoring performs no live LangGraph, tools, providers, PostgreSQL, Qdrant, or Langfuse execution. Expected failures remain explicit and require exact error codes.
+
+Release-gate profile identity:
+
+```text
+controlled-support-release-gates / 1
+```
+
+## Human-Approval Regression
+
+Deterministic human-approval evaluation scores committed static approval-outcome fixtures against immutable dataset version 1.
+
+Within the committed synthetic regression corpus:
+
+- dataset path: `evals/human-approval/datasets/human-approval-eval-v1.jsonl`;
+- static approval outcome fixture: `evals/human-approval/predictions/human-approval-eval-v1.static.jsonl`;
+- case count: 14.
+
+Metric family:
+
+- approval-required accuracy;
+- unauthorized sensitive execution rate;
+- approved execution success;
+- rejected non-execution;
+- expired non-execution;
+- approval decision idempotency;
+- resume success;
+- sensitive-action idempotency;
+- checkpoint match;
+- grant match;
+- retry-budget preservation;
+- duplicate escalation prevention;
+- finalization;
+- latency, token, and cost aggregates.
+
+Scoring performs no live approval services, checkpoint mutation, API execution, or sensitive tool execution.
+
+Release-gate profile identity:
+
+```text
+human-approval-release-gates / 1
+```
+
+## Domain Release Gates
+
+Safety and reliability gates are deterministic and blocking for each committed domain profile.
+
+Quality and efficiency non-regression gates require paired baseline evidence. Standalone committed fixtures therefore produce domain status `incomplete` when safety and reliability gates pass and paired quality or efficiency evidence is absent.
+
+`incomplete` is valid deterministic evidence. Blocking gate failures produce `failed`.
+
+## Repository Regression Command
+
+Repository-level deterministic regression scoring uses:
+
+```text
+supportops-evaluate-regression score
+```
+
+Default committed domains, in deterministic order:
+
+```text
+semantic-retrieval
+controlled-support
+human-approval
+```
+
+Classification remains optional when static classification evidence is not supplied. Omitted optional classification evidence is recorded as not provided and does not fail the repository result.
+
+Repository aggregate statuses:
+
+```text
+passed
+failed
+incomplete
+```
+
+Standalone committed fixtures without paired quality and efficiency baselines therefore produce repository aggregate status `incomplete`. That status is valid deterministic evidence and exits zero.
+
+Exit semantics:
+
+```text
+0 → valid passed or incomplete evidence
+1 → blocking gate failure
+2 → usage error
+3 → artifact validation or scoring failure
+```
+
+The command performs no network calls, requires no secrets or runtime services, and writes optional output atomically. Normal CI explicitly runs `supportops-evaluate-regression score`.
+
 ## Evaluation Versus Observability
 
 Observability and evaluation have different failure semantics.
@@ -332,7 +510,8 @@ Normal CI may execute:
 - release-gate logic;
 - prompt registry and hash tests;
 - report and artifact hashing tests;
-- atomic-write tests.
+- atomic-write tests;
+- `supportops-evaluate-regression score` against committed multi-domain fixtures.
 
 Normal CI must not execute:
 
@@ -350,6 +529,8 @@ External provider execution remains explicit and requires acknowledgement.
 
 The current classification corpus is small, synthetic, and curated. It supports regression detection within the project boundary, but it is not statistically representative of production traffic.
 
+The multi-domain retrieval, controlled-support, and human-approval corpora are likewise synthetic and curated. Within the committed synthetic regression corpus they support deterministic regression detection. They are not representative of production traffic.
+
 Evaluation reports must use language such as:
 
 ```text
@@ -362,15 +543,22 @@ They must not claim global or statistical superiority.
 
 The architecture intentionally defers:
 
+- RAGAS integration;
+- grounded recommendation model-based evaluation;
+- evaluator-model isolation;
+- human qualitative review;
+- canonical external provider baselines;
+- classification prompt version 2;
+- paired v1-versus-v2 comparison;
+- prompt promotion, rejection, or inconclusive decisions;
+- automatic prompt optimization;
 - production feedback ingestion;
 - scheduled evaluation;
 - online evaluation;
-- evaluation history databases;
-- automatic prompt optimization;
-- automatic prompt promotion;
-- automatic deployment;
-- Langfuse datasets and experiments;
+- evaluation database;
+- Langfuse datasets or experiments;
 - production A/B testing;
+- automatic deployment;
 - large-scale benchmark construction.
 
 These capabilities require additional product, privacy, operational, and statistical design beyond the repository-owned regression foundation.

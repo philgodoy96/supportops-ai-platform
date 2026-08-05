@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, optional application-owned AI observability, offline classification evaluation, application services, versioned HTTP APIs, migration tooling, and container packaging.
+The SupportOps AI Platform test suite verifies foundation behavior across configuration, application composition, infrastructure connectivity, lifecycle management, health semantics, HTTP request traceability, workspace and ticket persistence, immutable knowledge-document versioning, explicit knowledge indexing, semantic knowledge retrieval, durable AgentRun scheduling, PostgreSQL worker claim and execution, workspace-scoped AgentRun inspection, classification inspection, controlled support workflow orchestration, tool audits, recommendation persistence, controlled support inspection, human-approved interrupt and resume, approval inspection and decision APIs, ticket escalation inspection APIs, optional application-owned AI observability, offline classification evaluation, multi-domain deterministic regression scoring, application services, versioned HTTP APIs, migration tooling, and container packaging.
 
 The strategy separates tests by dependency boundary:
 
@@ -221,6 +221,17 @@ uv run pytest `
   tests/unit/evaluation/ticket_classification/test_evaluator.py
 ```
 
+Focused multi-domain deterministic evaluation coverage:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/semantic_retrieval `
+  tests/unit/evaluation/controlled_support `
+  tests/unit/evaluation/human_approval `
+  tests/unit/evaluation/regression `
+  -q
+```
+
 Focused prompt-version selection coverage:
 
 ```powershell
@@ -289,7 +300,11 @@ Evaluation unit coverage verifies:
   overwrite;
 - evaluation settings and composition;
 - CLI provider safety gates, including the external-provider permission flag;
-- artifact reload and report reproducibility.
+- artifact reload and report reproducibility;
+- semantic-retrieval, controlled-support, and human-approval deterministic
+  evaluators over committed synthetic corpora;
+- repository regression aggregation, optional classification omission, and
+  deterministic domain ordering.
 
 Normal pytest execution performs no paid provider calls. External provider
 evaluation remains a manual operation that requires explicit acknowledgement.
@@ -413,10 +428,10 @@ Default tests use mock embeddings and make no OpenAI network calls.
 ## AI observability tests
 
 Slice 7 includes provider, embedding, retrieval, indexing, and durable
-workflow observability coverage. Multi-domain evaluation, RAGAS, prompt
-version 2, paired prompt comparison, and prompt promotion remain Slice 8
-follow-up work beyond the repository-owned classification evaluation
-foundation.
+workflow observability coverage. RAGAS, classification prompt version 2,
+paired prompt comparison, and prompt promotion remain later follow-up work
+beyond the repository-owned classification and multi-domain deterministic
+regression foundation.
 
 ### Provider, embedding, retrieval, and indexing coverage
 
@@ -487,7 +502,7 @@ uv run pytest tests/unit/worker
 uv run pytest tests/unit/api/test_lifespan.py
 ```
 
-PR B regression coverage for provider and retrieval instrumentation:
+Provider and retrieval instrumentation regression coverage:
 
 ```powershell
 uv run pytest tests/unit/ai/gateway
@@ -534,10 +549,12 @@ Normal tests:
 - validate trace shape and privacy at the application contract boundary.
 
 External Langfuse smoke validation remains an opt-in follow-up. RAGAS,
-Langfuse evaluation workflows, paired prompt comparison, and multi-domain
-evaluation remain deferred to Slice 8. PostgreSQL remains authoritative for
-durable LLM invocation and indexing usage and estimated-cost records.
-Query-embedding usage and cost remain ephemeral observability data.
+Langfuse evaluation workflows, paired prompt comparison, and prompt
+promotion remain deferred. Multi-domain deterministic regression scoring is
+implemented and covered by the evaluation suites above. PostgreSQL remains
+authoritative for durable LLM invocation and indexing usage and
+estimated-cost records. Query-embedding usage and cost remain ephemeral
+observability data.
 
 ## Integration tests
 
@@ -1098,6 +1115,36 @@ discipline is procedural and holdout outcomes must not guide prompt drafting.
 Generated evaluation artifacts are ignored by Git. Versioned datasets and split
 manifests remain committed under `evals/`.
 
+## Multi-domain deterministic regression
+
+Repository regression scoring uses committed synthetic datasets and static
+prediction fixtures:
+
+```powershell
+uv run supportops-evaluate-regression score
+```
+
+Default domains are `semantic-retrieval`, `controlled-support`, and
+`human-approval`. Classification remains optional when static classification
+evidence is not supplied. The command performs no network calls and does not
+require secrets or runtime services. Normal CI runs the command explicitly.
+
+Standalone committed fixtures without paired quality and efficiency baselines
+produce aggregate status `incomplete`. That status is valid deterministic
+evidence and exits zero. Blocking gate failure exits one. Artifact validation
+or scoring failure exits three. Usage errors exit two.
+
+Focused unit coverage for the deterministic evaluators and regression runner:
+
+```powershell
+uv run pytest `
+  tests/unit/evaluation/semantic_retrieval `
+  tests/unit/evaluation/controlled_support `
+  tests/unit/evaluation/human_approval `
+  tests/unit/evaluation/regression `
+  -q
+```
+
 ## Workspace, ticket, and AgentRun API tests
 
 Workspace API integration coverage verifies:
@@ -1427,6 +1474,7 @@ uv lock --check
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+uv run supportops-evaluate-regression score
 uv run pytest -m "not integration"
 uv run alembic heads
 uv run alembic current
@@ -1439,7 +1487,7 @@ Continuous integration provides PostgreSQL and Qdrant service containers.
 
 The CI environment uses non-production credentials and a slightly higher dependency health timeout to reduce shared-runner flakiness.
 
-CI must not update the lockfile or publish the application image.
+CI must not update the lockfile or publish the application image. The regression command scores committed static fixtures only and does not require secrets or paid providers.
 
 ## Full local validation sequence
 
@@ -1493,19 +1541,19 @@ Later implementation phases are expected to add tests for:
 - authenticated tenant isolation;
 - manual AgentRun retry and cancellation;
 - global AgentRun listing and status filtering;
-- retrieval quality scoring and reranking;
+- retrieval reranking;
 - write-capable tool authorization beyond grant-gated internal escalation;
 - opt-in live Langfuse smoke validation;
 - Langfuse evaluation workflows;
 - prompt version 2 regression comparison;
 - paired prompt comparison and promotion decision coverage;
 - scheduled evaluation and evaluation history persistence;
-- retrieval, controlled-support, and approval-workflow evaluation;
-- grounded recommendation evaluation;
+- grounded recommendation model-based evaluation;
 - generation evaluation beyond structured classification;
 - RAGAS;
 - production feedback ingestion;
-- evaluation dashboards beyond standalone classification release gates;
+- evaluation dashboards beyond standalone classification and multi-domain
+  release gates;
 - idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
@@ -1516,6 +1564,8 @@ workflow coverage, approval and escalation inspection and decision APIs,
 immutable knowledge-document versioning, explicit knowledge indexing,
 active-version semantic knowledge retrieval, optional application-owned AI
 observability with provider, embedding, retrieval, indexing, and durable
-workflow coverage, and repository-owned offline classification evaluation with
+workflow coverage, repository-owned offline classification evaluation with
 contracts, split manifests, explicit prompt-version selection, and standalone
-release gates are part of the current suite.
+release gates, and multi-domain deterministic regression for semantic
+retrieval, controlled support, and human approval are part of the current
+suite.
