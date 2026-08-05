@@ -8,6 +8,15 @@ from supportops.evaluation.grounded_recommendations.evaluator import (
     GroundedRecommendationEvaluationError,
     evaluate_grounded_recommendation_predictions,
 )
+from supportops.evaluation.grounded_recommendations.human_review import (
+    GroundedRecommendationHumanReviewDimension,
+    GroundedRecommendationHumanReviewPolicy,
+    GroundedRecommendationHumanReviewRecord,
+    GroundedRecommendationHumanReviewRubric,
+    GroundedRecommendationHumanReviewRubricError,
+    GroundedRecommendationHumanReviewScale,
+    load_grounded_recommendation_human_review_rubric,
+)
 from supportops.evaluation.grounded_recommendations.models import (
     CountRateMetric,
     GroundedRecommendationAction,
@@ -92,6 +101,12 @@ __all__ = [
     "GroundedRecommendationEvaluationDataset",
     "GroundedRecommendationEvaluationError",
     "GroundedRecommendationEvaluationReport",
+    "GroundedRecommendationHumanReviewDimension",
+    "GroundedRecommendationHumanReviewPolicy",
+    "GroundedRecommendationHumanReviewRecord",
+    "GroundedRecommendationHumanReviewRubric",
+    "GroundedRecommendationHumanReviewRubricError",
+    "GroundedRecommendationHumanReviewScale",
     "GroundedRecommendationPrediction",
     "GroundedRecommendationPredictionError",
     "GroundedRecommendationPredictionPayload",
@@ -122,6 +137,7 @@ __all__ = [
     "build_grounded_recommendation_ragas_report",
     "evaluate_grounded_recommendation_predictions",
     "load_grounded_recommendation_dataset",
+    "load_grounded_recommendation_human_review_rubric",
     "load_grounded_recommendation_predictions",
     "load_grounded_recommendation_ragas_scores",
     "load_ragas_runtime",
