@@ -409,12 +409,12 @@ async def test_unsupported_prompt_version_leaves_output_untouched(
     try:
         with pytest.raises(
             PromptDefinitionNotFoundError,
-            match=("Unsupported prompt: ticket-classification version 2"),
+            match=("Unsupported prompt: ticket-classification version 3"),
         ):
             await run_ticket_classification_evaluation(
                 dataset=dataset,
                 predictor=predictor,
-                prompt_version=2,
+                prompt_version=3,
             )
     finally:
         await provider.close()

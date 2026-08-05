@@ -8,6 +8,9 @@ from supportops.ai.prompts.definitions import (
     RenderedPrompt,
 )
 from supportops.ai.prompts.registry import PromptRegistry
+from supportops.ai.prompts.ticket_classification_v2 import (
+    TICKET_CLASSIFICATION_PROMPT_V2,
+)
 
 TICKET_CLASSIFICATION_PROMPT_ID = "ticket-classification"
 TICKET_CLASSIFICATION_PROMPT_VERSION = 1
@@ -126,7 +129,10 @@ TICKET_CLASSIFICATION_PROMPT_V1 = PromptDefinition(
 )
 
 TICKET_CLASSIFICATION_PROMPT_REGISTRY = PromptRegistry(
-    (TICKET_CLASSIFICATION_PROMPT_V1,),
+    (
+        TICKET_CLASSIFICATION_PROMPT_V1,
+        TICKET_CLASSIFICATION_PROMPT_V2,
+    ),
 )
 
 

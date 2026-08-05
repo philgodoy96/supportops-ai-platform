@@ -15,6 +15,11 @@ from supportops.ai.prompts.ticket_classification_v1 import (
     get_ticket_classification_prompt,
     render_ticket_classification_prompt,
 )
+from supportops.ai.prompts.ticket_classification_v2 import (
+    TICKET_CLASSIFICATION_PROMPT_V2,
+)
+
+PROMPT_V1_HASH = "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2"
 
 
 def test_prompt_identity_and_schema_are_explicit() -> None:
@@ -28,16 +33,27 @@ def test_prompt_identity_and_schema_are_explicit() -> None:
     assert definition.output_schema_id == TICKET_CLASSIFICATION_OUTPUT_SCHEMA_ID
 
 
-def test_lookup_requires_an_explicit_supported_version() -> None:
-    definition = get_ticket_classification_prompt(
-        version=1,
-    )
+def test_prompt_v1_content_hash_remains_immutable() -> None:
+    assert TICKET_CLASSIFICATION_PROMPT_V1.content_hash == PROMPT_V1_HASH
 
-    assert definition is TICKET_CLASSIFICATION_PROMPT_V1
+
+def test_lookup_requires_an_explicit_supported_version() -> None:
+    assert (
+        get_ticket_classification_prompt(
+            version=1,
+        )
+        is TICKET_CLASSIFICATION_PROMPT_V1
+    )
+    assert (
+        get_ticket_classification_prompt(
+            version=2,
+        )
+        is TICKET_CLASSIFICATION_PROMPT_V2
+    )
 
     with pytest.raises(PromptDefinitionNotFoundError):
         get_ticket_classification_prompt(
-            version=2,
+            version=3,
         )
 
 
