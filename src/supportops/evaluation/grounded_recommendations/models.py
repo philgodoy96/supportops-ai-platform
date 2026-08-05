@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Self
 from uuid import UUID
@@ -204,3 +205,113 @@ class GroundedRecommendationEvaluationDataset(BaseModel):
                 raise ValueError("case workflow_version does not match dataset")
 
         return self
+
+
+class GroundedRecommendationPredictionPayload(BaseModel):
+    """Typed grounded recommendation prediction outcome."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    response_text: NonEmptyString
+    decision_summary: NonEmptyString
+    recommended_action: GroundedRecommendationAction
+    requires_human_review: bool
+    evidence_sufficient: bool
+    citation_chunk_ids: tuple[UUID, ...] = ()
+    retrieved_chunk_ids: tuple[UUID, ...] = ()
+    foreign_workspace_evidence_count: int = Field(ge=0)
+    prompt_id: NonEmptyString
+    prompt_version: int = Field(ge=1)
+    schema_version: NonEmptyString
+
+    @model_validator(mode="after")
+    def validate_prediction_payload(self) -> Self:
+        self._require_unique("citation_chunk_ids", self.citation_chunk_ids)
+        self._require_unique("retrieved_chunk_ids", self.retrieved_chunk_ids)
+
+        if (
+            self.recommended_action is GroundedRecommendationAction.RECOMMEND_ESCALATION
+            and not self.requires_human_review
+        ):
+            raise ValueError("escalation recommendations must require human review")
+
+        if (
+            not self.evidence_sufficient
+            and self.recommended_action is GroundedRecommendationAction.RESPOND
+        ):
+            raise ValueError("insufficient evidence cannot recommend a direct response")
+
+        return self
+
+    @staticmethod
+    def _require_unique(
+        name: str,
+        values: tuple[object, ...],
+    ) -> None:
+        if len(values) != len(set(values)):
+            raise ValueError(f"{name} must contain unique values")
+
+
+class CountRateMetric(BaseModel):
+    """Count-based deterministic metric."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    numerator_count: int = Field(ge=0)
+    denominator_count: int = Field(ge=0)
+    rate: Decimal | None
+
+
+class MeanMetric(BaseModel):
+    """Known-value average with explicit unknown counts."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total: Decimal
+    known_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    average: Decimal | None
+
+
+class GroundedRecommendationCaseResult(BaseModel):
+    """Case-level grounded recommendation evaluation evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: CaseId
+    prediction_present: bool
+    prediction_succeeded: bool
+    recommended_action_correct: bool | None
+    human_review_correct: bool | None
+    evidence_sufficiency_correct: bool | None
+    citation_identity_correct: bool | None
+    workspace_isolated: bool
+    grounded_abstention_correct: bool | None
+    error_code: NonEmptyString | None = None
+
+
+class GroundedRecommendationEvaluationReport(BaseModel):
+    """Deterministic grounded recommendation evaluation report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dataset_id: NonEmptyString
+    dataset_version: int = Field(ge=1)
+    schema_version: NonEmptyString
+    workflow_name: NonEmptyString
+    workflow_version: NonEmptyString
+    dataset_hash: Sha256Hex
+    prediction_hash: Sha256Hex
+    case_count: int = Field(ge=1)
+    recommended_action_accuracy: CountRateMetric
+    human_review_accuracy: CountRateMetric
+    evidence_sufficiency_accuracy: CountRateMetric
+    citation_identity_accuracy: CountRateMetric
+    workspace_isolation_rate: CountRateMetric
+    grounded_abstention_accuracy: CountRateMetric
+    prediction_coverage: CountRateMetric
+    average_latency_ms: MeanMetric
+    average_total_tokens: MeanMetric
+    estimated_cost_usd: MeanMetric
+    case_results: tuple[GroundedRecommendationCaseResult, ...]
+    report_content_hash: Sha256Hex
