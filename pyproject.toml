@@ -47,6 +47,7 @@ dependencies = [
 [project.scripts]
 supportops-worker = "supportops.worker.main:main"
 supportops-evaluate-classification = "supportops.evaluation.ticket_classification.cli:main"
+supportops-evaluate-grounded-recommendations = "supportops.evaluation.grounded_recommendations.cli:main"
 supportops-evaluate-regression = "supportops.evaluation.regression.cli:main"
 supportops-index-knowledge = "supportops.knowledge_index.cli:main"
 supportops-graph-checkpoints = "supportops.agent_graph.cli:main"
@@ -61,6 +62,7 @@ dev = [
 ]
 evaluation = [
     "ragas==0.4.3",
+    "langchain-community==0.3.31",
 ]
 
 [tool.hatch.build.targets.wheel]
