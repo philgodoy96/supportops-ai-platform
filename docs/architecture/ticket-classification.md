@@ -35,6 +35,7 @@ The platform currently provides:
 - a process-scoped application LLM Gateway;
 - session-scoped workflow executors and repositories;
 - prompt `ticket-classification` version 1;
+- registered evaluation prompt `ticket-classification` version 2;
 - application-owned Structured Outputs validation;
 - bounded validation repair;
 - durable `LLMInvocation` records;
@@ -680,8 +681,13 @@ Each invocation and classification persists:
 The prompt version does not encode provider, model, schema, workflow, or pricing
 catalog version. Those dimensions remain independently queryable.
 
-Prompt version 2 remains intentionally deferred until evaluation evidence
-identifies a justified behavioral change.
+### Runtime prompt pin versus evaluation registration
+
+Runtime classification remains pinned to prompt version 1 through
+`TICKET_CLASSIFICATION_PROMPT_VERSION`. Prompt version 2 is registered for
+evaluation and explicit offline selection. Changing the runtime pin is a
+separate adoption change. Evaluation registration, static comparison, and an
+inconclusive decision do not activate version 2 in production.
 
 ## Inspection linkage
 
@@ -731,15 +737,17 @@ Inspection and evaluation architecture is documented in
 Offline evaluation reuses the same runtime contracts without sharing
 transaction ownership:
 
-- the same prompt `ticket-classification` version 1;
-- the same structured output schema;
+- the same prompt ID `ticket-classification`;
+- explicit prompt versions 1 and 2 for evaluation selection;
+- the same structured output schema `ticket-classification-v1`;
 - the same application-owned LLM Gateway;
 - the same versioned pricing catalog.
 
 Evaluation does not write to PostgreSQL or Qdrant, does not create AgentRuns,
 and does not promote prompts automatically. Dataset cases, prediction
-artifacts, deterministic metrics, and report provenance remain under the
-evaluation package and committed `evals/` datasets.
+artifacts, deterministic metrics, paired comparison, decision artifacts, and
+report provenance remain under the evaluation package and committed `evals/`
+artifacts. Runtime remains pinned to version 1 until a separate adoption change.
 
 ## Token usage and estimated cost
 
@@ -876,8 +884,8 @@ requests.
 
 The following capabilities remain intentionally separate:
 
-- prompt version 2;
-- evaluation comparison and promotion policy;
+- separate runtime prompt adoption for version 2;
+- provider-backed canonical comparison and production rollout monitoring;
 - cross-provider fallback;
 - automatic model routing;
 - Anthropic provider;
