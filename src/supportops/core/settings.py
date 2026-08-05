@@ -118,7 +118,7 @@ class Settings(BaseSettings):
         max_length=100,
     )
     application_version: str = Field(
-        default="0.1.0",
+        default="0.9.0",
         min_length=1,
         max_length=32,
     )

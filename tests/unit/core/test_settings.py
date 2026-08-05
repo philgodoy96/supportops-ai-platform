@@ -104,7 +104,7 @@ def test_settings_use_safe_local_defaults() -> None:
 
     assert settings.environment is ApplicationEnvironment.LOCAL
     assert settings.application_name == "SupportOps AI Platform"
-    assert settings.application_version == "0.1.0"
+    assert settings.application_version == "0.9.0"
     assert settings.log_level is LogLevel.INFO
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
