@@ -34,6 +34,17 @@ from supportops.evaluation.ticket_classification.failure_analysis import (
     TicketClassificationFailureType,
     load_ticket_classification_failure_analysis,
 )
+from supportops.evaluation.ticket_classification.iteration_runner import (
+    TicketClassificationPromptComparisonRunResult,
+    TicketClassificationPromptIterationError,
+    TicketClassificationPromptPairManifest,
+    TicketClassificationPromptPairManifestContent,
+    run_ticket_classification_prompt_comparison,
+    run_ticket_classification_prompt_decision,
+    validate_ticket_classification_failure_analysis_artifact,
+    write_ticket_classification_prompt_comparison_run,
+    write_ticket_classification_prompt_decision_run,
+)
 
 __all__ = [
     "TicketClassificationComparisonEvidenceKind",
@@ -52,16 +63,25 @@ __all__ = [
     "TicketClassificationPairedComparisonError",
     "TicketClassificationPairedGateEvaluation",
     "TicketClassificationPairedGateStatus",
+    "TicketClassificationPromptComparisonRunResult",
     "TicketClassificationPromptDecision",
     "TicketClassificationPromptDecisionContent",
     "TicketClassificationPromptDecisionError",
     "TicketClassificationPromptDecisionOutcome",
     "TicketClassificationPromptDecisionReview",
+    "TicketClassificationPromptIterationError",
+    "TicketClassificationPromptPairManifest",
+    "TicketClassificationPromptPairManifestContent",
     "compare_ticket_classification_prediction_sets",
     "decide_ticket_classification_prompt_candidate",
     "load_ticket_classification_failure_analysis",
     "load_ticket_classification_paired_comparison",
     "load_ticket_classification_prompt_decision",
+    "run_ticket_classification_prompt_comparison",
+    "run_ticket_classification_prompt_decision",
+    "validate_ticket_classification_failure_analysis_artifact",
     "write_ticket_classification_paired_comparison",
+    "write_ticket_classification_prompt_comparison_run",
     "write_ticket_classification_prompt_decision",
+    "write_ticket_classification_prompt_decision_run",
 ]
