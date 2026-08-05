@@ -13,6 +13,16 @@ from supportops.evaluation.ticket_classification.comparison import (
     load_ticket_classification_paired_comparison,
     write_ticket_classification_paired_comparison,
 )
+from supportops.evaluation.ticket_classification.decision import (
+    TicketClassificationPromptDecision,
+    TicketClassificationPromptDecisionContent,
+    TicketClassificationPromptDecisionError,
+    TicketClassificationPromptDecisionOutcome,
+    TicketClassificationPromptDecisionReview,
+    decide_ticket_classification_prompt_candidate,
+    load_ticket_classification_prompt_decision,
+    write_ticket_classification_prompt_decision,
+)
 from supportops.evaluation.ticket_classification.failure_analysis import (
     TicketClassificationFailureAnalysis,
     TicketClassificationFailureAnalysisContent,
@@ -42,8 +52,16 @@ __all__ = [
     "TicketClassificationPairedComparisonError",
     "TicketClassificationPairedGateEvaluation",
     "TicketClassificationPairedGateStatus",
+    "TicketClassificationPromptDecision",
+    "TicketClassificationPromptDecisionContent",
+    "TicketClassificationPromptDecisionError",
+    "TicketClassificationPromptDecisionOutcome",
+    "TicketClassificationPromptDecisionReview",
     "compare_ticket_classification_prediction_sets",
+    "decide_ticket_classification_prompt_candidate",
     "load_ticket_classification_failure_analysis",
     "load_ticket_classification_paired_comparison",
+    "load_ticket_classification_prompt_decision",
     "write_ticket_classification_paired_comparison",
+    "write_ticket_classification_prompt_decision",
 ]
