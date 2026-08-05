@@ -292,7 +292,9 @@ Workspace scoping demonstrates data-ownership boundaries. It is not secure authe
 
 ## Project status
 
-The defined backend and AI systems scope is feature-complete. Documentation and release-readiness work is in progress on the current branch. Prompt version 1 remains runtime-adopted. Prompt version 2 remains non-adopted. The repository does not claim production deployment maturity or a stable public 1.0 API.
+Package version `0.9.0` (`Development Status :: 4 - Beta`). The defined backend and AI systems scope is feature-complete. The repository is ready for technical review and local demonstration. It does not claim production deployment maturity or a stable public `1.0.0` API. Prompt version 1 remains the runtime default. Prompt version 2 remains evaluated but non-adopted after an inconclusive static decision.
+
+[v0.9.0 release notes](docs/releases/v0.9.0.md)
 
 ## License
 
