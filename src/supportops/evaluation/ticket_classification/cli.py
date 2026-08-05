@@ -4,7 +4,8 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, TextIO
 
@@ -14,6 +15,9 @@ from supportops.ai.prompts.registry import (
     PromptDefinitionNotFoundError,
 )
 from supportops.core.settings import LLMProviderName
+from supportops.evaluation.ticket_classification.comparison import (
+    TicketClassificationComparisonEvidenceKind,
+)
 from supportops.evaluation.ticket_classification.composition import (
     TicketClassificationEvaluationLLMRuntime,
     create_ticket_classification_evaluation_runtime,
@@ -28,6 +32,13 @@ from supportops.evaluation.ticket_classification.evaluator import (
     TicketClassificationEvaluationError,
     TicketClassificationEvaluationReport,
     evaluate_ticket_classification_predictions,
+)
+from supportops.evaluation.ticket_classification.iteration_runner import (
+    run_ticket_classification_prompt_comparison,
+    run_ticket_classification_prompt_decision,
+    validate_ticket_classification_failure_analysis_artifact,
+    write_ticket_classification_prompt_comparison_run,
+    write_ticket_classification_prompt_decision_run,
 )
 from supportops.evaluation.ticket_classification.predictions import (
     TicketClassificationPredictionError,
@@ -120,6 +131,21 @@ async def run_cli(
                 stdout=stdout,
                 settings_factory=settings_factory,
                 runtime_factory=runtime_factory,
+            )
+        elif arguments.command == "analyze":
+            _execute_analyze_command(
+                arguments=arguments,
+                stdout=stdout,
+            )
+        elif arguments.command == "compare":
+            _execute_compare_command(
+                arguments=arguments,
+                stdout=stdout,
+            )
+        elif arguments.command == "decide":
+            _execute_decide_command(
+                arguments=arguments,
+                stdout=stdout,
             )
         else:
             raise RuntimeError(
@@ -222,6 +248,118 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Path to the deterministic report JSON artifact.",
+    )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help=("Validate a committed failure-analysis artifact without initializing a provider."),
+    )
+    _add_dataset_arguments(analyze_parser)
+    analyze_parser.add_argument(
+        "--split-manifest",
+        type=Path,
+        required=True,
+        help="Path to the versioned split-manifest artifact.",
+    )
+    analyze_parser.add_argument(
+        "--analysis",
+        type=Path,
+        required=True,
+        help="Path to the committed failure-analysis artifact.",
+    )
+
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help=(
+            "Compare existing baseline and candidate prediction artifacts "
+            "without initializing a provider."
+        ),
+    )
+    _add_dataset_arguments(compare_parser)
+    compare_parser.add_argument(
+        "--split-manifest",
+        type=Path,
+        required=True,
+        help="Path to the versioned split-manifest artifact.",
+    )
+    compare_parser.add_argument(
+        "--baseline-predictions",
+        type=Path,
+        required=True,
+        help="Path to the baseline prediction JSONL artifact.",
+    )
+    compare_parser.add_argument(
+        "--candidate-predictions",
+        type=Path,
+        required=True,
+        help="Path to the candidate prediction JSONL artifact.",
+    )
+    compare_parser.add_argument(
+        "--evidence-kind",
+        choices=tuple(kind.value for kind in TicketClassificationComparisonEvidenceKind),
+        required=True,
+        help="Authority represented by the paired prediction evidence.",
+    )
+    compare_parser.add_argument(
+        "--capture-timestamp",
+        type=_aware_datetime,
+        required=True,
+        help="Aware ISO-8601 capture timestamp recorded in evaluation manifests.",
+    )
+    compare_parser.add_argument(
+        "--git-commit",
+        required=True,
+        help="Git commit recorded in evaluation manifests.",
+    )
+    compare_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to the paired comparison JSON artifact.",
+    )
+    compare_parser.add_argument(
+        "--baseline-manifest-output",
+        type=Path,
+        required=True,
+        help="Path to the baseline evaluation manifest JSON artifact.",
+    )
+    compare_parser.add_argument(
+        "--candidate-manifest-output",
+        type=Path,
+        required=True,
+        help="Path to the candidate evaluation manifest JSON artifact.",
+    )
+    compare_parser.add_argument(
+        "--pair-manifest-output",
+        type=Path,
+        required=True,
+        help="Path to the paired provenance manifest JSON artifact.",
+    )
+
+    decide_parser = subparsers.add_parser(
+        "decide",
+        help=(
+            "Rebuild a governed prompt decision from comparison and review "
+            "evidence without initializing a provider."
+        ),
+    )
+    decide_parser.add_argument(
+        "--comparison",
+        type=Path,
+        required=True,
+        help="Path to the paired comparison JSON artifact.",
+    )
+    decide_parser.add_argument(
+        "--decision-template",
+        type=Path,
+        required=True,
+        help=("Path to the decision template supplying immutable review and governance fields."),
+    )
+    decide_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to the rebuilt prompt decision JSON artifact.",
     )
 
     return parser
@@ -338,6 +476,118 @@ async def _execute_run_command(
     )
 
 
+def _execute_analyze_command(
+    *,
+    arguments: argparse.Namespace,
+    stdout: TextIO,
+) -> None:
+    analysis = validate_ticket_classification_failure_analysis_artifact(
+        dataset_path=arguments.dataset,
+        dataset_id=arguments.dataset_id,
+        dataset_version=arguments.dataset_version,
+        split_manifest_path=arguments.split_manifest,
+        analysis_path=arguments.analysis,
+    )
+    _write_json_line(
+        stdout=stdout,
+        payload={
+            "command": "analyze",
+            "analysis_id": analysis.analysis_id,
+            "analysis_version": analysis.analysis_version,
+            "analyzed_split": analysis.analyzed_split,
+            "analyzed_case_count": len(analysis.analyzed_case_ids),
+            "observation_count": len(analysis.observations),
+            "analysis_content_hash": analysis.analysis_content_hash,
+            "analysis_path": str(arguments.analysis),
+        },
+    )
+
+
+def _execute_compare_command(
+    *,
+    arguments: argparse.Namespace,
+    stdout: TextIO,
+) -> None:
+    result = run_ticket_classification_prompt_comparison(
+        dataset_path=arguments.dataset,
+        dataset_id=arguments.dataset_id,
+        dataset_version=arguments.dataset_version,
+        split_manifest_path=arguments.split_manifest,
+        baseline_predictions_path=arguments.baseline_predictions,
+        candidate_predictions_path=arguments.candidate_predictions,
+        evidence_kind=TicketClassificationComparisonEvidenceKind(
+            arguments.evidence_kind,
+        ),
+        capture_timestamp=arguments.capture_timestamp,
+        git_commit=arguments.git_commit,
+    )
+    write_ticket_classification_prompt_comparison_run(
+        comparison_output=arguments.output,
+        baseline_manifest_output=arguments.baseline_manifest_output,
+        candidate_manifest_output=arguments.candidate_manifest_output,
+        pair_manifest_output=arguments.pair_manifest_output,
+        result=result,
+    )
+    comparison = result.comparison
+    _write_json_line(
+        stdout=stdout,
+        payload={
+            "command": "compare",
+            "comparison_id": comparison.comparison_id,
+            "comparison_version": comparison.comparison_version,
+            "evidence_kind": comparison.evidence_kind.value,
+            "case_count": comparison.case_count,
+            "run_status": comparison.run_status.value,
+            "gate_status": comparison.gate_evaluation.status.value,
+            "blocking_failure_count": (comparison.gate_evaluation.blocking_failure_count),
+            "not_applicable_count": (comparison.gate_evaluation.not_applicable_count),
+            "improved_case_count": len(comparison.improved_case_ids),
+            "regressed_case_count": len(comparison.regressed_case_ids),
+            "comparison_content_hash": comparison.comparison_content_hash,
+            "baseline_manifest_content_hash": (result.pair_manifest.baseline_manifest_content_hash),
+            "candidate_manifest_content_hash": (
+                result.pair_manifest.candidate_manifest_content_hash
+            ),
+            "pair_manifest_content_hash": result.pair_manifest.content_hash,
+            "comparison_path": str(arguments.output),
+            "baseline_manifest_path": str(arguments.baseline_manifest_output),
+            "candidate_manifest_path": str(arguments.candidate_manifest_output),
+            "pair_manifest_path": str(arguments.pair_manifest_output),
+        },
+    )
+
+
+def _execute_decide_command(
+    *,
+    arguments: argparse.Namespace,
+    stdout: TextIO,
+) -> None:
+    decision = run_ticket_classification_prompt_decision(
+        comparison_path=arguments.comparison,
+        decision_template_path=arguments.decision_template,
+    )
+    write_ticket_classification_prompt_decision_run(
+        output=arguments.output,
+        decision=decision,
+    )
+    _write_json_line(
+        stdout=stdout,
+        payload={
+            "command": "decide",
+            "decision_id": decision.decision_id,
+            "decision_version": decision.decision_version,
+            "outcome": decision.outcome.value,
+            "run_status": decision.run_status.value,
+            "approved_for_runtime_adoption": (decision.review.approved_for_runtime_adoption),
+            "separate_runtime_adoption_required": (decision.separate_runtime_adoption_required),
+            "blocking_reason_count": len(decision.blocking_reasons),
+            "decision_content_hash": decision.decision_content_hash,
+            "comparison_content_hash": decision.comparison_content_hash,
+            "decision_path": str(arguments.output),
+        },
+    )
+
+
 def _validate_external_provider_permission(
     *,
     provider_name: LLMProviderName,
@@ -362,25 +612,34 @@ def _write_summary(
     report_path: Path,
     report: TicketClassificationEvaluationReport,
 ) -> None:
-    payload = {
-        "command": command,
-        "dataset_id": report.dataset_id,
-        "dataset_version": report.dataset_version,
-        "case_count": report.case_count,
-        "successful_prediction_count": (report.successful_prediction_count),
-        "failed_prediction_count": (report.failed_prediction_count),
-        "structured_label_exact_match_rate": str(
-            report.structured_label_exact_match.rate,
-        ),
-        "known_total_tokens": report.known_total_tokens,
-        "known_estimated_total_cost_usd": str(
-            report.known_estimated_total_cost_usd,
-        ),
-        "predictions_path": str(predictions_path),
-        "report_path": str(report_path),
-        "report_content_hash": (report.report_content_hash),
-    }
+    _write_json_line(
+        stdout=stdout,
+        payload={
+            "command": command,
+            "dataset_id": report.dataset_id,
+            "dataset_version": report.dataset_version,
+            "case_count": report.case_count,
+            "successful_prediction_count": (report.successful_prediction_count),
+            "failed_prediction_count": (report.failed_prediction_count),
+            "structured_label_exact_match_rate": str(
+                report.structured_label_exact_match.rate,
+            ),
+            "known_total_tokens": report.known_total_tokens,
+            "known_estimated_total_cost_usd": str(
+                report.known_estimated_total_cost_usd,
+            ),
+            "predictions_path": str(predictions_path),
+            "report_path": str(report_path),
+            "report_content_hash": (report.report_content_hash),
+        },
+    )
 
+
+def _write_json_line(
+    *,
+    stdout: TextIO,
+    payload: Mapping[str, object],
+) -> None:
     stdout.write(
         json.dumps(
             payload,
@@ -428,6 +687,24 @@ def _positive_integer(
         )
 
     return parsed_value
+
+
+def _aware_datetime(value: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "value must be an aware ISO-8601 datetime",
+        ) from error
+
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            "value must be an aware ISO-8601 datetime",
+        )
+
+    return parsed
 
 
 if __name__ == "__main__":
