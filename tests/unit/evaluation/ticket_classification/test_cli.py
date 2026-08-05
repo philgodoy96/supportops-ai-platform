@@ -480,7 +480,7 @@ async def test_unsupported_prompt_version_fails_without_overwrite(
             "--provider",
             "mock",
             "--prompt-version",
-            "2",
+            "3",
             "--dataset",
             str(dataset_path),
             "--predictions-output",

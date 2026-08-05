@@ -315,7 +315,7 @@ async def test_unsupported_prompt_version_fails_before_provider_call() -> None:
     try:
         with pytest.raises(
             PromptDefinitionNotFoundError,
-            match=("Unsupported prompt: ticket-classification version 2"),
+            match=("Unsupported prompt: ticket-classification version 3"),
         ):
             await _predictor(
                 provider=provider,
@@ -323,7 +323,7 @@ async def test_unsupported_prompt_version_fails_before_provider_call() -> None:
                 case=_case(),
                 dataset_id="ticket-classification-eval",
                 dataset_version=1,
-                prompt_version=2,
+                prompt_version=3,
             )
     finally:
         await provider.close()
