@@ -96,6 +96,15 @@ jobs:
       - name: Validate deterministic regression evidence
         run: uv run supportops-evaluate-regression score
 
+      - name: Validate grounded recommendation evaluation artifacts
+        run: uv run supportops-evaluate-grounded-recommendations validate
+
+      - name: Score grounded recommendation static evidence
+        run: uv run supportops-evaluate-grounded-recommendations score
+
+      - name: Aggregate grounded recommendation static RAGAS scores
+        run: uv run supportops-evaluate-grounded-recommendations score --ragas-scores evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl
+
       - name: Run unit tests
         run: uv run pytest -m "not integration"
 

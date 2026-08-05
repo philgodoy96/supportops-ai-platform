@@ -174,6 +174,28 @@ def test_score_with_ragas_scores_aggregates_static_scores(
     assert "scored_case_count=14" in stdout.getvalue()
 
 
+def test_score_with_ragas_scores_is_no_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PROJECT_ROOT)
+
+    def _deny_network(*_args: object, **_kwargs: object) -> None:
+        raise OSError("network access is forbidden during offline RAGAS aggregate")
+
+    monkeypatch.setattr(socket, "create_connection", _deny_network)
+
+    exit_code = run_cli(
+        [
+            "score",
+            "--ragas-scores",
+            str(DEFAULT_GROUNDED_RAGAS_SCORES_PATH),
+        ],
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+    assert exit_code == 0
+
+
 def test_validate_and_score_expose_no_provider_flags() -> None:
     parser = build_parser()
     validate_help = None
@@ -194,24 +216,50 @@ def test_validate_and_score_expose_no_provider_flags() -> None:
         assert "SUPPORTOPS_EVALUATION_OPENAI_API_KEY" not in help_text
 
 
-def test_run_without_acknowledgement_exits_4(tmp_path: Path) -> None:
+def test_run_without_acknowledgement_exits_4_before_adapter_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _refuse_adapter(**_kwargs: object) -> _FakeRagasAdapter:
+        raise AssertionError("adapter must not be constructed without acknowledgement")
+
+    monkeypatch.setattr(grounded_cli, "OpenAIRagasAdapter", _refuse_adapter)
     argv = _run_argv(tmp_path)
     argv.remove("--allow-external-provider")
+    stdout = StringIO()
     stderr = StringIO()
 
-    exit_code = run_cli(argv, stdout=StringIO(), stderr=stderr)
+    exit_code = run_cli(
+        argv,
+        stdout=stdout,
+        stderr=stderr,
+        environ={
+            "SUPPORTOPS_EVALUATION_OPENAI_API_KEY": "sk-must-not-be-read",
+            "SUPPORTOPS_OPENAI_API_KEY": "sk-fallback-must-not-be-used",
+        },
+    )
 
     assert exit_code == 4
     assert "allow-external-provider" in stderr.getvalue()
+    assert "sk-must-not-be-read" not in stdout.getvalue()
+    assert "sk-must-not-be-read" not in stderr.getvalue()
+    assert "sk-fallback-must-not-be-used" not in stdout.getvalue()
+    assert "sk-fallback-must-not-be-used" not in stderr.getvalue()
 
 
 def test_run_without_evaluation_api_key_fails_without_printing_secrets(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    def _refuse_adapter(**_kwargs: object) -> _FakeRagasAdapter:
+        raise AssertionError("adapter must not be constructed without evaluation API key")
+
+    monkeypatch.setattr(grounded_cli, "OpenAIRagasAdapter", _refuse_adapter)
+    stdout = StringIO()
     stderr = StringIO()
     exit_code = run_cli(
         _run_argv(tmp_path),
-        stdout=StringIO(),
+        stdout=stdout,
         stderr=stderr,
         environ={},
     )
@@ -219,7 +267,33 @@ def test_run_without_evaluation_api_key_fails_without_printing_secrets(
     assert exit_code == 3
     message = stderr.getvalue()
     assert "SUPPORTOPS_EVALUATION_OPENAI_API_KEY" in message
+    assert "sk-" not in stdout.getvalue()
     assert "sk-" not in message
+
+
+def test_run_ignores_supportops_openai_api_key_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-fallback-must-not-be-used"
+
+    def _refuse_adapter(**_kwargs: object) -> _FakeRagasAdapter:
+        raise AssertionError("adapter must not be constructed from fallback API key")
+
+    monkeypatch.setattr(grounded_cli, "OpenAIRagasAdapter", _refuse_adapter)
+    stdout = StringIO()
+    stderr = StringIO()
+    exit_code = run_cli(
+        _run_argv(tmp_path),
+        stdout=stdout,
+        stderr=stderr,
+        environ={"SUPPORTOPS_OPENAI_API_KEY": secret},
+    )
+
+    assert exit_code == 3
+    combined = stdout.getvalue() + stderr.getvalue()
+    assert "SUPPORTOPS_EVALUATION_OPENAI_API_KEY" in stderr.getvalue()
+    assert secret not in combined
 
 
 def test_unsupported_evaluator_provider_fails(tmp_path: Path) -> None:
@@ -239,34 +313,40 @@ def test_fake_backed_run_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    secret = "sk-test-evaluation-key"
     monkeypatch.setattr(
         grounded_cli,
         "OpenAIRagasAdapter",
         lambda **_kwargs: _FakeRagasAdapter(),
     )
     stdout = StringIO()
+    stderr = StringIO()
 
     exit_code = run_cli(
         _run_argv(tmp_path),
         stdout=stdout,
-        stderr=StringIO(),
-        environ={"SUPPORTOPS_EVALUATION_OPENAI_API_KEY": "test-key"},
+        stderr=stderr,
+        environ={"SUPPORTOPS_EVALUATION_OPENAI_API_KEY": secret},
     )
 
     assert exit_code == 0
     assert f"status={EvaluationRunStatus.COMPLETE.value}" in stdout.getvalue()
     assert (tmp_path / "artifacts" / "cli-run" / "manifest.json").exists()
+    assert secret not in stdout.getvalue()
+    assert secret not in stderr.getvalue()
 
 
 def test_same_model_warning_goes_to_stderr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    secret = "sk-same-model-secret"
     monkeypatch.setattr(
         grounded_cli,
         "OpenAIRagasAdapter",
         lambda **_kwargs: _FakeRagasAdapter(),
     )
+    stdout = StringIO()
     stderr = StringIO()
 
     exit_code = run_cli(
@@ -275,13 +355,26 @@ def test_same_model_warning_goes_to_stderr(
             system_model="shared-model",
             evaluator_model="shared-model",
         ),
-        stdout=StringIO(),
+        stdout=stdout,
         stderr=stderr,
-        environ={"SUPPORTOPS_EVALUATION_OPENAI_API_KEY": "test-key"},
+        environ={"SUPPORTOPS_EVALUATION_OPENAI_API_KEY": secret},
     )
 
     assert exit_code == 0
     assert "system model and evaluator model identities are equal" in stderr.getvalue()
+    assert secret not in stdout.getvalue()
+    assert secret not in stderr.getvalue()
+    assert "choices" not in stderr.getvalue()
+
+
+def test_usage_error_exits_2() -> None:
+    exit_code = run_cli(
+        ["run"],
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 2
 
 
 def test_malformed_artifact_exits_3(
