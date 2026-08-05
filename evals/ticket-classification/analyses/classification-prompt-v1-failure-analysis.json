@@ -1,0 +1,200 @@
+{
+    "analysis_id": "classification-prompt-v1-failure-analysis",
+    "analysis_version": 1,
+    "schema_version": "ticket-classification-failure-analysis-v1",
+    "dataset_id": "ticket-classification-eval",
+    "dataset_version": 1,
+    "dataset_content_hash": "a42445dff9ded6c5d7f73c3f2704cc065a445c06ebb1a1a4ad36fa46dcce984b",
+    "split_manifest_id": "ticket-classification-eval-splits",
+    "split_manifest_version": 1,
+    "split_manifest_content_hash": "5f78658a3bce4146a243b7fe316efd96db96bc464edefb99aa9722586f571d69",
+    "analyzed_split": "development",
+    "analyzed_case_ids": [
+      "account-access-password-reset-001",
+      "account-access-payroll-permission-002",
+      "service-incident-latency-004",
+      "billing-angry-low-impact-007",
+      "product-bug-export-failure-008",
+      "product-bug-cosmetic-alignment-009",
+      "how-to-audit-log-export-010",
+      "security-suspicious-login-013",
+      "feature-request-dark-mode-014",
+      "other-ambiguous-problem-017",
+      "billing-prompt-injection-018",
+      "product-bug-mixed-sentiment-022"
+    ],
+    "prompt_id": "ticket-classification",
+    "prompt_version": 1,
+    "prompt_content_hash": "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2",
+    "evidence_summary": {
+      "provider_observation_count": 0,
+      "static_fixture_observation_count": 0,
+      "dataset_design_hypothesis_count": 8
+    },
+    "observations": [
+      {
+        "failure_type": "category_confusion",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Ambiguous requests may collapse into an incorrect category.",
+        "description": "Development cases labeled as ambiguous or other require the classifier to avoid forcing an unsupported product category.",
+        "affected_case_ids": [
+          "other-ambiguous-problem-017"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "category_accuracy.rate"
+        ],
+        "safety_impact": "medium",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "The prompt can clarify when category evidence is insufficient without changing the dataset or output schema."
+      },
+      {
+        "failure_type": "intent_confusion",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Ambiguous requests may be assigned an unsupported intent.",
+        "description": "Sparse requests can make ask-question, report-problem, request-change, and other boundaries difficult to apply.",
+        "affected_case_ids": [
+          "other-ambiguous-problem-017"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "intent_accuracy.rate"
+        ],
+        "safety_impact": "medium",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "A clearer decision order can require direct evidence before selecting a specific intent."
+      },
+      {
+        "failure_type": "urgency_under_classification",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Operational impact may be under-classified.",
+        "description": "High-urgency development cases require impact and time sensitivity to outweigh neutral wording.",
+        "affected_case_ids": [
+          "account-access-payroll-permission-002",
+          "service-incident-latency-004",
+          "product-bug-export-failure-008",
+          "security-suspicious-login-013"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "urgency_accuracy.rate",
+          "high_urgency_recall.recall"
+        ],
+        "safety_impact": "high",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "Prompt guidance can prioritize business impact, scope, security exposure, and deadlines over emotional tone."
+      },
+      {
+        "failure_type": "urgency_over_classification",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Emotional language may inflate operational urgency.",
+        "description": "Strongly negative wording without blocked work or material impact should not become high or critical urgency.",
+        "affected_case_ids": [
+          "billing-angry-low-impact-007"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "urgency_accuracy.rate"
+        ],
+        "safety_impact": "medium",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "The prompt can separate sentiment intensity from operational impact without changing the schema."
+      },
+      {
+        "failure_type": "sentiment_mismatch",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Mixed sentiment may be reduced to one dominant polarity.",
+        "description": "Cases containing both positive product feedback and negative operational impact require the mixed sentiment label.",
+        "affected_case_ids": [
+          "product-bug-mixed-sentiment-022"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "sentiment_accuracy.rate"
+        ],
+        "safety_impact": "low",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "Explicit mixed-sentiment criteria are an appropriate prompt-only clarification."
+      },
+      {
+        "failure_type": "human_review_false_negative",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Sensitive or ambiguous cases may miss required human review.",
+        "description": "Development cases involving sensitive permissions, suspicious activity, or insufficient detail require conservative review routing.",
+        "affected_case_ids": [
+          "account-access-payroll-permission-002",
+          "security-suspicious-login-013",
+          "other-ambiguous-problem-017"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "human_review_accuracy.rate",
+          "human_review.false_negative_count",
+          "high_risk_human_review_recall.recall"
+        ],
+        "safety_impact": "critical",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "Human-review rules can be strengthened without changing the classification contract."
+      },
+      {
+        "failure_type": "cross_label_interaction",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Untrusted instructions may override multiple label decisions.",
+        "description": "Prompt-injection text inside ticket content can attempt to control category, urgency, or hidden-instruction behavior.",
+        "affected_case_ids": [
+          "billing-prompt-injection-018"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "category_accuracy.rate",
+          "urgency_accuracy.rate",
+          "human_review_accuracy.rate"
+        ],
+        "safety_impact": "high",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "The prompt should preserve the existing untrusted-input boundary and explicitly reject ticket-authored classification commands."
+      },
+      {
+        "failure_type": "ambiguous_input",
+        "evidence_kind": "dataset_design_hypothesis",
+        "title": "Insufficient detail may create false confidence.",
+        "description": "An underspecified ticket should remain in the broad other category and require human review instead of receiving invented specificity.",
+        "affected_case_ids": [
+          "other-ambiguous-problem-017"
+        ],
+        "metric_impacts": [
+          "structured_label_exact_match.rate",
+          "category_accuracy.rate",
+          "intent_accuracy.rate",
+          "human_review_accuracy.rate"
+        ],
+        "safety_impact": "high",
+        "prompt_only_remediation_appropriate": true,
+        "dataset_change_required": false,
+        "schema_change_required": false,
+        "rationale": "Prompt instructions can define conservative behavior for missing impact and feature information."
+      }
+    ],
+    "prompt_revision_constraints": [
+      "Use development-split evidence only while drafting prompt version 2.",
+      "Keep the ticket-classification-v1 structured output schema unchanged.",
+      "Do not request, persist, or evaluate hidden chain-of-thought.",
+      "Do not encode case IDs or exact dataset wording into the prompt.",
+      "Keep runtime prompt version 1 pinned until separate adoption approval."
+    ],
+    "analysis_content_hash": "18f485339df2f4a47233f5475850ea9d323a28a76d31bc3ea78f6822bd8c695c"
+  }
