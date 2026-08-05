@@ -59,6 +59,9 @@ dev = [
     "pytest-asyncio==1.4.0",
     "ruff==0.16.0",
 ]
+evaluation = [
+    "ragas==0.4.3",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/supportops"]
