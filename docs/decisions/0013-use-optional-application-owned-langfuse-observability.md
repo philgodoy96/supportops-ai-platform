@@ -351,27 +351,46 @@ Langfuse is not added to the local Docker Compose stack.
 
 The application does not own Langfuse server deployment or migrations.
 
+### Post-implementation status
+
+The repository now implements the following evaluation and prompt-governance capabilities that were previously outside the Langfuse observability boundary:
+
+- repository-owned deterministic evaluation;
+- grounded recommendation evaluation;
+- RAGAS as an evaluation-only component;
+- evidence-driven prompt iteration;
+- immutable `ticket-classification` prompt version 2 as an evaluation candidate;
+- static paired prompt comparison;
+- safety-first decision artifacts;
+- deterministic CI coverage for evaluation contracts and artifact integrity.
+
+These capabilities do not make Langfuse the evaluation authority. Evaluation datasets, prompt definitions, provenance, comparison artifacts, and release decisions remain Git-owned. Langfuse remains optional derived telemetry. No Langfuse availability, dataset, experiment, evaluator, or score is required to reproduce the committed prompt decision. The prompt version 2 decision did not authorize runtime adoption.
+
 ### Deferred capabilities
 
-Slice 7 implements the observability foundation, Langfuse and no-op adapters, process lifecycle, privacy policy, provider observations, embedding observations, retrieval observations, indexing traces, AgentRun traces, worker-attempt observations, workflow and graph-node observations, tool observations, approval lifecycle events, escalation and recommendation outcome events, attempt-end flush policy, and trace-shape plus privacy tests.
+This decision intentionally keeps the following outside the current boundary:
 
-This decision intentionally defers the following Slice 8 responsibilities:
-
-- Langfuse evaluation workflows;
-- RAGAS;
-- prompt iteration based on evaluation results;
-- prompt version 2;
 - production feedback ingestion;
-- evaluation dashboards and quality gates;
+- scheduled or online evaluation;
+- automatic prompt generation or optimization;
+- automatic prompt promotion;
+- production A/B testing;
 - Langfuse Prompt Management;
 - remote prompt fetching;
-- Langfuse datasets or experiments;
-- Langfuse evaluators or scores;
+- Langfuse datasets or experiments as operational workflows;
+- Langfuse evaluators or scores as release authority;
 - authenticated user attribution;
 - general OpenTelemetry instrumentation;
 - FastAPI, SQLAlchemy, or HTTP client auto-instrumentation;
 - Prometheus, Grafana, Tempo, Loki, or OTLP collectors;
-- invoice reconciliation or customer cost allocation.
+- invoice reconciliation or customer cost allocation;
+- external evaluation dashboards as operational workflows;
+- canonical provider-backed prompt adoption evidence;
+- human-reviewed runtime adoption of prompt version 2.
+
+Repository-owned release gates are implemented and remain Git-owned. External dashboards are not required for those gates.
+
+Langfuse datasets, experiments, evaluators, and scores may be considered future optional operational enhancements, but they will not replace repository-owned evaluation authority.
 
 External Langfuse smoke validation may remain an opt-in follow-up outside the normal unit suite.
 
@@ -442,4 +461,4 @@ Rejected because self-hosting is a deployment decision rather than an applicatio
 
 ### Introduce a general OpenTelemetry platform
 
-Rejected because Slice 7 focuses on manual AI workflow observability. General application and infrastructure observability remain separate future concerns.
+Rejected because this decision focuses on manual AI workflow observability. General application and infrastructure observability remain separate future concerns.
