@@ -73,6 +73,42 @@ Langfuse remains an optional observability projection. It is not the evaluation 
 
 Automatic prompt generation, automatic optimization, automatic promotion, production feedback ingestion, scheduled evaluation, and production A/B testing are intentionally deferred.
 
+## Implementation outcome
+
+Immutable `ticket-classification` prompt version 2 was created from documented development failure analysis and registered as an explicit offline evaluation candidate. Prompt versions 1 and 2 were compared through committed static paired prediction fixtures. The comparison exercises deterministic comparison, safety-gate, provenance, and decision semantics.
+
+The committed decision outcome for prompt version 2 is:
+
+```text
+outcome: inconclusive
+run_status: incomplete
+approved_for_runtime_adoption: false
+separate_runtime_adoption_required: true
+runtime_prompt_version: 1
+candidate_prompt_version: 2
+```
+
+Prompt version 1 remains the runtime default. No runtime configuration was changed. No provider-backed model superiority is claimed. Static evidence cannot authorize runtime adoption. Canonical provider-backed evidence and human review remain required before any future adoption.
+
+The intended adoption sequence remains:
+
+```text
+evaluation evidence
+→ explicit decision artifact
+→ separate runtime adoption decision
+→ production rollout
+```
+
+The repository completed the first two stages for prompt version 2 and intentionally did not execute the final two stages. Rejection and inconclusive outcomes are valid release-governance results, not incomplete engineering implementation.
+
+Committed static evidence for this outcome includes:
+
+- prompt definition: [`src/supportops/ai/prompts/ticket_classification_v2.py`](../../src/supportops/ai/prompts/ticket_classification_v2.py)
+- paired predictions: [`evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl`](../../evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl) and [`evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl`](../../evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl)
+- comparison artifact: [`evals/ticket-classification/comparisons/ticket-classification-prompt-v1-v2.static.json`](../../evals/ticket-classification/comparisons/ticket-classification-prompt-v1-v2.static.json)
+- decision artifact: [`evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json`](../../evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json)
+- classification evaluation documentation: [`docs/architecture/classification-evaluation.md`](../architecture/classification-evaluation.md)
+
 ## Consequences
 
 ### Positive
