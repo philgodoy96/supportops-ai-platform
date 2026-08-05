@@ -69,6 +69,8 @@ def test_rubric_contains_required_dimensions() -> None:
 
     observed = {dimension.dimension for dimension in rubric.dimensions}
 
+    assert len(rubric.dimensions) == 7
+    assert len(EXPECTED_DIMENSIONS) == 7
     assert observed == EXPECTED_DIMENSIONS
 
 

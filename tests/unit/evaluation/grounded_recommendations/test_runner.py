@@ -206,6 +206,25 @@ def test_score_is_no_network(
     assert result.ragas_report is None
 
 
+def test_score_with_ragas_scores_is_no_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PROJECT_ROOT)
+
+    def _deny_network(*_args: object, **_kwargs: object) -> None:
+        raise OSError("network access is forbidden during offline RAGAS aggregate")
+
+    monkeypatch.setattr(socket, "create_connection", _deny_network)
+
+    result = score_grounded_recommendation_artifacts(
+        dataset_path=DEFAULT_GROUNDED_DATASET_PATH,
+        predictions_path=DEFAULT_GROUNDED_PREDICTIONS_PATH,
+        ragas_scores_path=DEFAULT_GROUNDED_RAGAS_SCORES_PATH,
+    )
+    assert result.ragas_report is not None
+    assert result.ragas_report.scored_case_count == 14
+
+
 def test_score_writes_deterministic_report_atomically(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -223,6 +242,8 @@ def test_score_writes_deterministic_report_atomically(
     payload = json.loads(result.deterministic_report_path.read_text(encoding="utf-8"))
     assert payload["case_count"] == 14
     assert payload["report_content_hash"] == (result.deterministic_report.report_content_hash)
+    leftover_tmp = list(output_dir.glob("*.tmp"))
+    assert leftover_tmp == []
 
 
 def test_score_writes_offline_ragas_report_when_supplied(
@@ -244,6 +265,8 @@ def test_score_writes_offline_ragas_report_when_supplied(
     payload = json.loads(result.ragas_report_path.read_text(encoding="utf-8"))
     assert payload["scored_case_count"] == 14
     assert payload["report_content_hash"] == result.ragas_report.report_content_hash
+    leftover_tmp = list(output_dir.glob("*.tmp"))
+    assert leftover_tmp == []
 
 
 def test_run_refuses_without_acknowledgement_before_adapter_use(
@@ -274,6 +297,23 @@ def test_run_rejects_committed_evals_output_directory(
                 PROJECT_ROOT,
                 output_dir=output_dir,
             )
+        )
+
+
+def test_score_rejects_committed_evals_output_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PROJECT_ROOT)
+    output_dir = PROJECT_ROOT / "evals" / "grounded-recommendations" / "generated"
+
+    with pytest.raises(
+        GroundedRecommendationRunnerError,
+        match="evals/grounded-recommendations",
+    ):
+        score_grounded_recommendation_artifacts(
+            dataset_path=DEFAULT_GROUNDED_DATASET_PATH,
+            predictions_path=DEFAULT_GROUNDED_PREDICTIONS_PATH,
+            output_dir=output_dir,
         )
 
 
@@ -382,6 +422,8 @@ def test_complete_fake_evaluator_run_yields_complete_manifest(
     assert result.manifest.schema_version == "grounded-recommendations-ragas-run-v1"
     assert result.manifest.ragas_version == "0.4.3"
     assert result.manifest.evaluator_embedding_model == "text-embedding-3-small"
+    leftover_tmp = list(result.paths.manifest_path.parent.glob("*.tmp"))
+    assert leftover_tmp == []
 
 
 def test_same_model_identities_remain_allowed(tmp_path: Path) -> None:
@@ -435,6 +477,24 @@ def test_failure_before_write_preserves_existing_files(tmp_path: Path) -> None:
         )
 
     assert sentinel.read_bytes() == original
+
+
+def test_validate_failure_preserves_existing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(PROJECT_ROOT)
+    output_path = tmp_path / "validation-summary.json"
+    original = b'{"preserved":true}\n'
+    output_path.write_bytes(original)
+
+    with pytest.raises(FileNotFoundError):
+        validate_grounded_recommendation_artifacts(
+            dataset_path=tmp_path / "missing-dataset.jsonl",
+            output_path=output_path,
+        )
+
+    assert output_path.read_bytes() == original
 
 
 def test_score_failure_preserves_existing_destination(
