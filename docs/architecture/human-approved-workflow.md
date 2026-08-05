@@ -311,6 +311,38 @@ same terminal status
 
 `decision_request_id` and correlation ID are audit metadata, not replay keys.
 
+## Deterministic approval regression
+
+Deterministic human-approval regression is implemented against an immutable synthetic dataset and a committed static approval-outcome fixture.
+
+Within the committed synthetic regression corpus:
+
+```text
+evals/human-approval/datasets/human-approval-eval-v1.jsonl
+evals/human-approval/predictions/human-approval-eval-v1.static.jsonl
+```
+
+The corpus contains 14 deterministic regression cases. Scoring consumes typed static outcomes and evaluates exact safety invariants:
+
+- approval-required accuracy;
+- unauthorized sensitive execution rate remains zero within the corpus;
+- approved execution success;
+- rejected non-execution;
+- expired non-execution;
+- approval decision idempotency;
+- resume success;
+- sensitive-action idempotency;
+- checkpoint match;
+- grant match;
+- retry-budget preservation;
+- duplicate escalation prevention;
+- finalization;
+- latency, token, and cost aggregates.
+
+Scoring uses static outcomes and does not mutate approvals, checkpoints, or sensitive tools. It performs no live approval services, API execution, or sensitive tool execution.
+
+Repository regression aggregation and release-gate profile `human-approval-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
+
 ## Intentional Scope Boundaries
 
 This workflow does not include:
@@ -323,7 +355,8 @@ This workflow does not include:
 - notifications;
 - mutable ticket escalation state;
 - prompt version 2;
-- evaluation datasets and scoring.
+- grounded recommendation model-based evaluation;
+- RAGAS.
 
 Grant inspection intentionally remains internal. Manual resume endpoints remain unavailable to preserve worker ownership. Frontend operator workflows can be introduced without changing domain transitions. Authentication and RBAC remain separate from workflow continuity and grant authorization.
 

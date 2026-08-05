@@ -592,6 +592,36 @@ They prove:
 
 The default automated suite does not call OpenAI.
 
+## Deterministic evaluation
+
+Deterministic semantic-retrieval regression is implemented against an immutable synthetic dataset and a committed static prediction fixture.
+
+Within the committed synthetic regression corpus:
+
+```text
+evals/semantic-retrieval/datasets/semantic-retrieval-eval-v1.jsonl
+evals/semantic-retrieval/predictions/semantic-retrieval-eval-v1.static.jsonl
+```
+
+The corpus contains 10 deterministic regression cases. Scoring consumes typed prediction envelopes and computes ranking and isolation metrics without live embeddings or Qdrant execution.
+
+Deterministic metrics include:
+
+- document hit rate at k;
+- chunk hit rate at k;
+- mean reciprocal rank;
+- recall at k;
+- no-result accuracy;
+- workspace isolation rate;
+- citation resolution rate;
+- average latency;
+- average query embedding tokens;
+- estimated query cost.
+
+Duplicate retrieved chunks count once. Cosine similarity score is ranking evidence only and is not treated as calibrated confidence.
+
+Repository regression aggregation and release-gate profile `semantic-retrieval-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
+
 ## Intentional scope boundaries
 
 Semantic retrieval currently does not implement:
@@ -610,8 +640,7 @@ Semantic retrieval currently does not implement:
 - access-control policy evaluation;
 - retrieval result persistence;
 - retrieval usage or cost persistence;
-- retrieval traces in Langfuse;
-- retrieval quality datasets;
+- production relevance evaluation against live traffic;
 - RAGAS;
 - grounded-generation evaluation;
 - LangGraph orchestration;

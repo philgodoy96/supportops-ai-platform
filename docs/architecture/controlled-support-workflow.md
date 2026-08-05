@@ -681,6 +681,37 @@ The workflow is covered through:
 
 The default automated suite uses deterministic mock providers and does not require paid provider calls.
 
+## Deterministic workflow regression
+
+Deterministic controlled-support regression is implemented against an immutable synthetic dataset and a committed static execution-trace fixture.
+
+Within the committed synthetic regression corpus:
+
+```text
+evals/controlled-support/datasets/controlled-support-eval-v1.jsonl
+evals/controlled-support/predictions/controlled-support-eval-v1.static.jsonl
+```
+
+The corpus contains 14 deterministic regression cases. Scoring consumes typed static traces and evaluates:
+
+- expected outcomes;
+- required tool calls;
+- forbidden tools;
+- exact tool-sequence acceptance;
+- repeated tool acceptance;
+- step-limit behavior;
+- recommended actions;
+- human-review recommendation flags;
+- citation validity;
+- grounded abstention;
+- workspace isolation;
+- successful completion;
+- tool-call, LLM invocation, latency, token, and cost aggregates.
+
+Expected failures remain explicit and require exact error codes. Normal CI scores these committed fixtures through `supportops-evaluate-regression score` and does not execute LangGraph, tools, providers, PostgreSQL, Qdrant, or Langfuse for the check. Model-based recommendation quality evaluation remains deferred.
+
+Repository regression aggregation and release-gate profile `controlled-support-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
+
 ## Scaling considerations
 
 The current modular-monolith design can scale through multiple worker processes because claim and recovery use PostgreSQL row locks with `SKIP LOCKED`.
@@ -710,7 +741,7 @@ The Slice 5 workflow intentionally defers:
 - checkpoint inspection endpoints;
 - raw graph-state exposure;
 - RAGAS evaluation;
-- recommendation-quality datasets;
+- grounded recommendation model-based evaluation;
 - prompt-version comparison;
 - Langfuse and Phoenix integration;
 - operational dashboards;
@@ -718,7 +749,7 @@ The Slice 5 workflow intentionally defers:
 
 Human-in-the-loop approval and write-capable actions belong to the next workflow boundary.
 
-Evaluation and observability capabilities will consume the durable provenance established here rather than changing workflow ownership.
+Deterministic controlled-support regression already consumes durable provenance contracts through committed static fixtures. Observability capabilities continue to remain separate from evaluation ownership.
 
 ## Related documentation
 
@@ -726,5 +757,6 @@ Evaluation and observability capabilities will consume the durable provenance es
 - [`runtime-topology.md`](runtime-topology.md)
 - [`agent-run-scheduling.md`](agent-run-scheduling.md)
 - [`semantic-knowledge-retrieval.md`](semantic-knowledge-retrieval.md)
+- [`evaluation-and-regression.md`](evaluation-and-regression.md)
 - [`../decisions/0010-separate-agent-run-and-langgraph-durability.md`](../decisions/0010-separate-agent-run-and-langgraph-durability.md)
 - [`../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](../decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md)
