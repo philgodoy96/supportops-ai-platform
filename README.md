@@ -1,879 +1,160 @@
 # SupportOps AI Platform
 
-SupportOps AI Platform is a production-minded backend and AI systems engineering project focused on reliable support operations, controlled AI orchestration, retrieval quality, human approval, observability, and evaluation.
+A production-minded support operations backend combining durable workflow execution, controlled LLM orchestration, retrieval, human approval, observability, and evidence-driven evaluation.
 
-The platform is designed as a portfolio-grade engineering system rather than a tutorial chatbot. Its architecture emphasizes clear boundaries, operational reliability, explicit trade-offs, testability, and incremental delivery.
+Release candidate for the defined engineering scope. The implemented system includes durable ticket processing, controlled AI workflows, retrieval, human approval, observability, deterministic evaluation, and prompt-release governance. Prompt version 2 remains an evaluated but non-adopted candidate after an inconclusive static comparison.
 
-## Project status
+## Architecture at a glance
 
-The repository foundation, Slice 1 workspace and ticket API, durable AgentRun scheduling, the PostgreSQL-backed worker, workspace-scoped AgentRun inspection, the application-owned LLM Gateway, durable structured ticket classification, durable logical invocation and accepted classification persistence, workspace-scoped classification and logical invocation inspection, offline deterministic classification evaluation with repository-owned evaluation contracts, typed prediction envelopes, canonical hashing, atomic artifact writes, immutable ticket-classification dataset version 1, versioned split manifests, explicit evaluation prompt-version selection, immutable ticket-classification prompt versions 1 and 2, development-only failure analysis, static paired prompt prediction fixtures, paired v1-versus-v2 comparison, paired release-gate evaluation, inconclusive static decision artifacts, EvaluationManifest provenance, no-network analyze / compare / decide commands, deterministic safety and reliability metrics, and standalone classification release-gate evaluation, multi-domain deterministic regression for semantic retrieval, controlled support, and human approval with committed synthetic datasets and static prediction fixtures, repository-level scoring through `supportops-evaluate-regression score`, grounded recommendation evaluation with committed synthetic fixtures, deterministic complementary metrics, normalized static RAGAS score artifacts, offline RAGAS aggregation, an evaluation-only RAGAS dependency boundary, an explicit external RAGAS runner, and a committed human review rubric, workspace-scoped immutable knowledge-document versioning, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, the controlled support workflow with LangGraph orchestration, read-only tools, recommendation persistence, controlled support inspection, human-approved interrupt and resume with approval and escalation APIs, and the optional application-owned AI observability foundation with default no-op mode, optional Langfuse adapter, provider and retrieval instrumentation, and durable workflow tracing are implemented.
-
-The current platform includes:
-
-- reproducible Python dependency management with `uv`;
-- a Python 3.12 `src` package layout;
-- validated environment-based configuration;
-- structured JSON logging with HTTP request traceability;
-- a FastAPI application factory and explicit lifecycle management;
-- a separate `supportops-worker` process for AgentRun execution;
-- local PostgreSQL and Qdrant services through Docker Compose;
-- async SQLAlchemy and Qdrant client lifecycle foundations;
-- liveness and readiness endpoints;
-- bounded and sanitized infrastructure health checks;
-- persistence-independent Workspace and Ticket domain entities;
-- SQLAlchemy persistence records with explicit domain mapping;
-- PostgreSQL `workspaces` and `tickets` tables;
-- workspace slug uniqueness;
-- workspace-scoped ticket external-reference uniqueness;
-- workspace-scoped ticket repository contracts;
-- async PostgreSQL repository implementations;
-- reversible Alembic migrations for workspace, ticket, AgentRun, invocation, and classification tables;
-- an application-owned transaction adapter;
-- workspace creation and retrieval API;
-- workspace-scoped ticket intake;
-- atomic Ticket and initial AgentRun persistence;
-- configured `controlled-support-v1` scheduling for newly accepted tickets as the local default ticket-processing workflow;
-- exact registered workflow versions `deterministic-baseline-v1`, `ticket-classification-v1`, and `controlled-support-v1`;
-- durable AgentRun and AgentRunAttempt persistence;
-- PostgreSQL claiming with `FOR UPDATE SKIP LOCKED`;
-- attempt history, leases, and lease-token fencing;
-- bounded retries and expired lease recovery;
-- exact versioned workflow executor registry;
-- deterministic baseline, classification, and controlled-support workflow execution outside database transactions;
-- LangGraph bounded orchestration inside AgentRun with PostgreSQL-backed checkpoint resume;
-- process-scoped worker checkpoint, embedding, and Qdrant resources for controlled-support-v1;
-- read-only controlled tools `search_knowledge` and `lookup_service_status`;
-- durable `AgentToolCall` audits with post-commit/pre-checkpoint recovery;
-- authoritative PostgreSQL reconstruction of knowledge observations;
-- durable `SupportRecommendation` and `SupportRecommendationCitation` records;
-- controlled support inspection endpoint over persisted business records;
-- attempt-scoped tool and invocation ordering;
-- historical estimated-cost aggregation from persisted invocations;
-- exact Alembic exclusion of framework-owned LangGraph checkpoint tables;
-- process-scoped mock or OpenAI worker provider;
-- Structured Outputs classification through the LLM Gateway;
-- durable `LLMInvocation` history;
-- durable `TicketClassification` records;
-- lease-fenced classification persistence;
-- token usage and estimated-cost provenance;
-- idempotent recovery without another provider call after classification commit;
-- cooperative worker shutdown with structured operational logs;
-- database-enforced workspace and ticket ownership for AgentRun records;
-- duplicate initial scheduling prevention;
-- workspace-scoped AgentRun inspection;
-- workspace-scoped AgentRunAttempt history inspection;
-- workspace-scoped classification detail and ticket classification history inspection;
-- optional minimal accepted-classification reference on AgentRun detail;
-- AgentRun-scoped logical invocation inspection;
-- safe operational AgentRun, classification, and invocation metadata without lease or execution fencing identifiers;
-- tenant-safe `404` behavior for missing and cross-workspace AgentRuns, classifications, and invocation histories;
-- workspace-scoped ticket retrieval and listing;
-- versioned `/api/v1` business routes;
-- stable expected-error responses;
-- opaque cursor pagination;
-- request and correlation identifier persistence;
-- cross-workspace isolation behavior;
-- application services with command and query use cases;
-- application-owned provider-independent LLM Gateway contracts;
-- a deterministic mock LLM provider;
-- an OpenAI Responses API provider;
-- prompt `ticket-classification` versions 1 and 2 with deterministic prompt hashes;
-- normalized provider failures and bounded repair;
-- token usage mapping and versioned estimated-cost calculation;
-- validated LLM runtime settings;
-- a versioned synthetic classification dataset;
-- repository-owned evaluation manifest contracts;
-- typed prediction envelopes;
-- deterministic canonical serialization and SHA-256 hashing;
-- atomic evaluation artifact writes;
-- a versioned sidecar split manifest with development, holdout, and safety-gate allocation;
-- explicit evaluation prompt-version selection with no implicit latest selection;
-- development-only classification failure analysis;
-- static paired v1/v2 classification prediction fixtures;
-- paired classification comparison and candidate release-gate evaluation;
-- safety-first prompt decision artifacts with static inconclusive outcome;
-- no-network classification `analyze`, `compare`, and `decide` commands;
-- a deterministic classification evaluator with structured-output validity, invalid-output rate, urgency recall, high-risk human-review recall, latency, and token aggregates;
-- standalone classification release-gate evaluation with safety, quality, reliability, and efficiency categories;
-- offline scoring of prediction artifacts;
-- an opt-in external-provider evaluation CLI;
-- canonical dataset, prediction, and report provenance;
-- immutable semantic-retrieval, controlled-support, and human-approval synthetic datasets;
-- committed static prediction fixtures for those three domains;
-- deterministic multi-domain regression metrics and domain release-gate profiles;
-- repository-level deterministic regression scoring through `supportops-evaluate-regression score`;
-- grounded recommendation evaluation with committed synthetic fixtures and deterministic complementary metrics;
-- normalized static RAGAS score artifacts and offline RAGAS aggregation;
-- `ragas==0.4.3` isolated in the `evaluation` dependency group;
-- `supportops-evaluate-grounded-recommendations` validate, score, and acknowledged external run commands;
-- a committed grounded recommendation human review rubric;
-- classification inspection integration coverage;
-- repository, application, worker, AI, evaluation, and API tests;
-- Ruff, mypy, and pytest quality gates;
-- a reproducible application Docker image;
-- GitHub Actions continuous integration;
-- professional architecture and development documentation;
-- workspace-scoped knowledge documents with optional workspace-local external references;
-- immutable plain-text and Markdown document versions;
-- deterministic source normalization and SHA-256 content hashing;
-- PostgreSQL-backed authoritative document, version, and chunk records;
-- concurrency-safe document version allocation under a document row lock;
-- database-enforced duplicate-content rejection within one document;
-- explicit `pending`, `failed`, and `ready` version states;
-- explicit activation that permits only ready versions;
-- opaque cursor pagination for document and version listings;
-- source content exposure only through the workspace-scoped version detail route;
-- cross-workspace document and version access that resolves as `404`;
-- reversible migrations and concurrency-sensitive integration coverage for the knowledge-document domain;
-- deterministic markdown-token chunking with `cl100k_base` tokenization;
-- application-owned embedding contracts with mock and OpenAI providers;
-- versioned embedding usage and estimated-cost provenance;
-- Qdrant collection bootstrap, compatibility validation, and deterministic point upsert;
-- explicit `supportops-index-knowledge` indexing CLI;
-- indexing idempotency, partial-projection recovery, and ready-state verification;
-- unit and integration coverage for chunking, embeddings, vector store, and indexing orchestration;
-- active-version semantic knowledge retrieval through a workspace-scoped search API;
-- query embedding composition with the process-scoped API embedding provider;
-- exact Qdrant active-target filtering by workspace and document/version pairs;
-- authoritative PostgreSQL hydration of candidate chunk content and token counts;
-- stable citation metadata for document, version, and chunk provenance;
-- workspace isolation and stale-projection discard coverage in retrieval tests;
-- process-scoped API embedding provider and immutable retrieval profile lifecycle;
-- application-owned AI observability abstraction with default no-op mode;
-- optional Langfuse adapter behind the application-owned boundary;
-- deterministic AgentRun logical traces re-entered across attempts, retries, pause, decision, and resume;
-- one `worker-attempt` observation per AgentRunAttempt;
-- controlled-support and human-approved workflow observations;
-- graph-node observations for LangGraph stages;
-- LLM provider request observations at the application-owned gateway boundary;
-- separate initial and repair generation observations;
-- tool-decision provider observations for controlled and human-approved flows;
-- embedding provider observations through an application-owned wrapper;
-- semantic retrieval observations with nested query-embedding observations;
-- deterministic knowledge-indexing traces with nested stage and embedding observations;
-- actual tool-execution observations;
-- approval lifecycle events without open spans during human waiting;
-- escalation and recommendation outcome events;
-- opt-in attempt-end flush after finalized AgentRun attempts;
-- privacy-aware metadata-only default capture with redacted-content opt-in;
-- fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
-
-Workspace scoping is a data ownership boundary. It is not authentication or authorization, and it is not authenticated tenant isolation.
-
-Ticket acceptance and asynchronous processing success are separate outcomes. Ticket intake schedules the configured workflow version, with local default `controlled-support-v1`. Ticket status remains `open`. AgentRun status reports workflow execution. An accepted `TicketClassification` records the model interpretation and does not mutate Ticket status. The controlled workflow may execute read-only tools and persist a support recommendation without mutating the ticket or executing write-capable actions. The deterministic baseline and direct classification workflows remain registered for historical or explicitly scheduled runs.
-
-Inspection endpoints report current persisted AgentRun, classification, logical invocation, tool-call, recommendation, and controlled-support aggregate state. They do not guarantee future completion, and they do not mutate retries, leases, or lifecycle transitions. Inspection is read-only and does not deserialize LangGraph checkpoint state. Evaluation measures the same prompt and schema boundary offline through repository-owned artifacts and does not write to PostgreSQL or Qdrant. Multi-domain deterministic regression scores committed static fixtures for semantic retrieval, controlled support, and human approval without executing runtime services. Grounded recommendation evaluation validates and scores committed fixtures offline, and may evaluate existing predictions through an acknowledged external RAGAS run without executing the controlled workflow. Runtime classification remains independently pinned; evaluation prompt selection does not change the production default. Standalone release-gate reports cannot authorize prompt promotion. Static paired comparison and the committed inconclusive decision cannot approve runtime adoption. Changing the runtime prompt pin remains a separate governed repository change. Standalone multi-domain regression without paired quality and efficiency baselines produces aggregate status `incomplete`, which is valid deterministic evidence. Slice 7 observability is implemented end to end for provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation telemetry. PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry for operational debugging and is not the evaluation source of truth. Git-owned evaluation artifacts remain the evaluation authority. Generated external evaluation artifacts under `artifacts/` are run-specific evidence.
-
-## Engineering goals
-
-The project is designed to demonstrate:
-
-- production-minded backend architecture;
-- explicit domain and infrastructure boundaries;
-- reliable asynchronous processing;
-- controlled LLM orchestration;
-- retrieval-augmented generation over internal runbooks;
-- human approval for sensitive actions;
-- structured AI observability;
-- token and cost accountability;
-- retrieval and generation evaluation;
-- professional testing, documentation, and Git practices.
-
-## Architecture
-
-The platform follows an API-first modular monolith architecture with separate deployable processes.
-
-The FastAPI process and the PostgreSQL worker process share:
-
-- the same Python package;
-- the same application services;
-- the same domain model;
-- the same PostgreSQL database;
-- the same infrastructure adapters where each process requires them.
-
-The API owns HTTP acceptance, transactional AgentRun scheduling, semantic knowledge retrieval, and controlled support inspection. For public retrieval, the API process owns Qdrant client resources and a process-scoped embedding provider with an immutable retrieval profile. The worker owns recovery, claim, execution, fenced outcome persistence, and the process-scoped LLM, checkpoint, embedding, and Qdrant resources required by `controlled-support-v1`. PostgreSQL is the durable work queue and transactional source of truth for business records, and it also stores framework-owned LangGraph checkpoint tables. The indexing CLI remains a separate one-shot process.
-
-PostgreSQL owns source content, authoritative chunks, indexing status, immutable index profile, active-version selection, embedding usage, estimated cost, failure provenance, retrieval evidence content, tool audits, recommendations, and citations. LangGraph checkpoint schema remains framework-owned and is excluded from application Alembic ownership. Qdrant owns only the rebuildable vector projection used for candidate search by both public retrieval and controlled workflow knowledge search. Retrieval data must remain reproducible from authoritative source content rather than becoming an independent system of record.
-
-Delivery semantics are at-least-once execution. Lease-token fencing prevents stale workers from overwriting newer ownership. Exactly-once execution is not claimed. Future executors and tools must make side effects idempotent or otherwise safely fenced.
-
-The current runtime foundation uses:
-
-- Python 3.12;
-- FastAPI;
-- Uvicorn;
-- Pydantic v2;
-- pydantic-settings;
-- SQLAlchemy 2.x with async support;
-- asyncpg;
-- Alembic;
-- PostgreSQL;
-- Qdrant;
-- OpenAI Python SDK;
-- LangGraph;
-- Docker Compose;
-- pytest;
-- pytest-asyncio;
-- HTTPX;
-- Ruff;
-- mypy;
-- uv;
-- tiktoken;
-- GitHub Actions.
-
-Detailed architecture documentation is maintained under [`docs/architecture`](docs/architecture).
-
-Accepted architectural decisions are recorded under [`docs/decisions`](docs/decisions).
-
-## Current foundation capabilities
-
-### Application runtime
-
-The repository provides:
-
-- explicit FastAPI application construction;
-- OpenAPI project metadata;
-- process-owned PostgreSQL and Qdrant resources;
-- process-scoped embedding provider and immutable retrieval profile for semantic search;
-- process-scoped worker LLM, checkpoint, embedding, and Qdrant composition for controlled-support-v1;
-- process-scoped observability client composition for API, worker, and indexing CLI;
-- centralized startup and shutdown lifecycle with partial startup cleanup and independent shutdown cleanup;
-- structured JSON logging;
-- non-root container execution.
-
-### Operational health
-
-The application exposes:
-
-```text
-GET /health/live
-GET /health/ready
+```mermaid
+flowchart LR
+  Client --> API[FastAPI API]
+  API --> PG[(PostgreSQL<br/>authoritative state)]
+  PG --> Worker[AgentRun worker]
+  Worker --> LG[LangGraph<br/>inner orchestration]
+  LG --> GW[LLM Gateway]
+  LG --> Tools[Retrieval and<br/>registered tools]
+  LG --> Approval[Durable human<br/>approval]
+  LG --> Rec[Grounded<br/>recommendation]
+  IndexCLI[Knowledge indexing CLI] --> PG
+  IndexCLI --> Embed[Embedding provider]
+  Embed --> Qdrant[(Qdrant<br/>rebuildable projection)]
+  Tools --> Qdrant
+  Tools --> PG
+  App[Application boundaries] -.-> Langfuse[Optional Langfuse<br/>derived telemetry]
 ```
 
-Liveness verifies that the application process can respond.
-
-Readiness verifies PostgreSQL and Qdrant connectivity using bounded timeouts.
-
-Langfuse is not a readiness dependency.
-
-When a required dependency is unavailable:
-
-- liveness remains independent;
-- readiness returns HTTP `503 Service Unavailable`;
-- the unhealthy dependency is identified;
-- credentials, connection URLs, and raw provider exceptions are not exposed.
+Authority boundaries:
 
-### PostgreSQL foundation
-
-The PostgreSQL integration includes:
-
-- async SQLAlchemy engine construction;
-- async session factory construction;
-- process-owned connection lifecycle;
-- pool configuration;
-- `SELECT 1` connectivity checks;
-- shared declarative metadata;
-- deterministic constraint naming;
-- Alembic async migration configuration;
-- registered workspace, ticket, AgentRun, invocation, classification, and knowledge-document persistence models;
-- reversible migrations that create `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`, `knowledge_documents`, `knowledge_document_versions`, and `knowledge_document_chunks`;
-- composite ownership constraints and accepted-invocation provenance for classification records;
-- composite document-version and chunk-profile constraints for authoritative knowledge content;
-- database triggers that permit activation only for ready versions and prevent ready-version rewrites.
-
-### Workspace and ticket persistence
-
-The first business modules provide:
-
-- frozen Workspace and Ticket domain entities with validated invariants;
-- SQLAlchemy records that own table definitions, constraints, indexes, and mapping;
-- repository protocols with workspace-scoped ticket access;
-- async SQLAlchemy repository implementations that flush without committing;
-- named uniqueness constraints for workspace slugs and workspace-scoped external references;
-- a minimal SQLAlchemy transaction adapter for application-owned boundaries;
-- repository integration coverage, including concurrency-sensitive duplicate external-reference insertion.
-
-### Versioned knowledge documents
-
-The `knowledge_documents` module provides PostgreSQL-authoritative source registration and version rollout. Document registration and version creation make no embedding-provider or Qdrant calls.
-
-Implemented behavior includes:
-
-- workspace-owned document identities;
-- optional external references unique within a workspace;
-- immutable `text/plain` and `text/markdown` versions;
-- deterministic line-ending normalization and UTF-8 SHA-256 content hashing;
-- duplicate normalized content rejection within one document;
-- authoritative source content stored on `DocumentVersion`;
-- authoritative deterministic chunk records prepared for the indexing phase;
-- `pending`, `failed`, and `ready` indexing lifecycle states;
-- immutable persisted indexing-profile fields once assigned;
-- concurrency-safe next-version allocation under a document row lock;
-- explicit activation through an active-version pointer owned by PostgreSQL;
-- database enforcement that only ready, owned versions can become active;
-- database enforcement that ready versions cannot be rewritten;
-- workspace-scoped document and version APIs with opaque keyset pagination;
-- source content returned only from the version detail endpoint;
-- tenant-safe `404` behavior for missing and cross-workspace documents and versions.
-
-Current document lifecycle:
-
-```text
-create document and version 1
-→ version remains pending
-→ explicit indexing command produces chunks and vectors
-→ successful indexing marks the version ready
-→ explicit activation changes the document active-version pointer
-```
-
-Ready means the verified indexing projection completed. Ready does not mean active. Activation remains a separate explicit API operation.
-
-The domain and transaction model are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md).
-
-### Knowledge indexing
-
-The `supportops.knowledge_index` package provides explicit, profiled indexing from immutable PostgreSQL document versions to a rebuildable Qdrant projection.
-
-Implemented behavior includes:
-
-- deterministic `markdown-token` / `v1` chunking with `cl100k_base`, 500-token maximum, and 75-token overlap;
-- Markdown-aware heading, paragraph, and fenced-code handling, plus plain-text support without Markdown interpretation;
-- deterministic chunk IDs and content hashes persisted as authoritative PostgreSQL records;
-- application-owned embedding contracts with ordered batches, dimensions, usage, provider, model, and request IDs;
-- mock provider `mock-hashing-embedding-v1` at 64 dimensions using deterministic lexical SHA-256 hashing;
-- OpenAI provider `text-embedding-3-small` at 1536 dimensions;
-- versioned Decimal embedding pricing with known-zero mock cost and cataloged OpenAI pricing;
-- separate mock and OpenAI Qdrant collections with named vector `dense`, cosine distance, and ownership payload indexes;
-- Qdrant payloads that exclude source and chunk content;
-- deterministic chunk IDs used as Qdrant point IDs;
-- bounded upserts with `wait=True` and exact version projection-count verification before ready;
-- short database transactions that do not span tokenization, provider calls, or Qdrant calls;
-- failed compatible-version retry, ready-version no-op reruns, and partial-projection recovery;
-- the `supportops-index-knowledge` CLI for `ensure-collection` and `index-version`.
-
-Indexing does not activate a document version. Mock embeddings support local pipeline testing and are not a semantic-quality benchmark. OpenAI embeddings require explicit `--allow-external-provider` acknowledgement at the CLI.
-
-Indexing architecture is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). The explicit profiled indexing decision is recorded in [`docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md`](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md).
-
-### Semantic knowledge retrieval
-
-The `supportops.knowledge_retrieval` package provides workspace-scoped semantic search over explicitly active ready document versions.
-
-Implemented behavior includes:
-
-- `POST /api/v1/workspaces/{workspace_id}/knowledge/search`;
-- PostgreSQL resolution of only the requested workspace's active ready versions whose complete persisted profile equals the runtime retrieval profile;
-- exclusion of ready but inactive versions and of pending or failed versions;
-- empty eligible scope returning HTTP `200` with `searched_version_count` `0`, empty evidence, and no embedding or Qdrant call;
-- one normalized query embedding under operation `knowledge_query` with provider, model, dimensions, and count revalidation;
-- Qdrant `query_points` against the persisted named vector with exact workspace plus document/version pair filters, selected metadata payload only, and no returned vectors or source content;
-- candidate oversampling at `min(100, max(top_k, top_k * 4))`;
-- unique candidate IDs bulk-hydrated from PostgreSQL for authoritative content and token counts;
-- provenance validation that discards missing, stale, malformed, inactive, cross-workspace, and duplicate candidates;
-- deterministic ranking by score descending with `chunk_id` ascending tie-break and contiguous one-based final ranks;
-- stable citations identifying workspace, document, version, chunk, section path, and media type;
-- process-scoped embedding provider, Qdrant client, PostgreSQL engine/session factory, and immutable retrieval profile, with request-scoped session and service composition;
-- partial startup cleanup and independent shutdown cleanup;
-- expected embedding and vector-store failures mapped to HTTP `503` with code `knowledge_retrieval_unavailable` and a sanitized message.
-
-The evidence response contains ranked authoritative chunks and citations. It does not contain a generated answer. Cross-workspace document filters return empty evidence without disclosing foreign ownership.
-
-Retrieval architecture is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md). The PostgreSQL hydration decision is recorded in [`docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md`](docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md).
-
-### Optional application-owned AI observability
-
-Slice 7 includes application-owned Langfuse integration with optional no-op mode, provider and retrieval instrumentation, and durable workflow observability. Langfuse is not required for application correctness.
-
-Implemented behavior includes:
-
-- provider-independent observability contracts for traces, observations, events, usage, and cost;
-- default no-op adapter with no credentials and no network access;
-- optional Langfuse adapter enabled only through validated configuration;
-- one deterministic logical trace per AgentRun, seeded as `agent-run:{agent_run_id}` and re-entered across attempts, retries, pause, decision, and resume;
-- one `worker-attempt` observation per AgentRunAttempt inside that logical trace;
-- controlled-support workflow observation `workflow.controlled-support-v1`;
-- human-approved workflow observation `workflow.human-approved-support-v1`;
-- graph-node observations for LangGraph stages;
-- one generation observation per real `LLMGateway` provider request at the application-owned gateway boundary;
-- separate initial and repair generation observations;
-- tool-decision generation observations for controlled and human-approved flows without exporting tool content;
-- one embedding observation per real embedding provider call through an application-owned wrapper;
-- providers remain free of Langfuse imports;
-- semantic retrieval observations that export counts and technical metadata, not query or evidence content;
-- nested query-embedding observations under retrieval;
-- one deterministic knowledge-indexing root trace per indexing command execution;
-- nested indexing stage observations and nested embedding observations under indexing traces;
-- actual tool-execution observations named `tool.execute`;
-- approval lifecycle events without keeping an observation open during human waiting;
-- escalation outcome event `ticket.escalated`;
-- recommendation lifecycle events `recommendation.generated`, `recommendation.persisted`, and `recommendation.failed`;
-- opt-in attempt-end flush after each finalized AgentRun attempt when `SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END=true`;
-- privacy-aware metadata-only default capture with redacted-content opt-in;
-- no unrestricted raw-content capture mode;
-- fail-open client lifecycle for the API, worker, and indexing CLI;
-- process-owned observability client sharing across API, worker, retrieval, embedding, and indexing;
-- privacy enforcement before data reaches the Langfuse SDK.
-
-Representative durable-workflow trace shape:
-
-```text
-agent-run
-└── worker-attempt
-    └── workflow.<workflow-version>
-        └── graph-node.<node-name>
-            ├── llm.generate
-            ├── llm.tool_decision
-            ├── tool.execute
-            └── knowledge.search
-                └── embedding.request
-```
-
-Approval waiting is represented through discrete events such as `approval.requested`, `workflow.paused`, `approval.approved`, `approval.rejected`, `approval.expired`, `workflow.resume_scheduled`, and `workflow.resumed`. No observation remains open while a human decision is pending.
-
-PostgreSQL remains the source of truth for durable business, audit, usage, and estimated-cost state, including AgentRun, attempts, approvals, tool calls, escalations, recommendations, LLM usage, estimated cost, and audit records. LangGraph PostgreSQL checkpoints remain the source of truth for graph continuity and pause/resume state. Qdrant remains a replaceable retrieval projection. Langfuse receives optional derived telemetry and cannot reconstruct authoritative business state. Query-embedding usage and cost remain ephemeral observability data and are not durably persisted. Observability failures do not change provider results, workflow results, persistence, retries, approval transitions, idempotency, HTTP behavior, worker outcomes, or process exit behavior. Telemetry delivery is best-effort: deterministic trace identity provides correlation, while retries and process failures may produce incomplete or repeated telemetry. Langfuse is not an exactly-once ledger and is not a readiness dependency.
-
-The optional Langfuse decision is recorded in [`docs/decisions/0013-use-optional-application-owned-langfuse-observability.md`](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md).
-
-### Durable AgentRun scheduling and PostgreSQL worker
-
-Ticket intake schedules the configured workflow version in the same application-owned transaction that creates the ticket. The local default is `controlled-support-v1`. The HTTP request returns the existing Ticket response after that transaction commits and does not execute the workflow or call the model.
-
-Implemented behavior includes:
-
-- frozen AgentRun and AgentRunAttempt domain entities with validated invariants;
-- PostgreSQL `agent_runs` and `agent_run_attempts` tables with query-driven indexes;
-- composite workspace and ticket ownership enforcement;
-- unique initial trigger enforcement for duplicate initial scheduling prevention;
-- atomic Ticket and initial AgentRun creation;
-- a persisted initial retry budget copied from configuration;
-- a separate `supportops-worker` process using PostgreSQL as its durable work queue;
-- claim eligibility for `queued` and `retry_scheduled` runs with due `available_at`;
-- PostgreSQL `FOR UPDATE SKIP LOCKED` claiming across multiple worker processes;
-- attempt history, leases, and lease-token fencing;
-- bounded exponential backoff retries;
-- expired lease recovery before each claim cycle;
-- a versioned executor registry with exact workflow name and version dispatch for three registered versions;
-- deterministic baseline and direct classification support for historical or explicitly scheduled runs;
-- controlled-support-v1 LangGraph orchestration with checkpoint resume inside the AgentRun boundary;
-- provider, embedding, tool, and Qdrant calls outside database transactions;
-- separate fenced transactions for invocation, classification, tool audit, recommendation, and AgentRun completion;
-- cooperative SIGINT and SIGTERM shutdown with controlled runtime, provider, and engine cleanup.
-
-The ticket creation response remains the Ticket response shape and does not report recommendation completion.
-
-After ticket acceptance, the client can inspect the persisted AgentRun and its attempt history through workspace-scoped read-only endpoints when the AgentRun identifier is otherwise known. Controlled support runs can also be inspected through the aggregate controlled support inspection endpoint. Inspection exposes status, retry budget, workflow identity, safe error metadata, ordered attempt outcomes, tool calls, invocations, usage, and recommendations where present. It does not expose lease ownership, lease tokens, lease expiry, ingestion request IDs, execution request IDs, or checkpoint blobs.
-
-Scheduling and worker handoff behavior are documented in [`docs/architecture/agent-run-scheduling.md`](docs/architecture/agent-run-scheduling.md) and [`docs/architecture/runtime-topology.md`](docs/architecture/runtime-topology.md). Controlled workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md).
-
-### Application-owned LLM Gateway and durable classification
-
-The repository provides an application-owned LLM Gateway under `supportops.ai` and durable classification under `supportops.modules.ticket_classifications`:
-
-- process-scoped mock or OpenAI provider and one Gateway per worker process;
-- session-scoped classification executor and repositories;
-- provider-independent asynchronous LLM contracts;
-- OpenAI Responses API with Structured Outputs;
-- application-side Pydantic validation of structured classification results;
-- immutable prompt definitions with explicit ID, version, and SHA-256 content hashes;
-- prompt `ticket-classification` versions 1 and 2 with trusted instructions separated from untrusted ticket content;
-- runtime classification pinned to prompt version 1;
-- an application-owned provider failure taxonomy;
-- bounded validation repair with at most one repair invocation;
-- durable `LLMInvocation` and `TicketClassification` provenance;
-- token usage mapping and versioned Decimal estimated-cost persistence;
-- retryable and terminal Gateway failure translation;
-- explicit provider selection with no cross-provider fallback;
-- no LLM provider initialization in the API process;
-- workspace-scoped classification detail and ticket classification history;
-- optional minimal accepted-classification reference on AgentRun detail;
-- AgentRun-scoped logical invocation history;
-- offline deterministic evaluation against an immutable versioned synthetic dataset;
-- repository-owned evaluation contracts, split manifests, and standalone release gates.
-
-Current classification flow:
-
-```text
-configured AgentRun scheduled
-→ worker classifies and persists provenance
-→ client inspects classification and logical invocation state
-→ AI engineer evaluates an explicit prompt version against the same schema boundary offline
-```
-
-Implemented inspection routes:
-
-```text
-GET /api/v1/workspaces/{workspace_id}/ticket-classifications/{classification_id}
-GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/classifications
-GET /api/v1/workspaces/{workspace_id}/agent-runs/{agent_run_id}/llm-invocations
-```
-
-AgentRun detail includes an optional minimal classification reference.
-
-Gateway architecture is documented in [`docs/architecture/llm-gateway.md`](docs/architecture/llm-gateway.md). Durable classification behavior is documented in [`docs/architecture/ticket-classification.md`](docs/architecture/ticket-classification.md). Classification inspection and evaluation are documented in [`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md). Repository-owned evaluation and regression architecture is documented in [`docs/architecture/evaluation-and-regression.md`](docs/architecture/evaluation-and-regression.md). Versioned knowledge-document ownership and rollout are documented in [`docs/architecture/knowledge-documents.md`](docs/architecture/knowledge-documents.md). Explicit knowledge indexing is documented in [`docs/architecture/knowledge-indexing.md`](docs/architecture/knowledge-indexing.md). Semantic knowledge retrieval is documented in [`docs/architecture/semantic-knowledge-retrieval.md`](docs/architecture/semantic-knowledge-retrieval.md). Controlled support workflow behavior is documented in [`docs/architecture/controlled-support-workflow.md`](docs/architecture/controlled-support-workflow.md). AgentRun and LangGraph durability ownership is recorded in [`docs/decisions/0010-separate-agent-run-and-langgraph-durability.md`](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md). Framework-owned checkpoint schema ownership is recorded in [`docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md`](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md).
-
-### Controlled support workflow and inspection
-
-The platform implements `controlled-support-v1` as the default ticket-processing workflow. AgentRun owns outer durability. LangGraph owns bounded inner orchestration with PostgreSQL checkpoint resume. The worker process owns LLM, checkpoint, embedding, and Qdrant resources required by the controlled workflow. The API independently owns retrieval resources for the public semantic search endpoint.
-
-Implemented controlled-workflow behavior includes:
-
-- classification reuse through the existing durable classification boundary;
-- read-only tools `search_knowledge` and `lookup_service_status`;
-- durable `AgentToolCall` audits under lease fencing;
-- post-commit/pre-checkpoint recovery before requesting another model decision;
-- authoritative PostgreSQL reconstruction of knowledge observations;
-- durable `SupportRecommendation` and ordered `SupportRecommendationCitation` records;
-- outer AgentRun success only after a persisted recommendation identity exists;
-- attempt-scoped tool and invocation ordering;
-- historical estimated-cost aggregation from persisted invocations;
-- exact Alembic exclusion of framework-owned checkpoint tables.
-
-Implemented inspection route:
-
-```text
-GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/agent-runs/{agent_run_id}/inspection
-```
-
-The inspection endpoint supports `controlled-support-v1` only. It reads persisted business records and does not deserialize LangGraph checkpoint state. Queued, running, retrying, and failed workflows may return valid partial inspection views.
-
-### Workspace, ticket, AgentRun, and knowledge document API
-
-The platform exposes versioned business routes under `/api/v1`:
-
-- workspace creation and retrieval;
-- workspace-scoped ticket creation, retrieval, and listing;
-- workspace-scoped AgentRun retrieval;
-- workspace-scoped AgentRunAttempt history listing;
-- workspace-scoped classification detail and ticket classification history;
-- workspace-scoped AgentRun logical invocation history;
-- controlled support aggregate inspection for `controlled-support-v1` runs;
-- workspace-scoped knowledge-document creation, retrieval, and listing;
-- immutable document-version creation, retrieval, and listing;
-- explicit ready-version activation;
-- workspace-scoped semantic knowledge search returning ranked evidence;
-- opaque cursor pagination for ticket, classification, document, and version listings;
-- stable expected-error responses for missing resources, conflicts, invalid cursors, and temporary retrieval unavailability;
-- persistence of request and correlation identifiers on accepted tickets;
-- cross-workspace retrieval that returns the same `404` contract as a missing ticket, AgentRun, classification, document, or document version.
-
-Semantic search returns evidence only. The response contains no generated answer field.
-
-Current operational flow:
-
-```text
-ticket accepted
-→ AgentRun scheduled
-→ worker processes
-→ client inspects persisted state
-```
-
-Health routes remain unversioned. Workspace scoping is not authentication or authorization. Inspection endpoints are strictly read-only.
-
-Reproducible request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
-
-### Qdrant foundation
-
-The Qdrant integration includes:
-
-- async client construction;
-- explicit client lifecycle;
-- environment-based endpoint configuration;
-- optional API key configuration;
-- bounded read-only connectivity checks;
-- compatible named-vector knowledge collections with cosine distance;
-- separate mock and OpenAI collections selected by immutable index profile;
-- ownership payload indexes for `workspace_id`, `document_id`, and `document_version_id`;
-- deterministic chunk IDs as point IDs;
-- payloads that exclude source and chunk content;
-- bounded upserts with exact version projection-count verification;
-- filtered candidate search for semantic retrieval against the named dense vector.
-
-Qdrant stores only the rebuildable vector projection. PostgreSQL remains authoritative for source content, chunks, status, profile, usage, cost, failure provenance, active-version selection, and retrieval evidence content. The API uses Qdrant for semantic candidate search and hydrates authoritative chunk content from PostgreSQL. The worker uses Qdrant for controlled `search_knowledge` candidate search and likewise hydrates authoritative content from PostgreSQL. Deterministic baseline and direct classification workflows do not use Qdrant. The HTTP API does not perform indexing.
-
-### Testing and quality
-
-The repository includes:
-
-- unit tests isolated from Docker and network services;
-- integration tests against real PostgreSQL and Qdrant services;
-- domain invariant tests, including AgentRun and AgentRunAttempt;
-- application service unit coverage;
-- transactional ticket-intake unit coverage;
-- worker claim, retry, fencing, recovery, and process unit coverage;
-- workspace, ticket, and AgentRun API schema and pagination unit coverage;
-- ORM mapping, named-constraint, and model-registration tests;
-- repository integration and concurrency-sensitive tests, including SKIP LOCKED claiming;
-- workspace-scoped AgentRun query repository coverage;
-- workspace, ticket, and AgentRun API integration coverage;
-- atomic ticket and AgentRun commit and rollback coverage;
-- provider-independent LLM contract tests;
-- prompt registry, prompt hash, and untrusted-input boundary tests;
-- structured classification schema tests;
-- deterministic mock-provider tests;
-- OpenAI provider tests using injected fakes without network access;
-- provider error normalization tests;
-- gateway validation and bounded repair tests;
-- Decimal pricing and unknown-pricing tests;
-- LLM settings and secret-handling tests;
-- classification domain and ORM tests;
-- classification inspection projection and API tests;
-- registry dispatch tests;
-- worker composition and lifecycle tests;
-- fenced classification repository tests;
-- PostgreSQL mock classification workflow integration;
-- retry and recovery idempotency coverage;
-- classification inspection integration coverage;
-- evaluation contract, split-manifest, dataset, metrics, predictor, runner, release-gate, and CLI unit coverage;
-- semantic-retrieval, controlled-support, human-approval, and repository regression evaluator unit coverage;
-- Alembic upgrade, downgrade, and metadata-parity coverage for classification and knowledge-document tables;
-- knowledge-document domain, persistence mapping, repository, application-service, pagination, and API coverage;
-- PostgreSQL concurrency tests for distinct and duplicate normalized document-version creation;
-- database-trigger coverage for ready-only activation and ready-version immutability;
-- deterministic chunking and tokenizer adapter coverage;
-- embedding contract, pricing, mock, OpenAI fake, and error coverage;
-- Qdrant collection, payload-index, upsert, and exact-count adapter coverage;
-- indexing orchestration, composition, CLI, idempotency, and recovery coverage;
-- knowledge-retrieval contracts, provenance validation, ranking, schemas, route, and lifespan coverage;
-- knowledge-retrieval integration coverage against real PostgreSQL and Qdrant with mock embeddings;
-- AI observability settings, models, identity, privacy, no-op adapter, and Langfuse fake-client coverage;
-- gateway, embedding, retrieval, and indexing observability instrumentation coverage;
-- AgentRun trace, worker-attempt, workflow, graph-node, tool, approval, escalation, and recommendation observability coverage;
-- attempt-end flush, privacy, fail-open, ContextVar isolation, and process-client ownership coverage;
-- API, worker, and indexing observability lifecycle coverage;
-- settings validation tests;
-- lifecycle tests;
-- dependency failure-path tests;
-- liveness and readiness tests;
-- response sanitization tests;
-- HTTP request traceability tests;
-- Ruff linting and formatting checks;
-- strict mypy validation;
-- Docker image build validation;
-- GitHub Actions quality gates.
-
-Normal unit and integration tests do not require an OpenAI API key, Langfuse credentials, or paid external requests. OpenAI evaluation remains an explicit manual operation.
-
-## Planned platform modules
-
-The repository already includes bounded `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules, a `supportops.worker` process entry point, the cross-cutting `supportops.ai` foundation, the optional `supportops.observability` foundation, the repository-owned `supportops.evaluation.contracts`, `supportops.evaluation.ticket_classification`, `supportops.evaluation.semantic_retrieval`, `supportops.evaluation.controlled_support`, `supportops.evaluation.human_approval`, `supportops.evaluation.regression`, and `supportops.evaluation.grounded_recommendations` packages, the explicit `supportops.knowledge_index` indexing package, the `supportops.knowledge_retrieval` semantic search package, the `supportops.agent_graph` controlled orchestration package, and the `supportops.agent_tools` bounded tool registry. Workspace and ticket modules expose domain entities, application services, repository contracts, PostgreSQL persistence, and versioned HTTP APIs. The `agent_runs` module provides durable scheduling, claiming, versioned executor dispatch, execution, retry, recovery, and workspace-scoped inspection foundations. The `supportops.modules.ticket_classifications` module is implemented for durable classification execution, persistence, and read-only inspection. The `supportops.modules.support_recommendations` module persists recommendations and citations. The `supportops.modules.controlled_support_inspection` module exposes the read-only controlled support inspection aggregate. The `supportops.ai` package owns provider-independent LLM contracts, provider adapters, prompt definitions, structured schemas, repair behavior, estimated-cost calculation, and embedding contracts. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant collection and point adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns active-version resolution, query embedding composition, Qdrant candidate search, PostgreSQL hydration, provenance validation, deterministic ranking, citations, and the workspace-scoped search route. The evaluation packages own shared evaluation contracts, immutable classification and multi-domain datasets, split manifests, static prediction fixtures, deterministic metrics, standalone and domain release gates, repository regression aggregation, grounded recommendation evaluation, and the evaluation CLIs.
-
-Future modules or extensions will introduce:
-
-- reranking of retrieval candidates;
-- provider-backed canonical classification baseline and holdout evaluation;
-- separate runtime prompt adoption and production rollout monitoring;
-- scheduled evaluation and evaluation history persistence;
-- multi-profile score fusion;
-- Langfuse evaluation workflows and production feedback ingestion;
-- a real canonical external RAGAS baseline;
-- evaluation dashboards beyond the current standalone classification, multi-domain, and grounded recommendation evaluation boundaries.
-
-Additional modules will be introduced only when they have concrete responsibilities and tested behavior.
-
-## Repository structure
-
-```text
-.
-├── .github/
-│   └── workflows/
-│       └── ci.yaml
-├── alembic/
-│   ├── versions/
-│   ├── env.py
-│   └── script.py.mako
-├── docs/
-│   ├── architecture/
-│   │   ├── agent-run-scheduling.md
-│   │   ├── classification-evaluation.md
-│   │   ├── controlled-support-workflow.md
-│   │   ├── evaluation-and-regression.md
-│   │   ├── knowledge-documents.md
-│   │   ├── knowledge-indexing.md
-│   │   ├── llm-gateway.md
-│   │   ├── overview.md
-│   │   ├── runtime-topology.md
-│   │   ├── semantic-knowledge-retrieval.md
-│   │   ├── ticket-classification.md
-│   │   └── workspace-data-boundary.md
-│   ├── decisions/
-│   │   ├── 0001-use-a-modular-monolith.md
-│   │   ├── 0002-use-postgresql-as-the-source-of-truth.md
-│   │   ├── 0003-use-qdrant-as-a-rebuildable-retrieval-index.md
-│   │   ├── 0004-use-a-postgresql-backed-worker-model.md
-│   │   ├── 0005-keep-ai-observability-behind-an-adapter.md
-│   │   ├── 0006-establish-workspace-scoped-data-ownership.md
-│   │   ├── 0007-use-an-application-owned-llm-gateway.md
-│   │   ├── 0008-use-explicit-profiled-knowledge-indexing.md
-│   │   ├── 0009-hydrate-retrieval-evidence-from-postgresql.md
-│   │   ├── 0010-separate-agent-run-and-langgraph-durability.md
-│   │   ├── 0011-treat-langgraph-checkpoints-as-framework-owned-schema.md
-│   │   ├── 0012-use-application-owned-approval-records-with-langgraph-interrupts.md
-│   │   ├── 0013-use-optional-application-owned-langfuse-observability.md
-│   │   └── 0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md
-│   └── development/
-│       ├── api-examples.md
-│       ├── environment-variables.md
-│       ├── local-setup.md
-│       └── testing.md
-├── evals/
-│   ├── ticket-classification/
-│   │   ├── README.md
-│   │   ├── analyses/
-│   │   ├── comparisons/
-│   │   ├── datasets/
-│   │   │   └── ticket-classification-eval-v1.jsonl
-│   │   ├── decisions/
-│   │   ├── predictions/
-│   │   └── splits/
-│   │       └── ticket-classification-eval-v1-splits-v1.json
-│   ├── semantic-retrieval/
-│   │   ├── datasets/
-│   │   │   └── semantic-retrieval-eval-v1.jsonl
-│   │   └── predictions/
-│   │       └── semantic-retrieval-eval-v1.static.jsonl
-│   ├── controlled-support/
-│   │   ├── datasets/
-│   │   │   └── controlled-support-eval-v1.jsonl
-│   │   └── predictions/
-│   │       └── controlled-support-eval-v1.static.jsonl
-│   └── human-approval/
-│       ├── datasets/
-│       │   └── human-approval-eval-v1.jsonl
-│       └── predictions/
-│           └── human-approval-eval-v1.static.jsonl
-├── src/
-│   └── supportops/
-│       ├── ai/
-│       │   ├── embeddings/
-│       │   ├── gateway/
-│       │   ├── pricing/
-│       │   ├── prompts/
-│       │   ├── providers/
-│       │   └── schemas/
-│       ├── agent_graph/
-│       ├── agent_tools/
-│       ├── api/
-│       │   ├── health/
-│       │   ├── application.py
-│       │   ├── lifespan.py
-│       │   ├── main.py
-│       │   ├── router.py
-│       │   └── state.py
-│       ├── application/
-│       │   ├── agent_run_inspection.py
-│       │   └── ticket_intake.py
-│       ├── core/
-│       │   ├── logging.py
-│       │   ├── request_context.py
-│       │   ├── settings.py
-│       │   └── transactions.py
-│       ├── evaluation/
-│       │   ├── contracts/
-│       │   ├── ticket_classification/
-│       │   ├── semantic_retrieval/
-│       │   ├── controlled_support/
-│       │   ├── human_approval/
-│       │   └── regression/
-│       ├── infrastructure/
-│       │   ├── postgresql/
-│       │   └── qdrant/
-│       ├── knowledge_index/
-│       │   ├── chunking/
-│       │   ├── indexing/
-│       │   ├── vector_store/
-│       │   ├── composition.py
-│       │   └── cli.py
-│       ├── knowledge_retrieval/
-│       │   ├── api/
-│       │   ├── contracts.py
-│       │   ├── postgresql.py
-│       │   ├── qdrant.py
-│       │   └── service.py
-│       ├── observability/
-│       │   ├── composition.py
-│       │   ├── contracts.py
-│       │   ├── identity.py
-│       │   ├── langfuse.py
-│       │   ├── models.py
-│       │   ├── noop.py
-│       │   └── privacy.py
-│       ├── modules/
-│       │   ├── agent_runs/
-│       │   │   ├── api/
-│       │   │   ├── application/
-│       │   │   ├── domain/
-│       │   │   └── infrastructure/
-│       │   ├── controlled_support_inspection/
-│       │   ├── knowledge_documents/
-│       │   │   ├── api/
-│       │   │   ├── application/
-│       │   │   ├── domain/
-│       │   │   └── infrastructure/
-│       │   ├── support_recommendations/
-│       │   ├── ticket_classifications/
-│       │   │   ├── api/
-│       │   │   ├── application/
-│       │   │   ├── domain/
-│       │   │   └── infrastructure/
-│       │   ├── tickets/
-│       │   └── workspaces/
-│       └── worker/
-│           ├── __init__.py
-│           ├── composition.py
-│           └── main.py
-├── tests/
-│   ├── integration/
-│   │   ├── knowledge_index/
-│   │   ├── knowledge_retrieval/
-│   │   └── ...
-│   └── unit/
-│       ├── ai/
-│       │   └── embeddings/
-│       ├── knowledge_index/
-│       ├── knowledge_retrieval/
-│       ├── observability/
-│       └── ...
-├── .env.example
-├── .gitignore
-├── .python-version
-├── alembic.ini
-├── compose.yaml
-├── Dockerfile
-├── pyproject.toml
-├── README.md
-└── uv.lock
-```
-
-Business modules are introduced when they have concrete responsibilities. The current `workspaces`, `tickets`, `agent_runs`, `ticket_classifications`, `knowledge_documents`, `support_recommendations`, and `controlled_support_inspection` modules include domain, application, and infrastructure layers as required. The `agent_runs`, `ticket_classifications`, and `controlled_support_inspection` modules include read-only inspection routes. Cross-module ticket intake and AgentRun inspection composition live under `supportops.application`. The worker process entry point and process-scoped LLM, checkpoint, embedding, and Qdrant composition live under `supportops.worker`. The `supportops.ai` package owns provider-independent LLM and embedding contracts, provider adapters, prompt definitions, structured schemas, repair behavior, and estimated-cost calculation. It is not a generic orchestration framework. The `supportops.observability` package owns provider-independent observability contracts, deterministic identity, privacy policy, no-op and Langfuse adapters, and process-scoped client composition. The `supportops.agent_graph` package owns bounded LangGraph orchestration for controlled support. The `supportops.agent_tools` package owns the read-only controlled tool registry. The `supportops.knowledge_index` package owns deterministic chunking, Qdrant adapters, indexing orchestration, and the operator CLI. The `supportops.knowledge_retrieval` package owns semantic search contracts, adapters, orchestration, and the workspace-scoped HTTP search route. The `supportops.evaluation.contracts` package owns shared evaluation manifests, prediction envelopes, canonical hashing, and atomic artifact writes. The `supportops.evaluation.ticket_classification` package owns offline datasets, split manifests, failure analysis, prediction artifacts, deterministic metrics, paired comparison, prompt decisions, release gates, and the evaluation CLI. The `supportops.evaluation.semantic_retrieval`, `supportops.evaluation.controlled_support`, and `supportops.evaluation.human_approval` packages own immutable synthetic datasets, static prediction fixtures, deterministic metrics, and domain release gates. The `supportops.evaluation.regression` package owns repository-level aggregation and the `supportops-evaluate-regression` CLI. The `supportops.evaluation.grounded_recommendations` package owns grounded recommendation fixtures, deterministic complementary metrics, normalized RAGAS score artifacts, offline aggregation, the evaluation-only RAGAS boundary, the external runner and CLI, and the human review rubric. Alembic migrations create workspace, ticket, AgentRun, invocation, classification, tool-call, recommendation, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Versioned evaluation datasets, split manifests, failure analysis, static prediction fixtures, comparison artifacts, decision templates, static multi-domain prediction fixtures, and grounded recommendation evaluation artifacts remain committed under `evals/`. Generated evaluation outputs belong under ignored `artifacts/`.
-
-## Local setup
-
-Install locked dependencies:
+- **PostgreSQL** is the authoritative transactional business-state store.
+- **Qdrant** is a rebuildable retrieval projection.
+- **AgentRun** is the outer durable execution boundary.
+- **LangGraph** is the bounded inner orchestration layer.
+- LangGraph checkpoints provide workflow continuity but are not the business audit ledger.
+- **Langfuse** is optional derived telemetry, not an audit ledger or release authority.
+
+## End-to-end workflow
+
+1. A workspace-scoped support ticket is accepted.
+2. The Ticket and initial AgentRun are committed atomically.
+3. A worker claims the AgentRun using a lease and fencing token.
+4. LangGraph executes inside the durable AgentRun boundary.
+5. The ticket is classified through the application-owned LLM Gateway.
+6. Active runbook evidence is retrieved from Qdrant and hydrated from PostgreSQL.
+7. Registered read-only tools may execute under bounded policy.
+8. Sensitive escalation pauses for durable human approval.
+9. The workflow resumes after approval, rejection, or expiry.
+10. A grounded recommendation with stable citations is persisted.
+11. Durable records remain authoritative while Langfuse receives optional telemetry.
+12. Offline evaluation produces reproducible evidence and explicit prompt decisions.
+
+The system does not claim autonomous ticket resolution, real external escalation, exactly-once processing, or secure public multi-tenancy.
+
+## Key engineering capabilities
+
+### Backend reliability
+
+- PostgreSQL-backed Ticket and AgentRun durability
+- Atomic ticket and initial-run creation
+- `FOR UPDATE SKIP LOCKED` claiming
+- Leases and fencing tokens
+- Bounded retries and stale ownership recovery
+- At-least-once execution semantics with idempotent durable boundaries
+
+### AI reliability
+
+- Application-owned LLM Gateway
+- Mock and OpenAI providers
+- Structured Outputs with validated schemas
+- Immutable, explicitly versioned prompts
+- Durable LLM invocations with token and estimated-cost accounting
+
+### Knowledge and retrieval
+
+- Immutable knowledge document versions
+- Deterministic chunking
+- Mock and OpenAI embeddings
+- PostgreSQL-owned document and chunk state
+- Qdrant derived projections with stable citation hydration
+
+### Controlled orchestration
+
+- AgentRun as outer execution boundary
+- LangGraph as inner orchestration
+- PostgreSQL graph checkpoints
+- Registered read-only tools with durable tool-call audit records
+
+### Human approval
+
+- Durable approval requests with interrupt and resume
+- Expiry and rejection handling
+- Execution grants and idempotent sensitive escalation
+- No external side-effect integration
+
+### Observability
+
+- Application-owned abstraction with optional Langfuse adapter
+- Privacy-aware metadata and fail-open telemetry
+- Durable state remains authoritative
+
+### Evaluation
+
+- Deterministic regression evaluation
+- Grounded recommendation evaluation with RAGAS integration
+- Static paired prompt fixtures
+- Safety-first release decisions
+- Explicit separation between evaluation and runtime adoption
+
+### Engineering workflow
+
+- Alembic migrations, unit and integration tests
+- Ruff, mypy, Docker, and CI
+- ADRs and architecture documents
+
+## Reliability model
+
+PostgreSQL owns authoritative business state. The worker processes AgentRuns with at least once semantics using leases, fencing tokens, bounded retries, and stale-ownership recovery. Exactly-once execution is not claimed. Idempotency is applied at durable persistence boundaries where implemented. Optional Langfuse telemetry is fail-open and never overrides durable records. Qdrant projections are rebuildable from PostgreSQL.
+
+Details: [AgentRun scheduling](docs/architecture/agent-run-scheduling.md), [runtime topology](docs/architecture/runtime-topology.md), [ADR 0002](docs/decisions/0002-use-postgresql-as-the-source-of-truth.md), [ADR 0004](docs/decisions/0004-use-a-postgresql-backed-worker-model.md).
+
+## AI safety and control model
+
+LLM calls are mediated by the application-owned Gateway. Prompts are immutable and explicitly versioned. Structured outputs are validated. Tools are registered, bounded, and currently read-only. Sensitive escalation requires durable human approval before grant-gated execution. Static evaluation evidence cannot automatically change runtime behavior; prompt adoption requires a separate explicit decision. No autonomous external write integration is available. The system is a controlled support workflow, not a fully autonomous agent.
+
+## Evaluation outcome
+
+Prompt version 1 remains the runtime default. Prompt version 2 is an immutable evaluation candidate.
+
+Committed static paired fixtures exercise comparison, provenance, safety-gate, and decision behavior. The decision outcome is **inconclusive**. The run status is **incomplete**. `approved_for_runtime_adoption` is **false**. `separate_runtime_adoption_required` is **true**. Static evidence cannot authorize runtime adoption. No provider-backed superiority is claimed.
+
+A safe non-promotion outcome demonstrates working release governance rather than failed implementation.
+
+Evidence:
+
+- [Classification evaluation](docs/architecture/classification-evaluation.md)
+- [Evaluation and regression](docs/architecture/evaluation-and-regression.md)
+- [Static comparison artifact](evals/ticket-classification/comparisons/ticket-classification-prompt-v1-v2.static.json)
+- [Static decision artifact](evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json)
+- [ADR 0014](docs/decisions/0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md)
+
+## Quick start
+
+Mock LLM and embedding providers are the default local path (see [`.env.example`](.env.example)).
 
 ```powershell
 uv sync --frozen --all-groups
-```
-
-Create local configuration:
-
-```powershell
 Copy-Item .env.example .env
-```
-
-Start PostgreSQL and Qdrant:
-
-```powershell
 docker compose up -d
-docker compose ps
-```
-
-Apply migrations before exercising business routes:
-
-```powershell
 uv run alembic upgrade head
 ```
 
-Start the API in one terminal:
+Ensure the Qdrant knowledge collection before indexing:
+
+```powershell
+uv run supportops-index-knowledge ensure-collection
+```
+
+Start the API:
 
 ```powershell
 uv run uvicorn supportops.api.main:app `
@@ -881,734 +162,144 @@ uv run uvicorn supportops.api.main:app `
   --port 8000
 ```
 
-Start the worker in another terminal:
+Start the worker in a separate terminal. The worker initializes LangGraph checkpoint tables on startup:
 
 ```powershell
 $env:SUPPORTOPS_WORKER_ID="worker-local-1"
 uv run supportops-worker
 ```
 
-Docker Compose provisions infrastructure only. A worker service is intentionally not added to Compose in this phase.
+Full setup, troubleshooting, and indexing details: [Local setup](docs/development/local-setup.md).
 
-Validate liveness:
+## End-to-end demonstration
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health/live
-```
+A dedicated demonstration walkthrough will be added in a later documentation commit. Until then, use [Local setup](docs/development/local-setup.md) and [API examples](docs/development/api-examples.md) to:
 
-Validate readiness:
+- create a workspace;
+- create and index a synthetic runbook;
+- activate a document version;
+- create a synthetic support ticket;
+- inspect AgentRun processing;
+- inspect classification, retrieval, tool calls, approval, escalation, recommendation, and evaluation evidence.
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health/ready
-```
+Approval and escalation HTTP contracts: [Approval workflow API](docs/development/approval-workflow-api.md).
 
-Workspace and ticket request examples are documented in [`docs/development/api-examples.md`](docs/development/api-examples.md).
-
-### Index a knowledge document version
-
-Ensure the profile collection exists, then index a specific pending or failed version:
-
-```powershell
-uv run supportops-index-knowledge ensure-collection
-
-uv run supportops-index-knowledge index-version `
-  --workspace-id "<workspace-id>" `
-  --document-id "<document-id>" `
-  --document-version-id "<document-version-id>"
-```
-
-Use the UUIDs returned by the knowledge-document API. Do not execute the literal placeholders. Default mock mode is network-free. Successful indexing returns `ready` but does not activate the version. Activate separately through the HTTP API. A ready-version rerun is a no-op.
-
-OpenAI embeddings require process configuration and explicit permission:
-
-```powershell
-$env:SUPPORTOPS_EMBEDDING_PROVIDER="openai"
-$env:SUPPORTOPS_EMBEDDING_MODEL="text-embedding-3-small"
-$env:SUPPORTOPS_EMBEDDING_DIMENSIONS="1536"
-$env:SUPPORTOPS_OPENAI_API_KEY="<temporary-secret>"
-
-uv run supportops-index-knowledge ensure-collection --allow-external-provider
-
-uv run supportops-index-knowledge index-version `
-  --workspace-id "<workspace-id>" `
-  --document-id "<document-id>" `
-  --document-version-id "<document-version-id>" `
-  --allow-external-provider
-
-Remove-Item Env:SUPPORTOPS_OPENAI_API_KEY
-```
-
-Do not place a real API key in documentation or committed files.
-
-The complete setup procedure is documented in [`docs/development/local-setup.md`](docs/development/local-setup.md).
-
-## Classification evaluation
-
-Offline classification evaluation uses the immutable versioned synthetic
-dataset, the versioned split sidecar, and the
-`supportops-evaluate-classification` CLI. Evaluation accesses neither
-PostgreSQL nor Qdrant. Generated outputs belong under ignored `artifacts/`.
-Versioned datasets, split manifests, failure analysis, static prediction
-fixtures, comparison artifacts, and decision templates remain committed under
-`evals/ticket-classification/`.
-
-Prompt selection is explicit. The command-specific prompt ID remains
-`ticket-classification`. Supported evaluation prompt versions are `1` and `2`.
-The default evaluation prompt version is `1`. There is no implicit latest
-selection. Unsupported versions fail without fallback or provider execution.
-Runtime classification remains independently pinned to version 1.
-
-Classification prompt iteration is implemented as an evidence-driven workflow:
-
-- development-only failure analysis with dataset-design hypotheses;
-- immutable prompt version 2 registered for evaluation;
-- static paired prompt prediction fixtures;
-- paired v1-versus-v2 comparison and candidate release-gate evaluation;
-- inconclusive static decision with `approved_for_runtime_adoption: false`;
-- EvaluationManifest provenance for baseline, candidate, and pair bindings;
-- no-network `analyze`, `compare`, and `decide` commands;
-- human approval and separate runtime adoption remaining required before
-  production activation.
-
-Static fixtures demonstrate comparison and decision behavior. They are not
-provider-backed quality evidence. The decision remains inconclusive. Provider-
-backed evidence is required before adoption. Runtime adoption remains a
-separate governed change.
-
-Mock pipeline:
-
-```powershell
-uv run supportops-evaluate-classification run `
-  --provider mock `
-  --prompt-version 1 `
-  --dataset `
-    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
-  --predictions-output `
-    artifacts/classification-mock-predictions.jsonl `
-  --output `
-    artifacts/classification-mock-report.json
-```
-
-Mock evaluation validates pipeline wiring. It is not a model-quality benchmark.
-
-Offline scoring:
-
-```powershell
-uv run supportops-evaluate-classification score `
-  --dataset `
-    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
-  --predictions `
-    artifacts/classification-mock-predictions.jsonl `
-  --output `
-    artifacts/classification-mock-rescored-report.json
-```
-
-`score` initializes no provider and makes no network request.
-
-No-network prompt-iteration commands:
-
-```powershell
-uv run supportops-evaluate-classification analyze `
-  --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" `
-  --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" `
-  --analysis "evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json"
-```
-
-OpenAI evaluation:
-
-```powershell
-uv run supportops-evaluate-classification run `
-  --provider openai `
-  --allow-external-provider `
-  --prompt-version 1 `
-  --dataset `
-    evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl `
-  --predictions-output `
-    artifacts/classification-openai-predictions.jsonl `
-  --output `
-    artifacts/classification-openai-report.json
-```
-
-OpenAI evaluation requires `--allow-external-provider` and a configured API key.
-Provider execution remains confined to `run`. Standalone release-gate reports
-cannot authorize prompt promotion. Evaluation results do not alter production
-prompt selection automatically.
-
-Classification inspection and evaluation architecture is documented in
-[`docs/architecture/classification-evaluation.md`](docs/architecture/classification-evaluation.md).
-Repository-owned evaluation and regression architecture is documented in
-[`docs/architecture/evaluation-and-regression.md`](docs/architecture/evaluation-and-regression.md).
-Committed ticket-classification artifacts are summarized in
-[`evals/ticket-classification/README.md`](evals/ticket-classification/README.md).
-
-## Multi-domain deterministic regression
-
-Repository regression scoring uses committed synthetic datasets and static
-prediction fixtures for semantic retrieval, controlled support, and human
-approval:
-
-```powershell
-uv run supportops-evaluate-regression score
-```
-
-Default domains are `semantic-retrieval`, `controlled-support`, and
-`human-approval`. Classification remains optional when static classification
-evidence is not supplied. The command performs no network calls and does not
-require secrets or runtime services. Normal CI runs it explicitly.
-
-Committed corpora and fixtures:
+## Repository map
 
 ```text
-evals/semantic-retrieval/datasets/semantic-retrieval-eval-v1.jsonl
-evals/semantic-retrieval/predictions/semantic-retrieval-eval-v1.static.jsonl
-evals/controlled-support/datasets/controlled-support-eval-v1.jsonl
-evals/controlled-support/predictions/controlled-support-eval-v1.static.jsonl
-evals/human-approval/datasets/human-approval-eval-v1.jsonl
-evals/human-approval/predictions/human-approval-eval-v1.static.jsonl
+.
+├── alembic/                         # Application schema migrations
+├── artifacts/                       # Generated evaluation outputs (gitignored)
+├── docs/
+│   ├── architecture/                # System design and boundaries
+│   ├── decisions/                   # Architecture decision records
+│   └── development/                 # Local setup, API examples, testing
+├── evals/                           # Committed evaluation fixtures and evidence
+├── src/supportops/
+│   ├── api/                         # FastAPI application and health
+│   ├── agent_graph/                 # LangGraph inner orchestration
+│   ├── agent_tools/                 # Registered bounded tools
+│   ├── ai/                          # LLM Gateway, prompts, embeddings
+│   ├── evaluation/                  # Offline evaluation and release gates
+│   ├── knowledge_index/             # Chunking, Qdrant projection, indexing CLI
+│   ├── knowledge_retrieval/         # Active-version semantic retrieval
+│   ├── modules/
+│   │   ├── agent_runs/              # Durable outer execution boundary
+│   │   ├── approvals/               # Human approval records and APIs
+│   │   ├── knowledge_documents/     # Immutable document versions
+│   │   ├── support_recommendations/ # Grounded recommendations and citations
+│   │   ├── ticket_classifications/  # Durable classification records
+│   │   ├── tickets/
+│   │   └── workspaces/
+│   ├── observability/               # Application-owned telemetry adapters
+│   └── worker/                      # AgentRun worker process
+└── tests/
 ```
 
-Within the committed synthetic regression corpus, standalone scoring without
-paired quality and efficiency baselines produces aggregate status
-`incomplete`. That status is valid deterministic evidence and exits zero.
-Blocking gate failure exits one. Artifact validation or scoring failure exits
-three.
+## Documentation guide
 
-## Grounded recommendation evaluation
+### Architecture
 
-Grounded recommendation evaluation uses committed synthetic fixtures under
-`evals/grounded-recommendations/` and the
-`supportops-evaluate-grounded-recommendations` CLI.
-
-Offline commands:
-
-```powershell
-uv run supportops-evaluate-grounded-recommendations validate
-
-uv run supportops-evaluate-grounded-recommendations score
-
-uv run supportops-evaluate-grounded-recommendations score `
-  --ragas-scores "evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl"
-```
-
-These commands perform no network access, require no secrets, and do not
-instantiate evaluator models. Committed artifacts include the dataset, static
-predictions, a synthetic normalized RAGAS score fixture, and the human review
-rubric. External RAGAS evaluation of existing predictions requires
-`--allow-external-provider` and `SUPPORTOPS_EVALUATION_OPENAI_API_KEY`, writes
-generated evidence under `artifacts/`, and does not execute the controlled
-workflow. A real canonical external baseline is not committed.
-
-Domain architecture is documented in
-[`docs/architecture/evaluation-and-regression.md`](docs/architecture/evaluation-and-regression.md).
-Committed fixtures are summarized in
-[`evals/grounded-recommendations/README.md`](evals/grounded-recommendations/README.md).
-
-## Configuration
-
-Application configuration uses environment variables prefixed with:
-
-```text
-SUPPORTOPS_
-```
-
-The repository includes a safe local example:
-
-```text
-.env.example
-```
-
-Required application values include:
-
-```text
-SUPPORTOPS_POSTGRESQL_URL
-SUPPORTOPS_QDRANT_URL
-```
-
-Worker timing and identity are controlled by `SUPPORTOPS_WORKER_*` variables. Defaults are validated at process startup, including lease-versus-timeout and retry-base-versus-max invariants. The worker always composes the versioned executor registry. Executor selection is not a deployment switch.
-
-AI runtime selection uses:
-
-```text
-SUPPORTOPS_LLM_PROVIDER
-SUPPORTOPS_OPENAI_API_KEY
-SUPPORTOPS_OPENAI_MODEL
-SUPPORTOPS_OPENAI_BASE_URL
-SUPPORTOPS_LLM_REQUEST_TIMEOUT_SECONDS
-SUPPORTOPS_LLM_TRANSPORT_MAX_RETRIES
-SUPPORTOPS_LLM_MAX_REPAIR_ATTEMPTS
-SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION
-SUPPORTOPS_EMBEDDING_PROVIDER
-SUPPORTOPS_EMBEDDING_MODEL
-SUPPORTOPS_EMBEDDING_DIMENSIONS
-SUPPORTOPS_EMBEDDING_REQUEST_TIMEOUT_SECONDS
-SUPPORTOPS_EMBEDDING_TRANSPORT_MAX_RETRIES
-```
-
-The local default LLM and embedding providers are both `mock`. LLM provider and embedding provider selections are independent. The API creates the configured embedding provider at startup for semantic retrieval and does not create the LLM provider. The worker creates the configured LLM provider and, for controlled workflows, also creates the embedding provider, checkpoint runtime, and Qdrant client. The indexing CLI creates its own embedding provider. `SUPPORTOPS_OPENAI_API_KEY` is shared by the OpenAI generation and embedding adapters and is required when either OpenAI adapter is selected. `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls newly scheduled runs; the local default is `controlled-support-v1`. Request timeout, logical repair budget, worker timeout, and lease margins are validated at startup. Provider transport retry, gateway repair, and AgentRun retry are separate layers. Embedding request timeout is independent from worker execution timeout. Query embeddings remain request-driven after API startup constructs the client. The worker converts `SUPPORTOPS_POSTGRESQL_URL` internally to a Psycopg-compatible DSN for the checkpoint runtime without logging the secret.
-
-Optional AI observability selection uses:
-
-```text
-SUPPORTOPS_AI_OBSERVABILITY_PROVIDER
-SUPPORTOPS_LANGFUSE_PUBLIC_KEY
-SUPPORTOPS_LANGFUSE_SECRET_KEY
-SUPPORTOPS_LANGFUSE_BASE_URL
-SUPPORTOPS_LANGFUSE_ENVIRONMENT
-SUPPORTOPS_LANGFUSE_RELEASE
-SUPPORTOPS_LANGFUSE_CAPTURE_MODE
-SUPPORTOPS_LANGFUSE_FLUSH_AT_ATTEMPT_END
-SUPPORTOPS_LANGFUSE_TIMEOUT_SECONDS
-```
-
-The local default observability provider is `noop`. Langfuse credentials are required only when `langfuse` is selected. Default capture mode is `metadata_only`. Attempt-end flush defaults to `false` and uses normal SDK batching unless explicitly enabled. Langfuse is not a readiness dependency.
-
-The complete configuration contract is documented in [`docs/development/environment-variables.md`](docs/development/environment-variables.md).
-
-## Quality commands
-
-Run linting:
-
-```powershell
-uv run ruff check .
-```
-
-Verify formatting:
-
-```powershell
-uv run ruff format --check .
-```
-
-Run type checking:
-
-```powershell
-uv run mypy
-```
-
-Validate the lockfile:
-
-```powershell
-uv lock --check
-```
-
-Validate Docker Compose:
-
-```powershell
-docker compose config --quiet
-```
-
-## Test commands
-
-Run unit tests:
-
-```powershell
-uv run pytest -m "not integration"
-```
-
-Run integration tests:
-
-```powershell
-uv run pytest -m integration
-```
-
-Run the complete test suite:
-
-```powershell
-uv run pytest
-```
-
-The complete testing strategy is documented in [`docs/development/testing.md`](docs/development/testing.md).
-
-## Alembic commands
-
-Apply the current migration head:
-
-```powershell
-uv run alembic upgrade head
-```
-
-Validate migration heads and connectivity:
-
-```powershell
-uv run alembic heads
-uv run alembic current
-uv run alembic check
-```
-
-Validate offline migration execution:
-
-```powershell
-uv run alembic upgrade head --sql
-```
-
-The current head creates the `workspaces`, `tickets`, `agent_runs`, `agent_run_attempts`, `llm_invocations`, `ticket_classifications`, `agent_tool_calls`, `support_recommendations`, `support_recommendation_citations`, and versioned knowledge-document tables. Framework-owned LangGraph checkpoint tables are created by checkpointer setup and are excluded by exact name from Alembic comparison. Downgrade commands must run only against the local development or test database.
-
-## Docker image
-
-Build the application image:
-
-```powershell
-docker build `
-  --tag supportops-ai-platform:local `
-  .
-```
-
-The image:
-
-- installs dependencies from the committed lockfile;
-- excludes development dependencies;
-- runs the FastAPI application;
-- executes as a non-root user.
-
-## Continuous integration
-
-The GitHub Actions workflow validates pull requests and pushes to `main`.
-
-The workflow executes:
-
-- frozen dependency installation;
-- lockfile validation;
-- Ruff lint;
-- Ruff formatting verification;
-- mypy;
-- deterministic repository regression scoring through `supportops-evaluate-regression score`;
-- grounded recommendation offline validate and score commands;
-- classification failure-analysis validation;
-- static classification prompt-version comparison and decision rebuild;
-- unit tests;
-- Alembic validation;
-- integration tests with PostgreSQL and Qdrant service containers;
-- Docker image build.
-
-The workflow uses Python 3.12 and does not publish artifacts or images. Regression scoring and classification prompt-iteration checks use committed static fixtures only and do not require secrets or paid providers.
-
-## Architecture decisions
-
-The repository records the following accepted decisions:
-
-- [Use a modular monolith](docs/decisions/0001-use-a-modular-monolith.md)
-- [Use PostgreSQL as the source of truth](docs/decisions/0002-use-postgresql-as-the-source-of-truth.md)
-- [Use Qdrant as a rebuildable retrieval index](docs/decisions/0003-use-qdrant-as-a-rebuildable-retrieval-index.md)
-- [Use a PostgreSQL-backed worker model](docs/decisions/0004-use-a-postgresql-backed-worker-model.md)
-- [Keep AI observability behind an application-owned adapter](docs/decisions/0005-keep-ai-observability-behind-an-adapter.md)
-- [Establish workspace-scoped data ownership](docs/decisions/0006-establish-workspace-scoped-data-ownership.md)
-- [Use an application-owned LLM Gateway](docs/decisions/0007-use-an-application-owned-llm-gateway.md)
-- [Use explicit, profiled knowledge indexing](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md)
-- [Hydrate retrieval evidence from PostgreSQL](docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md)
-- [Separate AgentRun and LangGraph durability](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md)
-- [Treat LangGraph checkpoints as framework-owned schema](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md)
-- [Use application-owned approval records with LangGraph interrupts](docs/decisions/0012-use-application-owned-approval-records-with-langgraph-interrupts.md)
-- [Use optional application-owned Langfuse observability](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md)
-- [Use repository-owned evaluation and evidence-driven prompt promotion](docs/decisions/0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md)
-
-## Roadmap
-
-### Repository foundation
-
-Implemented:
-
-- architecture documentation;
-- dependency management;
-- environment configuration;
-- local infrastructure;
-- FastAPI bootstrap;
-- structured logging;
-- HTTP request traceability;
-- health endpoints;
-- Alembic;
-- automated tests;
-- Docker packaging;
-- CI quality gates.
-
-### Support operations
-
-Implemented:
-
-- workspace and ticket domain entities;
-- PostgreSQL persistence and repository contracts;
-- workspace-scoped data ownership;
-- reversible workspace and ticket migration;
-- application services and API error contracts;
-- versioned workspace and ticket HTTP endpoints;
-- opaque HTTP cursor pagination;
-- request and correlation identifier persistence;
-- atomic ticket intake with initial AgentRun scheduling;
-- durable structured classification;
-- durable invocation and accepted classification persistence;
-- workspace-scoped classification detail and history inspection;
-- AgentRun classification reference and logical invocation inspection.
-
-Planned:
-
-- operational auditability beyond request and correlation identifiers.
-
-### Asynchronous processing
-
-Implemented:
-
-- AgentRun and AgentRunAttempt domain and persistence foundations;
-- atomic Ticket and initial AgentRun scheduling;
-- database-enforced workspace and ticket ownership;
-- duplicate initial scheduling prevention;
-- persisted initial retry budget;
-- PostgreSQL-backed worker execution;
-- queue claiming with `FOR UPDATE SKIP LOCKED`;
-- leases and lease-token fencing;
-- bounded exponential backoff retries;
-- expired lease recovery;
-- versioned workflow executor registry;
-- deterministic baseline executor;
-- configured `controlled-support-v1` scheduling and execution as the local default;
-- registered `deterministic-baseline-v1` and `ticket-classification-v1` retention;
-- process-scoped provider, Gateway, checkpoint, embedding, and Qdrant composition;
-- separate worker process with cooperative shutdown;
-- workspace-scoped AgentRun inspection;
-- workspace-scoped AgentRunAttempt history inspection;
-- controlled support aggregate inspection;
-- safe operational metadata projections;
-- tenant-safe `agent_run_not_found` responses.
-
-Planned:
-
-- manual retry and cancellation;
-- global AgentRun listing and status filtering;
-- idempotent side effects for future executors and tools.
-
-### LLM Gateway and structured classification
-
-Implemented:
-
-- provider-independent async contracts;
-- deterministic mock provider;
-- OpenAI Responses API provider;
-- Structured Outputs;
-- application-side Pydantic validation;
-- bounded classification taxonomy;
-- prompt `ticket-classification` versions 1 and 2;
-- deterministic prompt hashes;
-- normalized provider failures;
-- bounded repair;
-- token usage mapping and persistence;
-- versioned Decimal pricing catalog;
-- estimated-cost calculation and persistence;
-- validated AI runtime settings;
-- worker provider composition;
-- workflow executor registry;
-- durable ticket-classification execution;
-- `TicketClassification` persistence;
-- `LLMInvocation` persistence;
-- classification inspection API;
-- synthetic classification dataset;
-- deterministic classification evaluator;
-- repository-owned evaluation contracts and split manifests;
-- explicit evaluation prompt-version selection;
-- development-only failure analysis;
-- static paired prediction fixtures;
-- paired prompt comparison and release-gate evaluation;
-- safety-first prompt decision artifacts;
-- standalone classification release-gate evaluation;
-- opt-in real-model evaluation.
-
-Planned:
-
-- provider-backed canonical classification baseline;
-- separate runtime prompt adoption for version 2;
-- cross-provider fallback after baseline behavior is observable;
-- operational cost reporting and invoice reconciliation.
-
-### Retrieval foundation
-
-Implemented:
-
-- workspace-scoped knowledge-document identities;
-- immutable plain-text and Markdown versions;
-- deterministic source normalization and content hashing;
-- duplicate normalized content protection;
-- concurrency-safe version numbering;
-- PostgreSQL-authoritative source content;
-- deterministic token-aware chunk generation;
-- authoritative PostgreSQL chunk persistence;
-- mock and OpenAI embedding providers;
-- embedding usage and cost accounting;
-- Qdrant collection bootstrap and compatibility validation;
-- deterministic vector-point indexing;
-- exact projection-count verification before ready;
-- explicit `supportops-index-knowledge` CLI;
-- explicit ready-state and active-version separation;
-- workspace-scoped document and version APIs;
-- stable version detail access for source inspection;
-- active-version semantic retrieval;
-- query embeddings for retrieval requests;
-- authoritative PostgreSQL chunk hydration for retrieved candidates;
-- stable retrieval citations;
-- process-scoped API embedding provider lifecycle for semantic search.
-
-Planned:
-
-- reranking;
-- multi-profile score fusion.
-
-### Controlled orchestration
-
-Implemented:
-
-- LangGraph bounded orchestration inside AgentRun;
-- PostgreSQL-backed checkpoint resume;
-- registered read-only tools `search_knowledge` and `lookup_service_status`;
-- durable tool-call audits and recommendation persistence;
-- controlled support inspection over business records;
-- human-approved interrupt, approval decision, grant-gated escalation, and resume;
-- AgentRun outer durability with LangGraph inner orchestration.
-
-Planned:
-
-- write-capable tools beyond the current grant-gated escalation path;
-- failure recovery beyond the current post-commit/pre-checkpoint and checkpoint resume model for write-side effects.
-
-### Observability and evaluation
-
-Implemented:
-
-- token usage and estimated-cost persistence with durable invocation provenance;
-- prompt `ticket-classification` versions 1 and 2;
-- immutable versioned synthetic classification dataset;
-- versioned development, holdout, and safety-gate split allocation;
-- repository-owned evaluation manifest contracts;
-- typed prediction envelopes;
-- deterministic canonical serialization and SHA-256 hashing;
-- atomic evaluation artifact writes;
-- deterministic classification evaluator;
-- structured-output validity and invalid-output rate;
-- high urgency, critical urgency, and high-risk human-review recall;
-- average latency and average input, output, and total token metrics;
-- standalone classification release-gate evaluation;
-- explicit gate outcomes `passed`, `failed`, and `not_applicable`;
-- standalone aggregate statuses `passed`, `failed`, and `incomplete`;
-- offline scoring;
-- explicit evaluation prompt-version selection with no implicit latest selection;
-- development-only failure analysis;
-- static paired v1/v2 prediction fixtures;
-- paired classification comparison and candidate release-gate evaluation;
-- safety-first prompt decisions with static inconclusive outcome;
-- no-network `analyze`, `compare`, and `decide` commands;
-- opt-in external-provider evaluation CLI;
-- canonical dataset, prediction, and report provenance;
-- immutable semantic-retrieval, controlled-support, and human-approval synthetic datasets;
-- committed static prediction fixtures for those three domains;
-- deterministic multi-domain regression metrics and domain release-gate profiles;
-- repository-level deterministic regression scoring through `supportops-evaluate-regression score`;
-- repository aggregate statuses `passed`, `failed`, and `incomplete`;
-- grounded recommendation evaluation with deterministic complementary metrics;
-- normalized static RAGAS score artifacts and offline aggregation;
-- evaluation-only RAGAS dependency boundary and explicit external runner;
-- committed grounded recommendation human review rubric;
-- application-owned AI observability abstraction;
-- default no-op observability mode;
-- optional Langfuse adapter;
-- deterministic AgentRun logical traces;
-- worker-attempt observations;
-- controlled-support and human-approved workflow observations;
-- graph-node observations;
-- LLM provider request observations with separate initial and repair generations;
-- tool-decision provider observations;
-- embedding provider observations;
-- semantic retrieval observations with nested query-embedding observations;
-- knowledge-indexing traces with nested stage and embedding observations;
-- actual tool-execution observations;
-- approval lifecycle events;
-- escalation outcome events;
-- recommendation lifecycle events;
-- opt-in attempt-end flush policy;
-- privacy-aware metadata-only export with redacted-content opt-in;
-- fail-open observability behavior and process-owned client sharing across API, worker, retrieval, embedding, and indexing.
-
-Slice 7 observability is complete for the application-owned foundation, provider and retrieval instrumentation, and durable workflow telemetry. Multi-domain deterministic regression for semantic retrieval, controlled support, and human approval is implemented. Grounded recommendation evaluation with deterministic complementary metrics, static RAGAS score artifacts, offline aggregation, and an explicit external RAGAS boundary is implemented. Classification prompt iteration with static paired comparison and an inconclusive decision is implemented. Provider-backed canonical comparison, runtime adoption, and a real canonical external RAGAS baseline remain later evaluation work.
-
-Planned:
-
-- operational cost reporting and invoice reconciliation;
-- opt-in live Langfuse smoke validation;
-- Langfuse evaluation workflows;
-- provider-backed canonical classification comparison;
-- holdout evaluation after prompt freeze;
-- human review of provider evidence;
-- separate runtime prompt adoption;
-- production rollout monitoring;
-- a real canonical external RAGAS baseline;
-- scheduled or online evaluation;
-- evaluation history persistence;
-- production feedback ingestion;
-- a full annotation platform;
-- evaluation dashboards beyond standalone classification, multi-domain release gates, and grounded recommendation evaluation.
-
-## Intentionally deferred capabilities
-
-The following capabilities remain deferred to preserve architectural focus and avoid speculative abstractions:
-
-- authentication and authorization;
-- authenticated tenant isolation;
-- manual AgentRun retry and cancellation;
-- lease revocation and worker administration;
-- global AgentRun listing, status filtering, and pagination across runs;
-- WebSockets and Server-Sent Events;
-- frontend monitoring applications;
-- Redis, Celery, Kafka, and SQS;
-- provider-backed canonical classification comparison;
-- holdout evaluation after prompt freeze;
-- human review of provider evidence;
-- separate runtime prompt adoption;
-- production rollout monitoring;
-- scheduled or online evaluation;
-- evaluation history persistence;
-- cross-provider fallback and automatic model routing;
-- Anthropic provider;
-- operational cost reporting and invoice reconciliation;
-- automated and high-volume document ingestion;
-- automatic indexing scheduling;
-- automatic version activation;
-- reranking;
-- multi-profile score fusion;
-- write-capable tools beyond the current grant-gated escalation path;
-- opt-in live Langfuse smoke validation;
-- Phoenix integration;
-- Langfuse evaluation workflows and Langfuse datasets or experiments;
-- a real canonical external RAGAS baseline;
-- production feedback ingestion;
-- evaluation dashboards beyond standalone classification, multi-domain release gates, and grounded recommendation evaluation;
-- a full annotation platform;
-- OpenTelemetry;
-- Prometheus and Grafana;
-- frontend applications;
-- cloud deployment;
-- infrastructure as code;
-- Kubernetes.
-
-Workspace scoping establishes data ownership. It is not authentication or authorization, and it does not establish caller identity or secure multi-tenancy.
-
-Durable AgentRun scheduling and the PostgreSQL worker are implemented. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope for this phase. An external queue or outbox is not required for the current worker model.
-
-The application-owned LLM Gateway, durable ticket-classification workflow, controlled-support-v1 workflow, human-approved workflow with approval and escalation APIs, classification inspection, controlled support inspection, repository-owned offline classification evaluation with standalone release gates, classification prompt iteration with static paired comparison and an inconclusive decision, multi-domain deterministic regression for semantic retrieval, controlled support, and human approval, repository-level scoring through `supportops-evaluate-regression score`, grounded recommendation evaluation with deterministic complementary metrics and an explicit external RAGAS boundary, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the optional application-owned AI observability foundation with provider, embedding, retrieval, indexing, AgentRun, workflow, tool, approval, escalation, and recommendation instrumentation are implemented. Provider-backed canonical classification comparison, separate runtime prompt adoption, scheduled evaluation, evaluation history persistence, cross-provider fallback, operational cost reporting, a real canonical external RAGAS baseline, and Langfuse evaluation workflows remain intentionally deferred.
-
-The architecture keeps room for these capabilities without introducing dependencies or abstractions before they have concrete responsibilities.
-
-## Documentation
-
-- [Architecture overview](docs/architecture/overview.md)
+- [Overview](docs/architecture/overview.md)
 - [Runtime topology](docs/architecture/runtime-topology.md)
-- [Transactional AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
-- [Controlled support workflow](docs/architecture/controlled-support-workflow.md)
-- [Application-owned LLM Gateway](docs/architecture/llm-gateway.md)
-- [Durable ticket classification](docs/architecture/ticket-classification.md)
-- [Classification inspection and evaluation](docs/architecture/classification-evaluation.md)
-- [Evaluation and regression architecture](docs/architecture/evaluation-and-regression.md)
-- [Versioned knowledge documents](docs/architecture/knowledge-documents.md)
-- [Knowledge indexing pipeline](docs/architecture/knowledge-indexing.md)
+- [Workspace data boundary](docs/architecture/workspace-data-boundary.md)
+
+### Reliability
+
+- [AgentRun scheduling](docs/architecture/agent-run-scheduling.md)
+- [ADR 0002 — PostgreSQL as source of truth](docs/decisions/0002-use-postgresql-as-the-source-of-truth.md)
+- [ADR 0004 — PostgreSQL-backed worker](docs/decisions/0004-use-a-postgresql-backed-worker-model.md)
+
+### AI and retrieval
+
+- [LLM Gateway](docs/architecture/llm-gateway.md)
+- [Ticket classification](docs/architecture/ticket-classification.md)
+- [Knowledge documents](docs/architecture/knowledge-documents.md)
+- [Knowledge indexing](docs/architecture/knowledge-indexing.md)
 - [Semantic knowledge retrieval](docs/architecture/semantic-knowledge-retrieval.md)
-- [Workspace-scoped data ownership](docs/architecture/workspace-data-boundary.md)
-- [Architecture decision records](docs/decisions)
+
+### Orchestration and approval
+
+- [Controlled support workflow](docs/architecture/controlled-support-workflow.md)
+- [Human-approved workflow](docs/architecture/human-approved-workflow.md)
+- [Approval workflow API](docs/development/approval-workflow-api.md)
+- [ADR 0010 — AgentRun vs LangGraph durability](docs/decisions/0010-separate-agent-run-and-langgraph-durability.md)
+- [ADR 0012 — Application-owned approvals](docs/decisions/0012-use-application-owned-approval-records-with-langgraph-interrupts.md)
+
+### Observability
+
+- [ADR 0005 — Observability adapter](docs/decisions/0005-keep-ai-observability-behind-an-adapter.md)
+- [ADR 0013 — Optional Langfuse](docs/decisions/0013-use-optional-application-owned-langfuse-observability.md)
+
+### Evaluation
+
+- [Evaluation and regression](docs/architecture/evaluation-and-regression.md)
+- [Classification evaluation](docs/architecture/classification-evaluation.md)
+- [Ticket classification eval artifacts](evals/ticket-classification/README.md)
+- [Grounded recommendation eval artifacts](evals/grounded-recommendations/README.md)
+- [ADR 0014 — Evidence-driven prompt promotion](docs/decisions/0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md)
+
+### Development
+
 - [Local setup](docs/development/local-setup.md)
 - [API examples](docs/development/api-examples.md)
 - [Environment variables](docs/development/environment-variables.md)
-- [Testing strategy](docs/development/testing.md)
+- [Testing](docs/development/testing.md)
+
+### ADRs
+
+- [0001 Modular monolith](docs/decisions/0001-use-a-modular-monolith.md)
+- [0003 Qdrant as rebuildable index](docs/decisions/0003-use-qdrant-as-a-rebuildable-retrieval-index.md)
+- [0006 Workspace-scoped data ownership](docs/decisions/0006-establish-workspace-scoped-data-ownership.md)
+- [0007 Application-owned LLM Gateway](docs/decisions/0007-use-an-application-owned-llm-gateway.md)
+- [0008 Explicit profiled knowledge indexing](docs/decisions/0008-use-explicit-profiled-knowledge-indexing.md)
+- [0009 Hydrate retrieval from PostgreSQL](docs/decisions/0009-hydrate-retrieval-evidence-from-postgresql.md)
+- [0011 Framework-owned checkpoint schema](docs/decisions/0011-treat-langgraph-checkpoints-as-framework-owned-schema.md)
+
+## Intentional scope boundaries
+
+These are deliberate architectural boundaries for the repository's defined focus:
+
+- Authentication and authorization
+- Secure public multi-tenant identity
+- Frontend applications
+- Cloud deployment and infrastructure as code
+- Real Jira, ServiceNow, Slack, or email writes
+- Scheduled or online evaluation
+- Production feedback ingestion
+- Canonical paid-provider prompt benchmark
+- Runtime adoption of prompt version 2
+- External RAGAS baseline as canonical evidence
+- Langfuse datasets and experiments
+- Redis, Celery, Kafka, or SQS
+- General OpenTelemetry and metrics stack
+- Cross-provider fallback
+
+Workspace scoping demonstrates data-ownership boundaries. It is not secure authenticated public multi-tenancy.
+
+## Project status
+
+The defined backend and AI systems scope is feature-complete. Documentation and release-readiness work is in progress on the current branch. Prompt version 1 remains runtime-adopted. Prompt version 2 remains non-adopted. The repository does not claim production deployment maturity or a stable public 1.0 API.
 
 ## License
 
