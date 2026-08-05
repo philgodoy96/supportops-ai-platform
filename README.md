@@ -173,16 +173,9 @@ Full setup, troubleshooting, and indexing details: [Local setup](docs/developmen
 
 ## End-to-end demonstration
 
-A dedicated demonstration walkthrough will be added in a later documentation commit. Until then, use [Local setup](docs/development/local-setup.md) and [API examples](docs/development/api-examples.md) to:
+The [end-to-end demonstration](docs/development/portfolio-demo.md) runs a synthetic support scenario with mock providers, durable ticket processing, knowledge indexing, retrieval, AgentRun inspection, and deterministic evaluation.
 
-- create a workspace;
-- create and index a synthetic runbook;
-- activate a document version;
-- create a synthetic support ticket;
-- inspect AgentRun processing;
-- inspect classification, retrieval, tool calls, approval, escalation, recommendation, and evaluation evidence.
-
-Approval and escalation HTTP contracts: [Approval workflow API](docs/development/approval-workflow-api.md).
+The walkthrough keeps sensitive approval behavior explicit: the default controlled workflow does not fabricate an approval request, while the document shows how to inspect approval boundaries and verify them through deterministic tests.
 
 ## Repository map
 
