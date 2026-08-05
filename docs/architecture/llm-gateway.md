@@ -40,12 +40,20 @@ The current gateway and classification integration provide:
 - durable `LLMInvocation` persistence;
 - durable accepted `TicketClassification` persistence.
 
-The current delivery does not yet:
+Current platform boundaries around the gateway:
 
-- expose classification inspection APIs;
-- execute real-model evaluation datasets;
-- introduce prompt version 2;
-- provide cross-provider fallback or automatic model routing.
+- classification inspection APIs are implemented outside the Gateway runtime
+  boundary;
+- offline evaluation supports deterministic static scoring and explicitly gated
+  OpenAI execution;
+- immutable `ticket-classification` prompt versions 1 and 2 are registered;
+- prompt version 1 remains the runtime selection;
+- prompt version 2 remains an evaluated but non-adopted candidate;
+- cross-provider fallback and automatic model routing remain intentionally
+  deferred.
+
+An available OpenAI evaluation path does not imply that paid or provider-backed
+comparison evidence has been executed.
 
 ## Architectural boundary
 
@@ -94,7 +102,12 @@ src/supportops/ai/
 ├── prompts/
 │   ├── definitions.py
 │   ├── registry.py
-│   └── ticket_classification_v1.py
+│   ├── ticket_classification_v1.py
+│   ├── ticket_classification_v2.py
+│   ├── support_recommendation_v1.py
+│   ├── support_tool_decision_v1.py
+│   ├── human_approved_support_decision_v1.py
+│   └── human_approved_support_recommendation_v1.py
 ├── providers/
 │   ├── mock.py
 │   └── openai.py
@@ -261,15 +274,19 @@ through its own Pydantic model.
 
 ## Prompt identity and versioning
 
-The initial prompt is:
+Registered immutable `ticket-classification` prompt definitions:
 
 ```text
 prompt_id = ticket-classification
-version = 1
+versions = 1 and 2
 output_schema_id = ticket-classification-v1
 ```
 
-Prompt definitions are immutable repository artifacts.
+Both versions use the same application-owned structured-output schema.
+Prompt versioning is independent from schema versioning.
+
+Prompt definitions are immutable repository artifacts. Git remains the prompt
+source of truth.
 
 Each definition contains:
 
@@ -299,6 +316,18 @@ Ticket content does not participate in the prompt definition hash. Different
 tickets therefore preserve the same prompt provenance when the same prompt
 version is selected.
 
+Prompt version 2 was created as an evaluation candidate from documented failure
+analysis. Evaluation registration does not change runtime selection. Runtime
+classification remains pinned to prompt version 1.
+
+Prompt version 2 is registered for explicit offline evaluation. Static paired
+fixtures and decision artifacts exercise comparison and governance behavior.
+The committed decision outcome is `inconclusive`, with
+`approved_for_runtime_adoption` set to `false`. Provider-backed and
+human-reviewed adoption evidence remains intentionally deferred. Detailed
+comparison and decision semantics are documented in
+[`classification-evaluation.md`](classification-evaluation.md).
+
 ### Untrusted ticket data
 
 The prompt separates trusted instructions from rendered ticket data.
@@ -316,9 +345,6 @@ The instructions state that ticket content:
 - cannot request tools;
 - cannot change workflow behavior;
 - cannot request hidden reasoning.
-
-Prompt version 2 is intentionally absent. A new version requires evaluation
-evidence that justifies a behavioral change.
 
 ## Provider implementations
 
@@ -688,10 +714,18 @@ SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION=ticket-classification-v1
 ```
 
 `SUPPORTOPS_TICKET_PROCESSING_WORKFLOW_VERSION` controls workflow version
-assignment for newly scheduled AgentRuns. Provider and model settings control
-worker runtime composition. The worker always composes the versioned executor
-registry; executor selection is not a worker-executor deployment variable. The
-API validates shared settings but does not initialize the LLM provider.
+assignment for newly scheduled AgentRuns. When set to
+`ticket-classification-v1`, runtime continues to select the version 1
+classification executor and therefore prompt version 1.
+
+Provider and model settings control worker runtime composition. The worker
+always composes the versioned executor registry; executor selection is not a
+worker-executor deployment variable. The API validates shared settings but does
+not initialize the LLM provider.
+
+Offline evaluation can explicitly select `ticket-classification` prompt
+versions 1 or 2. Evaluation selection does not mutate runtime configuration,
+and evaluation artifacts do not implicitly promote a candidate prompt.
 
 The OpenAI API key:
 
@@ -820,33 +854,39 @@ gap.
 
 ## Intentional scope boundaries
 
-The gateway foundation does not include:
+The LLM Gateway does not own the business lifecycle or authority for
+capabilities implemented behind separate application boundaries, including:
 
-- cross-provider fallback;
-- automatic model switching;
-- model routing;
-- Anthropic;
 - embeddings;
 - retrieval;
 - Qdrant operations;
 - RAG;
-- reranking;
 - LangGraph;
 - tools;
 - human approval;
 - Langfuse;
-- RAGAS;
-- prompt version 2;
+- RAGAS.
+
+`ticket-classification` prompt version 2 exists in the evaluation plane and is
+not runtime-adopted. The Gateway registers and renders immutable prompt
+definitions; it does not decide prompt adoption.
+
+Capabilities intentionally deferred across the platform include:
+
+- cross-provider fallback;
+- automatic model switching;
+- automatic model routing;
+- Anthropic;
+- reranking;
 - automatic prompt optimization;
 - streaming;
-- frontend behavior.
+- frontend behavior;
+- canonical provider-backed prompt adoption evidence;
+- human-reviewed runtime adoption of prompt version 2.
 
-Cross-provider fallback is intentionally deferred until baseline provider
-behavior, failure semantics, cost accounting, and schema compatibility are
-observable through the durable workflow.
-
-Prompt version 2 is intentionally deferred until evaluation evidence identifies
-a concrete regression or improvement opportunity.
+Cross-provider fallback remains deferred until baseline provider behavior,
+failure semantics, cost accounting, and schema compatibility are observable
+through the durable workflow.
 
 ## Related decisions
 
@@ -857,5 +897,7 @@ a concrete regression or improvement opportunity.
 ## Related architecture
 
 - [`ticket-classification.md`](ticket-classification.md)
+- [`classification-evaluation.md`](classification-evaluation.md)
+- [`evaluation-and-regression.md`](evaluation-and-regression.md)
 - [`agent-run-scheduling.md`](agent-run-scheduling.md)
 - [`runtime-topology.md`](runtime-topology.md)

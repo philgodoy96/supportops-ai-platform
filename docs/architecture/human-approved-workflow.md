@@ -341,7 +341,7 @@ The corpus contains 14 deterministic regression cases. Scoring consumes typed st
 
 Scoring uses static outcomes and does not mutate approvals, checkpoints, or sensitive tools. It performs no live approval services, API execution, or sensitive tool execution.
 
-Repository regression aggregation and release-gate profile `human-approval-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md).
+Repository regression aggregation and release-gate profile `human-approval-release-gates / 1` are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Classification prompt evaluation and adoption boundaries are documented in [`classification-evaluation.md`](classification-evaluation.md).
 
 ## Intentional Scope Boundaries
 
@@ -353,10 +353,19 @@ This workflow does not include:
 - manual LangGraph resume endpoints;
 - external side-effect tools;
 - notifications;
-- mutable ticket escalation state;
-- prompt version 2;
-- grounded recommendation model-based evaluation;
-- RAGAS.
+- mutable ticket escalation state.
+
+`ticket-classification` prompt version 2 exists in the offline evaluation plane.
+It does not create a new version of the human-approved workflow, and it does
+not change `human-approved-support-v1`, `controlled-support-v1`, or approval,
+interruption, resume, grant, escalation, or recommendation semantics. Runtime
+classification remains pinned to prompt version 1.
+
+Grounded recommendation evaluation and RAGAS integration exist behind the
+repository-owned offline evaluation boundary. Neither capability is owned or
+executed by the human-approved workflow itself. External paid-provider
+evaluation remains optional and explicitly gated. Approval regression remains
+deterministic, static, and no-network.
 
 Grant inspection intentionally remains internal. Manual resume endpoints remain unavailable to preserve worker ownership. Frontend operator workflows can be introduced without changing domain transitions. Authentication and RBAC remain separate from workflow continuity and grant authorization.
 
