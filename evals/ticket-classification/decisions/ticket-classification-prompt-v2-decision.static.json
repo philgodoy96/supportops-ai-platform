@@ -1,0 +1,37 @@
+{
+    "baseline_prompt_content_hash": "3c9107f8685232da86442e63a551cd991d0d8fc174f480a6b0c8ead3afc85da2",
+    "baseline_prompt_id": "ticket-classification",
+    "baseline_prompt_version": 1,
+    "blocking_reasons": [],
+    "candidate_prompt_content_hash": "af9ebb855fbdfd340b9377f19e3e3bad1a9ff853af5747de9ca66edca884e3f0",
+    "candidate_prompt_id": "ticket-classification",
+    "candidate_prompt_version": 2,
+    "comparison_content_hash": "76fe66f942c2c5c12778771c2ec2f1a48edc24f7598fda0c29bd6fd76b0d6f82",
+    "comparison_id": "ticket-classification-prompt-v1-v2",
+    "comparison_version": 1,
+    "decision_content_hash": "69df2e12af3700261e5b3dcbbb2ecc5491807786db6ce9ee8f7384b146631d40",
+    "decision_id": "ticket-classification-prompt-v2-adoption",
+    "decision_version": 1,
+    "evidence_kind": "static_fixture",
+    "outcome": "inconclusive",
+    "review": {
+      "approved_for_runtime_adoption": false,
+      "decision_rationale": "Static fixtures demonstrate deterministic comparison and decision behavior but do not provide provider-backed quality or efficiency evidence for runtime adoption.",
+      "evidence_references": [
+        "evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json",
+        "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl",
+        "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl",
+        "evals/ticket-classification/comparisons/ticket-classification-prompt-v1-v2.static.json"
+      ],
+      "known_trade_offs": [
+        "Static predictions are synthetic contract evidence.",
+        "Mean token and cost comparisons remain incomplete.",
+        "The runtime remains pinned to ticket-classification prompt version 1."
+      ],
+      "reviewed_at": null,
+      "reviewer_id": null
+    },
+    "run_status": "incomplete",
+    "schema_version": "ticket-classification-prompt-decision-v1",
+    "separate_runtime_adoption_required": true
+  }
