@@ -105,6 +105,37 @@ jobs:
       - name: Aggregate grounded recommendation static RAGAS scores
         run: uv run supportops-evaluate-grounded-recommendations score --ragas-scores evals/grounded-recommendations/ragas-scores/grounded-recommendations-eval-v1.static.jsonl
 
+      - name: Validate classification prompt failure analysis
+        run: >-
+          uv run supportops-evaluate-classification analyze
+          --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl"
+          --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json"
+          --analysis "evals/ticket-classification/analyses/classification-prompt-v1-failure-analysis.json"
+
+      - name: Compare classification prompt versions
+        run: |
+          mkdir -p "artifacts/evaluation/ticket-classification/ci-prompt-iteration"
+
+          uv run supportops-evaluate-classification compare \
+            --dataset "evals/ticket-classification/datasets/ticket-classification-eval-v1.jsonl" \
+            --split-manifest "evals/ticket-classification/splits/ticket-classification-eval-v1-splits-v1.json" \
+            --baseline-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v1.static.jsonl" \
+            --candidate-predictions "evals/ticket-classification/predictions/ticket-classification-eval-v1.prompt-v2.static.jsonl" \
+            --evidence-kind "static_fixture" \
+            --capture-timestamp "2026-08-05T18:00:00Z" \
+            --git-commit "${GITHUB_SHA}" \
+            --output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/comparison.json" \
+            --baseline-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/baseline-manifest.json" \
+            --candidate-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/candidate-manifest.json" \
+            --pair-manifest-output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/pair-manifest.json"
+
+      - name: Validate classification prompt decision
+        run: >-
+          uv run supportops-evaluate-classification decide
+          --comparison "artifacts/evaluation/ticket-classification/ci-prompt-iteration/comparison.json"
+          --decision-template "evals/ticket-classification/decisions/ticket-classification-prompt-v2-decision.static.json"
+          --output "artifacts/evaluation/ticket-classification/ci-prompt-iteration/decision.json"
+
       - name: Run unit tests
         run: uv run pytest -m "not integration"
 
