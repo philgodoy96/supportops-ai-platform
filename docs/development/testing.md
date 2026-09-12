@@ -453,14 +453,15 @@ Default tests use mock embeddings and make no OpenAI network calls.
 ## AI observability tests
 
 Slice 7 includes provider, embedding, retrieval, indexing, and durable
-workflow observability coverage. Grounded recommendation evaluation with
+workflow observability coverage. Context-grounded recommendation evaluation with
 deterministic complementary metrics, static RAGAS score artifacts, offline
-aggregation, and an explicit external RAGAS boundary is implemented separately
-from observability. Classification prompt iteration with static paired
+aggregation, and an explicit optional external RAGAS boundary is implemented
+separately from observability. Classification prompt iteration with static paired
 comparison and an inconclusive decision is implemented. Provider-backed
 canonical comparison and separate runtime prompt adoption remain later
 follow-up work beyond the repository-owned classification, multi-domain
-deterministic regression, and grounded recommendation evaluation foundation.
+deterministic regression, and context-grounded recommendation evaluation
+foundation.
 
 ### Provider, embedding, retrieval, and indexing coverage
 
@@ -1225,11 +1226,13 @@ uv run pytest `
   -q
 ```
 
-## Grounded recommendation evaluation
+## Context-grounded recommendation evaluation
 
-Grounded recommendation evaluation uses committed synthetic fixtures and the
+Context-grounded recommendation evaluation uses committed synthetic fixtures and the
 `supportops-evaluate-grounded-recommendations` CLI. Offline commands perform no
-network access and do not require secrets or runtime services.
+network access and do not require secrets or runtime services. Optional external
+RAGAS scoring is an acknowledged manual path and is not continuous production
+evaluation.
 
 Focused unit coverage:
 
@@ -1680,7 +1683,8 @@ Later implementation phases are expected to add tests for:
 - production feedback ingestion;
 - a full annotation platform;
 - evaluation dashboards beyond standalone classification, multi-domain
-  release gates, and grounded recommendation evaluation;
+  release gates, and context-grounded recommendation evaluation;
+- continuous production runtime evaluation;
 - idempotent side effects for future write-capable executors and tools.
 
 Authentication remains an intentional scope boundary for the current suite.
@@ -1695,6 +1699,6 @@ workflow coverage, repository-owned offline classification evaluation with
 contracts, split manifests, explicit prompt-version selection, standalone
 release gates, failure analysis, static paired comparison, and decision
 rebuilds, multi-domain deterministic regression for semantic retrieval,
-controlled support, and human approval, and grounded recommendation evaluation
+controlled support, and human approval, and context-grounded recommendation evaluation
 with offline validation, deterministic complementary metrics, static RAGAS score
 aggregation, and fake-backed adapter tests are part of the current suite.

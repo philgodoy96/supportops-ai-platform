@@ -17,6 +17,22 @@ The repository owns the artifacts required to reproduce evaluation decisions:
 
 PostgreSQL remains authoritative for runtime business records. Langfuse remains an optional observability projection. Evaluation artifacts remain repository-owned and reproducible without external observability services.
 
+## Terminology
+
+Use these distinctions consistently:
+
+| Term | Meaning in this repository |
+| --- | --- |
+| Synthetic / fixture-based evaluation | Committed Git-owned datasets and static prediction artifacts |
+| Offline evaluation | Deterministic scoring with no network, no live providers, and no production traffic |
+| Release gate | Explicit promotion or blocking decision informed by evaluation artifacts |
+| Optional external RAGAS scoring | Opt-in OpenAI-backed RAGAS runs over existing predictions; writes under `artifacts/` |
+| Production runtime evaluation | Continuous scoring of live production traffic — **not implemented** |
+
+Preferred summary when all verified pieces are present: **offline evaluation with deterministic release gates and optional external RAGAS scoring**.
+
+Do not describe the current system as continuous RAGAS evaluation, production evaluation, or RAGAS-backed release gating. Release gates consume deterministic fixture scoring (and may aggregate static RAGAS score fixtures offline). Live RAGAS is never required for a release decision.
+
 ## Current Scope
 
 The current evaluation foundation provides:
@@ -37,11 +53,11 @@ The current evaluation foundation provides:
 - deterministic controlled-support regression;
 - deterministic human-approval regression;
 - repository-level deterministic regression scoring through `supportops-evaluate-regression score`;
-- grounded recommendation evaluation with a committed synthetic dataset and static predictions;
-- deterministic complementary grounded recommendation metrics;
-- normalized static RAGAS score artifacts and offline RAGAS aggregation;
-- an evaluation-only RAGAS dependency boundary and explicit external RAGAS runner;
-- a committed human qualitative review rubric for grounded recommendations;
+- context-grounded recommendation evaluation with a committed synthetic dataset and static predictions;
+- deterministic complementary recommendation metrics (offline, fixture-based);
+- normalized static RAGAS score artifacts and offline aggregation of those fixtures;
+- an evaluation-only RAGAS dependency boundary and explicit optional external RAGAS runner;
+- a committed human qualitative review rubric for recommendation grounding review;
 - development-only classification failure analysis;
 - immutable ticket-classification prompt version 2 registered for evaluation;
 - static paired v1/v2 prediction fixtures;
@@ -51,9 +67,11 @@ The current evaluation foundation provides:
 
 Within the committed synthetic regression corpus, the multi-domain regression command scores committed static fixtures. It does not execute live embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse.
 
-Grounded recommendation offline validation and scoring likewise consume committed fixtures without network access. External RAGAS execution is opt-in, evaluates existing predictions only, and writes generated evidence under `artifacts/`.
+Context-grounded recommendation offline validation and scoring likewise consume committed fixtures without network access. Optional external RAGAS execution is opt-in, evaluates existing predictions only, and writes generated evidence under `artifacts/`. CI may aggregate the committed static RAGAS score fixture offline; that is not a live RAGAS run and is not continuous production evaluation.
 
 Classification prompt iteration uses repository-owned static fixtures for contract, comparison, gate, and decision-path validation. Static evidence remains inconclusive for runtime adoption. Provider-backed canonical comparison and runtime prompt adoption remain later governed milestones.
+
+Release decisions are informed or enforced by evaluation artifacts. Evaluation evidence may refuse to promote a new prompt, model, or retrieval version when evidence is insufficient or regresses. That is distinct from production behavior being automatically corrected by RAGAS.
 
 The following capabilities remain outside the current foundation and are introduced in later evaluation milestones:
 
@@ -61,7 +79,8 @@ The following capabilities remain outside the current foundation and are introdu
 - provider-backed canonical v1/v2 classification comparison;
 - holdout evaluation after prompt freeze;
 - human review of provider evidence with runtime adoption approval;
-- separate runtime prompt adoption and production rollout monitoring.
+- separate runtime prompt adoption and production rollout monitoring;
+- continuous production runtime evaluation.
 
 ## Evaluation Ownership
 
@@ -148,7 +167,7 @@ Grounded recommendation evaluation owns a separate committed corpus under:
 evals/grounded-recommendations/
 ```
 
-That domain is documented in the grounded recommendation section below and is not part of `supportops-evaluate-regression score`.
+That domain is documented in the context-grounded recommendation evaluation section below and is not part of `supportops-evaluate-regression score`.
 
 ## Development, Holdout, and Safety Gates
 
@@ -539,25 +558,27 @@ Exit semantics:
 
 The command performs no network calls, requires no secrets or runtime services, and writes optional output atomically. Normal CI explicitly runs `supportops-evaluate-regression score`.
 
-## Grounded Recommendation Evaluation
+## Context-Grounded Recommendation Evaluation
 
-Grounded recommendation evaluation measures drafted recommendation quality against a committed synthetic corpus without changing runtime workflow execution.
+Context-grounded recommendation evaluation measures drafted recommendation quality against a committed synthetic corpus without changing runtime workflow execution. Runtime recommendation generation remains context-grounded with retrieval-provenance citations; evaluation fixtures may exercise stronger-looking citation and sufficiency fields for offline scoring only.
 
 The evaluation plane separates four concerns:
 
 ```text
 runtime recommendation generation
-→ worker-owned controlled support drafting and persistence
+→ worker-owned context-grounded drafting and retrieval-provenance citation persistence
 
 deterministic offline evaluation
-→ committed dataset and static predictions scored without network access
+→ committed synthetic dataset and static predictions scored without network access
 
-external model-based evaluation
-→ explicit RAGAS runs over existing predictions
+optional external model-based evaluation
+→ explicit RAGAS runs over existing predictions (not CI, not a release authority)
 
 human qualitative review
 → committed rubric and lightweight review protocol
 ```
+
+There is no grounded-recommendation release-gate profile. Deterministic complementary metrics and optional RAGAS evidence do not authorize runtime prompt or workflow adoption by themselves.
 
 ### Evaluation-only dependency
 
@@ -775,7 +796,7 @@ For version 1, all 14 cases are reviewed, notes are required for scores at or be
 
 ### RAGAS limitations
 
-RAGAS scores are probabilistic evaluation evidence. They are not absolute truth, not statistically representative of production traffic, and do not replace deterministic safety gates. Model choice can affect scores. Same-model evaluation can introduce bias. External provider behavior can drift. Failures and not-applicable metrics must remain visible. No automatic release or prompt promotion decision is made.
+Optional external RAGAS scores are probabilistic evaluation evidence. They are not absolute truth, not statistically representative of production traffic, and do not replace deterministic safety gates. Model choice can affect scores. Same-model evaluation can introduce bias. External provider behavior can drift. Failures and not-applicable metrics must remain visible. No automatic release or prompt promotion decision is made. Offline aggregation of static RAGAS fixtures is contract evidence, not a live RAGAS release gate, and not continuous production evaluation.
 
 ### Domain artifact documentation
 
