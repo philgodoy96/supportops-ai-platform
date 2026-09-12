@@ -1,8 +1,8 @@
-# Grounded Recommendation Evaluation
+# Context-Grounded Recommendation Evaluation
 
-This directory contains repository-owned evaluation artifacts for grounded support recommendations.
+This directory contains repository-owned evaluation artifacts for context-grounded support recommendations.
 
-Evaluation remains separate from runtime recommendation generation. Committed fixtures support offline validation and deterministic scoring without PostgreSQL, Qdrant, LangGraph, embeddings, or paid providers. External RAGAS execution is an explicit opt-in operation that evaluates existing predictions and writes generated evidence under `artifacts/`.
+Evaluation remains separate from runtime recommendation generation. Runtime recommendations are context-grounded and persist retrieval-provenance citations; they do not perform deterministic claim-level provenance validation or semantic entailment checks. Committed fixtures support offline validation and deterministic scoring without PostgreSQL, Qdrant, LangGraph, embeddings, or paid providers. Optional external RAGAS execution is an explicit opt-in operation that evaluates existing predictions and writes generated evidence under `artifacts/`. Fixture prediction envelopes may include fields such as predicted citation chunk IDs or evidence sufficiency that are richer than the runtime recommendation output contract; those fields exist for offline scoring only.
 
 ## Dataset
 
@@ -146,4 +146,4 @@ Canonical committed fixtures are never overwritten by failed external runs. The 
 
 `ragas==0.4.3` is isolated in the `evaluation` dependency group. It is not a runtime dependency. Normal CI may install the group for fake-backed unit tests and offline validation, and never performs paid external evaluation.
 
-A real canonical external baseline is intentionally not committed. Evaluator output never modifies runtime prompts. RAGAS scores are probabilistic evaluation evidence, not absolute truth, and do not replace deterministic safety gates.
+A real canonical external baseline is intentionally not committed. Evaluator output never modifies runtime prompts. Optional external RAGAS scores are probabilistic evaluation evidence, not absolute truth, not continuous production evaluation, and do not replace deterministic safety gates. Offline aggregation of the static RAGAS score fixture is not a live RAGAS release gate.

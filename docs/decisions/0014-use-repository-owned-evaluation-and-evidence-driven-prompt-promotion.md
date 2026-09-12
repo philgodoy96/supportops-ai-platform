@@ -41,7 +41,7 @@ Deterministic evaluation is suitable for normal CI and covers objective behavior
 - cost arithmetic;
 - artifact integrity.
 
-Probabilistic evaluation is manually triggered, provider-dependent, and interpreted alongside deterministic evidence. RAGAS is one evaluation component for grounded recommendation quality. It is not the complete evaluation framework, runtime application boundary, prompt authority, or business-state authority.
+Probabilistic evaluation is manually triggered, provider-dependent, and interpreted alongside deterministic evidence. Optional external RAGAS scoring is one evaluation component for context-grounded recommendation quality. It is not the complete evaluation framework, runtime application boundary, prompt authority, business-state authority, continuous production evaluation, or an automatic release gate.
 
 Paid execution requires explicit acknowledgement. Normal CI remains deterministic and requires no provider credentials.
 
