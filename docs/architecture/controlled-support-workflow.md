@@ -440,18 +440,19 @@ Qdrant is not used as a recovery source. It identifies candidates during executi
 
 ## Recommendation generation
 
-Recommendation drafting uses a versioned application-owned prompt and structured response contract.
+Recommendation drafting is **context-grounded**: a versioned application-owned prompt supplies reconstructed retrieval evidence, classification, terminal analysis, and service-status observations to the model under an explicit untrusted-data boundary.
 
 The recommendation provider call occurs outside database transactions.
 
-The accepted result includes:
+The accepted structured result includes:
 
 - recommended action;
 - response text;
 - human-review requirement;
-- decision summary.
+- decision summary;
+- schema version.
 
-The application validates that recommendation semantics remain compatible with the accepted terminal analysis.
+The model output contract does **not** include citation IDs, candidate chunk selections, evidence spans, or claim-level support annotations. The application validates that recommendation semantics remain compatible with the accepted terminal analysis. It does not perform deterministic claim-level provenance validation or semantic entailment checks against retrieved chunks.
 
 The recommendation invocation persists through the same logical invocation history used by classification and decision calls.
 
@@ -471,7 +472,7 @@ The recommendation stores:
 - provider and model;
 - creation timestamp.
 
-Knowledge-backed recommendations may persist ordered `SupportRecommendationCitation` records containing:
+Knowledge-backed recommendations may persist ordered `SupportRecommendationCitation` records. These are **retrieval-provenance citations**: the application attaches one citation per unique reconstructed knowledge chunk supplied to the recommendation workflow. Each citation stores:
 
 - citation order;
 - retrieval query identity;
@@ -480,9 +481,29 @@ Knowledge-backed recommendations may persist ordered `SupportRecommendationCitat
 - document-version identity;
 - chunk identity.
 
+Citations identify retrieval evidence supplied to the recommendation workflow. This version does not claim deterministic claim-level entailment validation. Persisted citations do not prove that every sentence in `response_text` is supported by a specific span, and they are not model-selected citation placement.
+
 Recommendation and citations persist atomically under the active lease.
 
 A retry first queries for an existing recommendation. Exact recovery attaches the existing identity without another provider call or duplicate recommendation write.
+
+## Recommendation grounding guarantees
+
+Guaranteed by this version:
+
+- reconstructed retrieved context is supplied to recommendation generation when knowledge-search tools succeeded;
+- recommendation and retrieval-provenance citations are durably persisted under lease fencing;
+- citation identity, ordinal, uniqueness, and ownership invariants are validated at persistence;
+- workflow state survives process loss according to existing AgentRun and checkpoint durability semantics.
+
+Not implied:
+
+- semantic entailment between recommendation claims and cited chunks;
+- deterministic claim-level provenance validation or evidence-span verification;
+- model selection of a citation subset;
+- faithfulness or factual-correctness guarantees beyond prompt instructions and schema validation.
+
+Proof points: `ControlledSupportRecommendationExecutor` in `src/supportops/agent_graph/application/recommendation_execution.py`, observation reconstruction in `src/supportops/agent_graph/application/tool_observations.py`, `SupportRecommendationResult` in `src/supportops/modules/support_recommendations/application/schemas.py`, and citation persistence in `src/supportops/modules/support_recommendations/`.
 
 ## Failure model
 
@@ -574,7 +595,7 @@ The response may include:
 - persisted token usage;
 - persisted historical estimated cost;
 - recommendation;
-- ordered citation provenance.
+- ordered retrieval-provenance citations.
 
 Queued, running, retrying, and failed workflows may return valid partial inspection views.
 
@@ -710,22 +731,11 @@ The corpus contains 14 deterministic regression cases. Scoring consumes typed st
 
 Expected failures remain explicit and require exact error codes. Normal CI scores these committed fixtures through `supportops-evaluate-regression score` and does not execute LangGraph, tools, providers, PostgreSQL, Qdrant, or Langfuse for the check.
 
-## External grounded recommendation evaluation
+## External context-grounded recommendation evaluation
 
-Drafted recommendation outputs may be evaluated outside the worker without changing runtime workflow execution.
+Drafted recommendation outputs may be evaluated outside the worker without changing runtime workflow execution. Evaluation fixtures may include fields such as `evidence_sufficient`, predicted citation chunk IDs, and retrieved contexts that are richer than the runtime recommendation output contract. Those fixture fields support offline scoring; they do not imply that the worker model returns citation selections or evidence spans.
 
-The external grounded recommendation runner consumes existing prediction artifacts that already contain structured recommendation fields such as:
-
-```text
-response_text
-recommended_action
-requires_human_review
-evidence_sufficient
-citations
-retrieved contexts
-```
-
-Retrieved contexts for evaluation cases are embedded in the committed grounded recommendation dataset. The runner does not generate recommendations, does not execute LangGraph or tools, and does not mutate runtime prompts. Deterministic complementary metrics and optional offline RAGAS aggregation remain network-free. Acknowledged external RAGAS runs may call an evaluator provider, record system and evaluator model provenance separately, and write generated evidence under `artifacts/`.
+The external recommendation evaluation runner consumes existing prediction artifacts. Retrieved contexts for evaluation cases are embedded in the committed synthetic dataset. The runner does not generate recommendations, does not execute LangGraph or tools, and does not mutate runtime prompts. Deterministic complementary metrics and optional offline aggregation of committed static RAGAS score fixtures remain network-free. Acknowledged optional external RAGAS runs may call an evaluator provider, record system and evaluator model provenance separately, and write generated evidence under `artifacts/`. Optional external RAGAS scoring is not continuous production evaluation and does not gate every release decision.
 
 Domain architecture, commands, artifact layout, and limitations are documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Committed fixtures are summarized in [`../../evals/grounded-recommendations/README.md`](../../evals/grounded-recommendations/README.md).
 
@@ -767,7 +777,7 @@ The Slice 5 workflow intentionally defers:
 
 Human-in-the-loop approval and write-capable actions belong to the next workflow boundary.
 
-Deterministic controlled-support regression already consumes durable provenance contracts through committed static fixtures. Grounded recommendation evaluation evaluates existing recommendation predictions externally and does not change runtime workflow execution. Observability capabilities continue to remain separate from evaluation ownership.
+Deterministic controlled-support regression already consumes durable provenance contracts through committed static fixtures. Context-grounded recommendation evaluation evaluates existing recommendation predictions externally and does not change runtime workflow execution. Observability capabilities continue to remain separate from evaluation ownership.
 
 ## Related documentation
 

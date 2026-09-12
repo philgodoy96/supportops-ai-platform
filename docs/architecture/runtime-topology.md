@@ -345,7 +345,7 @@ When an AgentRun is scheduled as `ticket-processing` / `human-approved-support-v
 7. the resume planner validates the LangGraph checkpoint against PostgreSQL ownership and proposal state;
 8. the graph resumes on the same thread identity;
 9. on the approved path, sensitive execution creates a `SensitiveExecutionGrant` and immutable `TicketEscalation` inside one short application transaction;
-10. the graph persists the grounded recommendation and the processor completes the AgentRun.
+10. the graph persists the context-grounded recommendation with retrieval-provenance citations and the processor completes the AgentRun.
 
 Rejected and expired decisions produce no grant, no escalation, and no sensitive execution. Pending approvals cannot resume execution.
 

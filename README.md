@@ -15,7 +15,7 @@ flowchart LR
   LG --> GW[LLM Gateway]
   LG --> Tools[Retrieval and<br/>registered tools]
   LG --> Approval[Durable human<br/>approval]
-  LG --> Rec[Grounded<br/>recommendation]
+  LG --> Rec[Context-grounded<br/>recommendation]
   IndexCLI[Knowledge indexing CLI] --> PG
   IndexCLI --> Embed[Embedding provider]
   Embed --> Qdrant[(Qdrant<br/>rebuildable projection)]
@@ -44,9 +44,9 @@ Authority boundaries:
 7. Registered read-only tools may execute under bounded policy.
 8. Sensitive escalation pauses for durable human approval.
 9. The workflow resumes after approval, rejection, or expiry.
-10. A grounded recommendation with stable citations is persisted.
+10. A context-grounded recommendation with stable retrieval-provenance citations is persisted.
 11. Durable records remain authoritative while Langfuse receives optional telemetry.
-12. Offline evaluation produces reproducible evidence and explicit prompt decisions.
+12. Offline evaluation produces reproducible evidence and explicit release decisions.
 
 The system does not claim autonomous ticket resolution, real external escalation, exactly-once processing, or secure public multi-tenancy.
 
@@ -99,10 +99,11 @@ The system does not claim autonomous ticket resolution, real external escalation
 
 ### Evaluation
 
-- Deterministic regression evaluation
-- Grounded recommendation evaluation with RAGAS integration
+- Synthetic fixture-based offline evaluation
+- Deterministic regression metrics and release gates
+- Context-grounded recommendation evaluation with optional external RAGAS scoring
 - Static paired prompt fixtures
-- Safety-first release decisions
+- Safety-first release decisions informed by evaluation artifacts
 - Explicit separation between evaluation and runtime adoption
 
 ### Engineering workflow
@@ -110,6 +111,26 @@ The system does not claim autonomous ticket resolution, real external escalation
 - Alembic migrations, unit and integration tests
 - Ruff, mypy, Docker, and CI
 - ADRs and architecture documents
+
+## Recommendation grounding and evaluation guarantees
+
+Guaranteed by this version:
+
+- retrieved context is supplied to recommendation generation;
+- recommendation and retrieval-provenance citations are durably persisted;
+- workflow and release-decision state survive process loss according to existing durable semantics;
+- evaluation artifacts can participate in explicit release decisions and may refuse promotion when evidence is insufficient or regresses.
+
+Not implied:
+
+- citations identify retrieval evidence supplied to the recommendation workflow; they do not establish semantic entailment or deterministic claim-level provenance validation;
+- model-selected evidence spans are not returned or deterministically verified;
+- offline evaluation does not prove production correctness;
+- optional external RAGAS scoring is not continuous production evaluation and is not required for every release decision.
+
+Preferred wording for the runtime path: **context-grounded recommendation with stable retrieval-provenance citations**.
+
+Details: [Controlled support workflow](docs/architecture/controlled-support-workflow.md), [Evaluation and regression](docs/architecture/evaluation-and-regression.md).
 
 ## Reliability model
 
@@ -119,7 +140,7 @@ Details: [AgentRun scheduling](docs/architecture/agent-run-scheduling.md), [runt
 
 ## AI safety and control model
 
-LLM calls are mediated by the application-owned Gateway. Prompts are immutable and explicitly versioned. Structured outputs are validated. Tools are registered, bounded, and currently read-only. Sensitive escalation requires durable human approval before grant-gated execution. Static evaluation evidence cannot automatically change runtime behavior; prompt adoption requires a separate explicit decision. No autonomous external write integration is available. The system is a controlled support workflow, not a fully autonomous agent.
+LLM calls are mediated by the application-owned Gateway. Prompts are immutable and explicitly versioned. Structured outputs are validated. Tools are registered, bounded, and currently read-only. Sensitive escalation requires durable human approval before grant-gated execution. Recommendation generation is context-grounded by reconstructed retrieval evidence; persisted citations record retrieval provenance rather than claim-level entailment. Static evaluation evidence cannot automatically change runtime behavior; prompt adoption requires a separate explicit decision. Offline evaluation and optional external RAGAS scoring inform release governance; they do not automatically correct production behavior. No autonomous external write integration is available. The system is a controlled support workflow, not a fully autonomous agent.
 
 ## Evaluation outcome
 
@@ -200,7 +221,7 @@ The walkthrough keeps sensitive approval behavior explicit: the default controll
 │   │   ├── agent_runs/              # Durable outer execution boundary
 │   │   ├── approvals/               # Human approval records and APIs
 │   │   ├── knowledge_documents/     # Immutable document versions
-│   │   ├── support_recommendations/ # Grounded recommendations and citations
+│   │   ├── support_recommendations/ # Context-grounded recommendations and retrieval-provenance citations
 │   │   ├── ticket_classifications/  # Durable classification records
 │   │   ├── tickets/
 │   │   └── workspaces/
@@ -249,7 +270,7 @@ The walkthrough keeps sensitive approval behavior explicit: the default controll
 - [Evaluation and regression](docs/architecture/evaluation-and-regression.md)
 - [Classification evaluation](docs/architecture/classification-evaluation.md)
 - [Ticket classification eval artifacts](evals/ticket-classification/README.md)
-- [Grounded recommendation eval artifacts](evals/grounded-recommendations/README.md)
+- [Context-grounded recommendation eval artifacts](evals/grounded-recommendations/README.md)
 - [ADR 0014 — Evidence-driven prompt promotion](docs/decisions/0014-use-repository-owned-evaluation-and-evidence-driven-prompt-promotion.md)
 
 ### Development

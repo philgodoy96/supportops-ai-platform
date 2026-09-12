@@ -138,7 +138,7 @@ ApprovalRequest.approved
 -> SensitiveExecutionGrant
 -> TicketEscalation
 -> AgentToolCall.succeeded
--> grounded recommendation
+-> context-grounded recommendation
 ```
 
 ### Rejected
@@ -361,7 +361,7 @@ not change `human-approved-support-v1`, `controlled-support-v1`, or approval,
 interruption, resume, grant, escalation, or recommendation semantics. Runtime
 classification remains pinned to prompt version 1.
 
-Grounded recommendation evaluation and RAGAS integration exist behind the
+Context-grounded recommendation evaluation and optional external RAGAS scoring exist behind the
 repository-owned offline evaluation boundary. Neither capability is owned or
 executed by the human-approved workflow itself. External paid-provider
 evaluation remains optional and explicitly gated. Approval regression remains

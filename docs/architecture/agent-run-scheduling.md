@@ -196,8 +196,8 @@ Classification behavior is documented in
 
 The controlled support workflow is the default. It ensures the durable
 classification, runs a bounded decision loop over registered read-only tools,
-persists tool-call audits under lease fencing, drafts a grounded recommendation,
-and persists that recommendation with ordered citations. Provider, embedding,
+persists tool-call audits under lease fencing, drafts a context-grounded recommendation,
+and persists that recommendation with ordered retrieval-provenance citations. Provider, embedding,
 tool, and Qdrant work runs outside database transactions; each durable result is
 written through a short lease-fenced transaction. The graph design is documented
 in [`controlled-support-workflow.md`](controlled-support-workflow.md).
