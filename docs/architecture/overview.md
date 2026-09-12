@@ -17,7 +17,7 @@ Repository-owned evaluation and prompt governance cover:
 - safety-first prompt decision artifacts with outcomes `promoted`, `rejected`, and `inconclusive`;
 - deterministic semantic-retrieval, controlled-support, and human-approval regression over committed static fixtures;
 - repository-level regression aggregation through `supportops-evaluate-regression score`;
-- grounded recommendation evaluation, normalized static RAGAS score artifacts, offline RAGAS aggregation, an evaluation-only RAGAS dependency boundary, an explicit external RAGAS runner, and a committed human review rubric.
+- context-grounded recommendation evaluation, normalized static RAGAS score artifacts, offline aggregation of those fixtures, an evaluation-only RAGAS dependency boundary, an explicit optional external RAGAS runner, and a committed human review rubric.
 
 Prompt `ticket-classification` version 1 remains the runtime default. Version 2 is registered as an immutable evaluation candidate. Committed static paired fixtures exercise comparison, release-gate, and decision semantics; that static evidence produced an `inconclusive` decision with run status `incomplete`, `approved_for_runtime_adoption = false`, and `separate_runtime_adoption_required = true`. Static fixtures cannot authorize runtime adoption, no provider-backed superiority is claimed, and runtime adoption of version 2 requires a separate reviewable decision. Provider-backed canonical comparison evidence, human-reviewed runtime adoption, and production rollout remain intentionally deferred.
 
@@ -89,7 +89,7 @@ evaluation plane
 → repository-owned datasets, splits, static prediction fixtures, paired comparison, prompt decision artifacts, metrics, release gates, repository regression aggregates, grounded recommendation evaluation, and reports
 ```
 
-The evaluation plane separates runtime recommendation generation, deterministic offline evaluation, external model-based evaluation, and human qualitative review. Evaluation remains separate from runtime business authority and from optional observability. Deterministic regression scoring consumes committed static fixtures for semantic retrieval, controlled support, and human approval and does not execute embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse. Grounded recommendation offline validation and scoring likewise consume committed fixtures without network access; external RAGAS runs evaluate existing predictions only after acknowledgement.
+The evaluation plane separates runtime recommendation generation, deterministic offline evaluation, optional external model-based evaluation, and human qualitative review. Evaluation remains separate from runtime business authority and from optional observability. Deterministic regression scoring consumes committed static fixtures for semantic retrieval, controlled support, and human approval and does not execute embeddings, Qdrant, LangGraph, providers, PostgreSQL mutations, approval services, or Langfuse. Context-grounded recommendation offline validation and scoring likewise consume committed fixtures without network access; optional external RAGAS runs evaluate existing predictions only after acknowledgement. Release decisions are informed by evaluation artifacts; production behavior is not automatically corrected by RAGAS. Continuous production runtime evaluation is not implemented.
 
 Prompt governance follows an explicit sequence:
 
@@ -682,10 +682,10 @@ The implemented classification boundary covers:
 - an offline evaluation CLI with explicit prompt-version selection and mock or opt-in OpenAI provider selection;
 - deterministic semantic-retrieval, controlled-support, and human-approval regression over committed static fixtures;
 - repository-level deterministic regression scoring through `supportops-evaluate-regression score`;
-- grounded recommendation evaluation with committed synthetic fixtures, deterministic complementary metrics, static RAGAS score artifacts, offline aggregation, and an explicit external RAGAS runner;
-- a committed human qualitative review rubric for grounded recommendations.
+- context-grounded recommendation evaluation with committed synthetic fixtures, deterministic complementary metrics, static RAGAS score artifacts, offline aggregation, and an explicit optional external RAGAS runner;
+- a committed human qualitative review rubric for recommendation grounding review.
 
-Classification does not mutate Ticket status and cannot execute tools or actions. Inspection exposes accepted classifications and logical invocation provenance through workspace-scoped read-only HTTP routes. Evaluation measures the same prompt and schema boundary offline without writing to PostgreSQL or Qdrant. Multi-domain regression scoring likewise consumes committed static fixtures and does not execute runtime services. Grounded recommendation evaluation consumes existing predictions and does not execute the controlled workflow. Runtime classification remains independently pinned to prompt version 1; evaluation prompt selection does not change the production default. Static paired fixtures exercise comparison, release-gate, and decision semantics but cannot authorize runtime adoption. Standalone and paired release-gate reports cannot authorize prompt promotion. No provider-backed superiority is claimed for prompt version 2. Runtime adoption requires a separate reviewable decision after evaluation evidence and a prompt decision artifact. Evaluation architecture is documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Classification prompt evaluation and governance details are documented in [`classification-evaluation.md`](classification-evaluation.md).
+Classification does not mutate Ticket status and cannot execute tools or actions. Inspection exposes accepted classifications and logical invocation provenance through workspace-scoped read-only HTTP routes. Evaluation measures the same prompt and schema boundary offline without writing to PostgreSQL or Qdrant. Multi-domain regression scoring likewise consumes committed static fixtures and does not execute runtime services. Context-grounded recommendation evaluation consumes existing predictions and does not execute the controlled workflow. Runtime classification remains independently pinned to prompt version 1; evaluation prompt selection does not change the production default. Static paired fixtures exercise comparison, release-gate, and decision semantics but cannot authorize runtime adoption. Standalone and paired release-gate reports cannot authorize prompt promotion. No provider-backed superiority is claimed for prompt version 2. Runtime adoption requires a separate reviewable decision after evaluation evidence and a prompt decision artifact. Evaluation architecture is documented in [`evaluation-and-regression.md`](evaluation-and-regression.md). Classification prompt evaluation and governance details are documented in [`classification-evaluation.md`](classification-evaluation.md).
 
 The controlled support workflow extends that boundary into bounded, evidence-driven analysis through the `controlled-support-v1` worker workflow.
 
@@ -697,8 +697,8 @@ The implemented controlled boundary covers:
 - application-side validation of every tool call before execution;
 - durable `AgentToolCall` audits with bounded safe input and output;
 - observation reconstruction from durable records rather than process memory;
-- grounded recommendation drafting over classification, retrieved evidence, and deterministic service status;
-- durable recommendation and ordered citation persistence;
+- context-grounded recommendation drafting over classification, retrieved evidence, and deterministic service status;
+- durable recommendation and ordered retrieval-provenance citation persistence;
 - workspace-scoped controlled support inspection.
 
 Model selection never grants execution authority. The model cannot select unregistered tools, arbitrary Python functions, or infrastructure adapters, and write-capable safety levels are rejected by the registry. The workflow does not modify tickets, deliver customer responses, mutate external systems, approve sensitive actions, or make authorization decisions.
@@ -998,8 +998,8 @@ The repository foundation establishes durable AgentRun scheduling, the PostgreSQ
 - standalone and paired classification release-gate evaluation;
 - deterministic semantic-retrieval, controlled-support, and human-approval regression;
 - repository-level deterministic regression scoring;
-- grounded recommendation evaluation with deterministic complementary metrics, static RAGAS score artifacts, offline aggregation, and an explicit external RAGAS runner;
-- a committed grounded recommendation human review rubric;
+- context-grounded recommendation evaluation with deterministic complementary metrics, static RAGAS score artifacts, offline aggregation, and an explicit optional external RAGAS runner;
+- a committed context-grounded recommendation human review rubric;
 - opt-in external-provider evaluation;
 - application services and versioned business APIs;
 - workspace-scoped document and immutable version APIs;
@@ -1055,6 +1055,6 @@ The following capabilities remain intentionally deferred:
 - public cloud deployment;
 - infrastructure as code.
 
-Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, workspace-scoped AgentRun, classification, controlled support, approval, and escalation inspection, approval decision commands with worker-owned resume, repository-owned offline classification evaluation with standalone and paired release gates, static paired prompt comparison, safety-first prompt decision artifacts, deterministic semantic-retrieval, controlled-support, and human-approval regression over committed static fixtures, repository-level deterministic regression scoring, grounded recommendation evaluation with deterministic complementary metrics and an explicit external RAGAS boundary, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the controlled support workflow with LangGraph orchestration, read-only tools, and durable recommendations are implemented. Prompt version 1 remains the runtime default. Prompt version 2 remains a non-adopted evaluation candidate after an inconclusive static decision. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope.
+Ticket status remains `open` after intake. Durable AgentRun scheduling, the PostgreSQL worker, the application-owned LLM Gateway, durable ticket classification, workspace-scoped AgentRun, classification, controlled support, approval, and escalation inspection, approval decision commands with worker-owned resume, repository-owned offline classification evaluation with standalone and paired release gates, static paired prompt comparison, safety-first prompt decision artifacts, deterministic semantic-retrieval, controlled-support, and human-approval regression over committed static fixtures, repository-level deterministic regression scoring, context-grounded recommendation evaluation with deterministic complementary metrics and an explicit optional external RAGAS boundary, versioned knowledge documents, explicit profiled knowledge indexing, active-version semantic knowledge retrieval, and the controlled support workflow with LangGraph orchestration, read-only tools, and durable recommendations are implemented. Prompt version 1 remains the runtime default. Prompt version 2 remains a non-adopted evaluation candidate after an inconclusive static decision. Redis, Celery, Kafka, and SQS remain intentionally deferred because PostgreSQL already provides transactional durability and adequate local and portfolio scope.
 
 These capabilities are deferred to preserve clear scope, avoid speculative abstractions, and keep each capability independently reviewable.

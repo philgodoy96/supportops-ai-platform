@@ -327,8 +327,8 @@ Review the available evidence for:
 - durable LLM invocation provenance;
 - retrieved knowledge evidence;
 - tool decisions and tool-call records;
-- grounded recommendation;
-- ordered citations;
+- context-grounded recommendation;
+- ordered retrieval-provenance citations;
 - token and estimated-cost accounting.
 
 The exact contents depend on the configured deterministic provider behavior, but all durable records exposed by the inspection endpoint remain application-owned.
@@ -457,7 +457,7 @@ A reviewer should be able to verify:
 | Worker reliability | AgentRun and attempt records available for inspection |
 | AI invocation | Prompt, provider, model, tokens, and estimated-cost provenance persisted |
 | Orchestration | LangGraph execution contained within the AgentRun boundary |
-| Recommendation | Grounded output with ordered citations |
+| Recommendation | Context-grounded output with ordered retrieval-provenance citations |
 | Approval boundary | No sensitive action is assumed; approval records are durable when created |
 | Observability | Optional telemetry does not replace durable state |
 | Evaluation | Deterministic scoring and static paired comparison are reproducible |
@@ -487,4 +487,4 @@ To remove local container volumes as well, use the repository's documented reset
 - [Human-approved workflow](../architecture/human-approved-workflow.md)
 - [Evaluation and regression](../architecture/evaluation-and-regression.md)
 - [Classification evaluation](../architecture/classification-evaluation.md)
-- [Grounded recommendation evaluation](../architecture/grounded-recommendation-evaluation.md)
+- [Context-grounded recommendation evaluation](../architecture/evaluation-and-regression.md#context-grounded-recommendation-evaluation)

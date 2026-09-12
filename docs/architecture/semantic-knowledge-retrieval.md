@@ -399,7 +399,7 @@ Every evidence item includes a citation containing:
 
 Citations identify the exact authoritative source fragment returned by retrieval.
 
-They are retrieval evidence references. They are not generated-answer citation placement.
+They are retrieval evidence references. They are not generated-answer citation placement, model-selected claim support, or deterministic claim-level entailment validation.
 
 ## API process lifecycle
 
